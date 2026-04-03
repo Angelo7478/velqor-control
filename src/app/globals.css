@@ -1,0 +1,26 @@
+@import "tailwindcss";
+
+@theme {
+  --color-velqor-dark: #0f172a;
+  --color-velqor-primary: #3b82f6;
+  --color-velqor-accent: #10b981;
+  --color-velqor-warning: #f59e0b;
+  --color-velqor-danger: #ef4444;
+
+  --color-division-re: #f97316;
+  --color-division-quant: #8b5cf6;
+  --color-division-ai: #06b6d4;
+  --color-division-eng: #64748b;
+  --color-division-academy: #ec4899;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  background-color: #f8fafc;
+  color: #1e293b;
+}
+
+@utility touch-target {
+  min-height: 44px;
+  min-width: 44px;
+}
