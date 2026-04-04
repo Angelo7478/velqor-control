@@ -42,20 +42,29 @@ export default function ContiConfigPage() {
     if (!editing) return
     setSaving(true)
     setMsg('')
+
+    const timeout = new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error('Timeout — riprova')), 10000)
+    )
+
     try {
       const supabase = createClient()
-      const { error } = await supabase.from('qel_accounts').update({
+      const updatePromise = supabase.from('qel_accounts').update({
         name: form.name,
         server: form.server || null,
         login: form.login || null,
         investor_password: form.investor_password || null,
         status: form.status as QelAccount['status'],
-      }).eq('id', editing)
+      }).eq('id', editing).select()
+
+      const { data, error } = await Promise.race([updatePromise, timeout])
 
       if (error) {
         setMsg(`Errore: ${error.message}`)
+      } else if (!data || data.length === 0) {
+        setMsg('Errore: nessun record aggiornato (controlla permessi)')
       } else {
-        setMsg('Salvato')
+        setMsg('Salvato!')
         setEditing(null)
         await loadAccounts()
       }
