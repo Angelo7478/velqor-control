@@ -4,6 +4,11 @@ import { useEffect, useState, useRef } from 'react'
 import { createClient } from '@/lib/supabase-browser'
 import { QelAccount } from '@/types/database'
 
+// Normalize header/key strings — remove BOM, non-breaking spaces, zero-width chars
+function cleanKey(s: string): string {
+  return s.replace(/[\u00A0\u200B\u200C\u200D\uFEFF\u200E\u200F\r\n]/g, '').trim().toLowerCase().replace(/\s+/g, ' ')
+}
+
 export default function ImportTradePage() {
   const [accounts, setAccounts] = useState<QelAccount[]>([])
   const [selectedAccount, setSelectedAccount] = useState<string>('')
@@ -44,7 +49,7 @@ export default function ImportTradePage() {
 
     const headerRow = bestTable.rows[0]
     if (!headerRow) return []
-    const headers = Array.from(headerRow.cells).map(c => c.textContent?.trim().toLowerCase() || '')
+    const headers = Array.from(headerRow.cells).map(c => cleanKey(c.textContent || ''))
 
     const rows: Record<string, string>[] = []
     for (let i = 1; i < bestTable.rows.length; i++) {
@@ -70,7 +75,7 @@ export default function ImportTradePage() {
     const firstLine = lines[0]
     const sep = firstLine.includes('\t') ? '\t' : firstLine.includes(';') ? ';' : ','
 
-    const headers = lines[0].split(sep).map(h => h.trim().replace(/^["']|["']$/g, '').toLowerCase())
+    const headers = lines[0].split(sep).map(h => cleanKey(h.replace(/^["']|["']$/g, '')))
     const rows: Record<string, string>[] = []
 
     for (let i = 1; i < lines.length; i++) {
@@ -105,7 +110,13 @@ export default function ImportTradePage() {
   }
 
   // Map CSV columns to our trade fields
-  function mapRow(row: Record<string, string>, headers: string[]): Record<string, unknown> | null {
+  function mapRow(rawRow: Record<string, string>, headers: string[]): Record<string, unknown> | null {
+    // Normalize all keys to handle invisible characters (BOM, NBSP, zero-width)
+    const row: Record<string, string> = {}
+    for (const [k, v] of Object.entries(rawRow)) {
+      row[cleanKey(k)] = v
+    }
+
     // FTMO Italian + English + generic column names
     const openTime = row['apri'] || row['open time'] || row['open_time'] || row['opentime'] || row['time'] || row['open date'] || row['data apertura'] || ''
     const closeTime = row['chiudi'] || row['close time'] || row['close_time'] || row['closetime'] || row['close date'] || row['data chiusura'] || ''
@@ -217,10 +228,20 @@ export default function ImportTradePage() {
 
     // Process in batches of 50
     const allHeaders = rows.length > 0 ? Object.keys(rows[0]) : []
+    console.log('=== IMPORT DEBUG ===')
+    console.log('Raw headers:', allHeaders)
+    console.log('Cleaned headers:', allHeaders.map(h => cleanKey(h)))
+    console.log('First row keys (charCodes):', allHeaders.map(h => `"${h}" [${[...h].map(c => c.charCodeAt(0)).join(',')}]`))
+    console.log('First row values:', rows[0])
     const trades: Record<string, unknown>[] = []
     for (const row of rows) {
       const mapped = mapRow(row, allHeaders)
-      if (!mapped) { skipped++; continue }
+      if (!mapped) {
+        const cleaned: Record<string, string> = {}
+        for (const [k, v] of Object.entries(row)) { cleaned[cleanKey(k)] = v }
+        console.log('SKIPPED row - cleaned keys:', Object.keys(cleaned).join(','), '| simbolo:', cleaned['simbolo'], '| apri:', cleaned['apri'])
+        skipped++; continue
+      }
       mapped.account_id = selectedAccount
       if (mapped.magic && stratMap.has(mapped.magic as number)) {
         mapped.strategy_id = stratMap.get(mapped.magic as number)
