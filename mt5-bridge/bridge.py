@@ -288,14 +288,23 @@ def sync_account(account, strategy_map):
             pos["strategy_id"] = strategy_map[pos["magic"]]
         sb_upsert("qel_trades", pos, on_conflict="account_id,ticket")
 
-    # 4. Closed trades — full history on first sync, incremental after
+    # 4. Closed trades — full history on first sync or 0 trades, incremental after
     history_days = getattr(sys.modules[__name__], 'HISTORY_DAYS', 1095)  # default 3 anni
     force_full = getattr(sys.modules[__name__], 'FORCE_FULL_IMPORT', False)
     last_sync = account.get("last_sync_at")
 
-    if force_full or not last_sync:
+    # Check how many trades we have in DB for this account
+    existing_trades = sb_get("qel_trades", {
+        "select": "id",
+        "account_id": f"eq.{acc_id}",
+        "is_open": "eq.false",
+    })
+    trade_count = len(existing_trades) if existing_trades else 0
+
+    # Full import if: forced, first sync, or we have very few trades
+    if force_full or not last_sync or trade_count < 10:
         since = datetime.now(tz=timezone.utc) - timedelta(days=history_days)
-        log.info(f"  FULL IMPORT: scarico storico da {since.strftime('%Y-%m-%d')} ({history_days} giorni)")
+        log.info(f"  FULL IMPORT: {trade_count} trade in DB, scarico storico da {since.strftime('%Y-%m-%d')} ({history_days} giorni)")
     else:
         try:
             since = datetime.fromisoformat(last_sync.replace("Z", "+00:00"))
