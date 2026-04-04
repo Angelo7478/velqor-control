@@ -9,6 +9,19 @@ function cleanKey(s: string): string {
   return s.replace(/[\u00A0\u200B\u200C\u200D\uFEFF\u200E\u200F\r\n]/g, '').trim().toLowerCase().replace(/\s+/g, ' ')
 }
 
+// Deduplicate headers: "prezzo", "prezzo" → "prezzo", "prezzo_2"
+function deduplicateHeaders(headers: string[]): string[] {
+  const counts: Record<string, number> = {}
+  return headers.map(h => {
+    if (counts[h] !== undefined) {
+      counts[h]++
+      return `${h}_${counts[h]}`
+    }
+    counts[h] = 1
+    return h
+  })
+}
+
 export default function ImportTradePage() {
   const [accounts, setAccounts] = useState<QelAccount[]>([])
   const [selectedAccount, setSelectedAccount] = useState<string>('')
@@ -18,6 +31,7 @@ export default function ImportTradePage() {
   const [importing, setImporting] = useState(false)
   const [result, setResult] = useState<{ imported: number; skipped: number; errors: string[] } | null>(null)
   const [strategies, setStrategies] = useState<{ id: string; magic: number }[]>([])
+  const [progress, setProgress] = useState('')
   const fileRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
@@ -41,7 +55,6 @@ export default function ImportTradePage() {
     const tables = doc.querySelectorAll('table')
     if (tables.length === 0) return []
 
-    // Find the biggest table (likely the trade table)
     let bestTable = tables[0]
     for (const t of tables) {
       if (t.rows.length > bestTable.rows.length) bestTable = t
@@ -49,7 +62,8 @@ export default function ImportTradePage() {
 
     const headerRow = bestTable.rows[0]
     if (!headerRow) return []
-    const headers = Array.from(headerRow.cells).map(c => cleanKey(c.textContent || ''))
+    const rawHeaders = Array.from(headerRow.cells).map(c => cleanKey(c.textContent || ''))
+    const headers = deduplicateHeaders(rawHeaders)
 
     const rows: Record<string, string>[] = []
     for (let i = 1; i < bestTable.rows.length; i++) {
@@ -63,7 +77,6 @@ export default function ImportTradePage() {
   }
 
   function parseCSV(text: string): Record<string, string>[] {
-    // Detect if it's HTML
     if (text.trim().startsWith('<') || text.includes('<table') || text.includes('<tr')) {
       return parseHTML(text)
     }
@@ -71,11 +84,11 @@ export default function ImportTradePage() {
     const lines = text.trim().split('\n')
     if (lines.length < 2) return []
 
-    // Detect separator (comma, semicolon, tab)
     const firstLine = lines[0]
     const sep = firstLine.includes('\t') ? '\t' : firstLine.includes(';') ? ';' : ','
 
-    const headers = lines[0].split(sep).map(h => cleanKey(h.replace(/^["']|["']$/g, '')))
+    const rawHeaders = lines[0].split(sep).map(h => cleanKey(h.replace(/^["']|["']$/g, '')))
+    const headers = deduplicateHeaders(rawHeaders)
     const rows: Record<string, string>[] = []
 
     for (let i = 1; i < lines.length; i++) {
@@ -110,8 +123,8 @@ export default function ImportTradePage() {
   }
 
   // Map CSV columns to our trade fields
-  function mapRow(rawRow: Record<string, string>, headers: string[]): Record<string, unknown> | null {
-    // Normalize all keys to handle invisible characters (BOM, NBSP, zero-width)
+  function mapRow(rawRow: Record<string, string>, headers: string[], volumeIsLots: boolean): Record<string, unknown> | null {
+    // Normalize all keys
     const row: Record<string, string> = {}
     for (const [k, v] of Object.entries(rawRow)) {
       row[cleanKey(k)] = v
@@ -122,43 +135,47 @@ export default function ImportTradePage() {
     const closeTime = row['chiudi'] || row['close time'] || row['close_time'] || row['closetime'] || row['close date'] || row['data chiusura'] || ''
     const symbol = row['simbolo'] || row['symbol'] || row['instrument'] || row['strumento'] || ''
     const direction = row['tipologia'] || row['action'] || row['type'] || row['direction'] || row['tipo'] || row['side'] || ''
-    const openPrice = row['prezzo'] || row['open price'] || row['open_price'] || row['openprice'] || row['prezzo apertura'] || ''
     const profit = row['profitto'] || row['profit'] || row['p/l'] || row['pnl'] || ''
-    const commission = row['commissione'] || row['commission'] || row['comm'] || ''
+    const commission = row['commissioni'] || row['commissione'] || row['commission'] || row['comm'] || ''
     const swap = row['swap'] || ''
     const ticket = row['ticket'] || row['order'] || row['deal'] || row['position'] || row['id'] || ''
     const sl = row['sl'] || row['stop loss'] || row['stoploss'] || ''
     const tp = row['tp'] || row['take profit'] || row['takeprofit'] || ''
+    const pips = row['pips'] || ''
+    const durationCol = row['durata del trade in secondi'] || row['duration'] || ''
 
-    // FTMO CSV: columns after chiudi are: close_price, swap, commission, profit, pips, duration
-    // Detect by position if named columns don't have close price / magic
-    let closePrice = row['prezzo chiusura'] || row['close price'] || row['close_price'] || row['closeprice'] || ''
+    // Open price: "prezzo" (first occurrence, or deduped as just "prezzo")
+    const openPrice = row['prezzo'] || row['open price'] || row['open_price'] || row['openprice'] || row['prezzo apertura'] || ''
+
+    // Close price: "prezzo_2" (second occurrence via dedup), or explicit close price columns
+    let closePrice = row['prezzo_2'] || row['prezzo chiusura'] || row['close price'] || row['close_price'] || row['closeprice'] || ''
+
     let magic = row['magic'] || row['magic number'] || row['magic_number'] || row['expert id'] || ''
     let lots = row['lotti'] || row['lots'] || row['size'] || ''
     const volume = row['volume'] || ''
 
-    // FTMO Italian CSV has this column order:
-    // ticket, apri, tipologia, volume(=magic!), simbolo, prezzo, sl, tp, chiudi, close_price, swap, commission, profit, pips, duration
-    // The "volume" column in FTMO is actually the magic number (3, 8, 12, etc.)
-    // Detect: if volume is a small integer (1-20) and we have no magic, it's probably magic
-    const volumeNum = parseFloat(volume)
-    if (volume && volumeNum > 0 && volumeNum <= 50 && Number.isInteger(volumeNum) && !magic) {
-      magic = volume
-      // Real lots not in this CSV format from FTMO
-      lots = ''
-    } else if (volume && !lots) {
-      lots = volume
+    // Volume handling: depends on CSV format
+    if (volumeIsLots) {
+      // FTMO Trading Journal export: volume = actual lot size
+      if (volume && !lots) lots = volume
+    } else {
+      // Other FTMO format: volume might be magic number (small integers like 3, 8, 12)
+      const volumeNum = parseFloat(volume)
+      if (volume && volumeNum > 0 && volumeNum <= 50 && Number.isInteger(volumeNum) && !magic) {
+        magic = volume
+        lots = ''
+      } else if (volume && !lots) {
+        lots = volume
+      }
     }
 
-    // If close_price is empty, try to get it from positional data
-    // FTMO CSV: after chiudi, the next numeric column is close_price
+    // Positional close price fallback: column right after 'chiudi'
     if (!closePrice && headers.length > 9) {
-      // Find the column right after 'chiudi'
       const chiudiIdx = headers.indexOf('chiudi')
       if (chiudiIdx >= 0 && chiudiIdx + 1 < headers.length) {
         const nextCol = headers[chiudiIdx + 1]
         const nextVal = row[nextCol]
-        if (nextVal && parseFloat(nextVal) > 100) {
+        if (nextVal && !isNaN(parseFloat(nextVal))) {
           closePrice = nextVal
         }
       }
@@ -181,9 +198,11 @@ export default function ImportTradePage() {
     const magicNum = parseInt(magic) || 0
     const ticketNum = parseInt(ticket) || Math.floor(Date.parse(openTime) / 1000 + Math.random() * 10000)
 
-    // Duration
+    // Duration: use column if available, otherwise calculate
     let durationSeconds: number | null = null
-    if (openTime && closeTime) {
+    if (durationCol && !isNaN(parseInt(durationCol))) {
+      durationSeconds = parseInt(durationCol)
+    } else if (openTime && closeTime) {
       const openDt = new Date(openTime)
       const closeDt = new Date(closeTime)
       if (!isNaN(openDt.getTime()) && !isNaN(closeDt.getTime())) {
@@ -219,6 +238,7 @@ export default function ImportTradePage() {
 
     setImporting(true)
     setResult(null)
+    setProgress('Analisi dati...')
     const supabase = createClient()
     const stratMap = new Map(strategies.map(s => [s.magic, s.id]))
 
@@ -226,22 +246,25 @@ export default function ImportTradePage() {
     let skipped = 0
     const errors: string[] = []
 
-    // Process in batches of 50
-    const allHeaders = rows.length > 0 ? Object.keys(rows[0]) : []
-    console.log('=== IMPORT DEBUG ===')
-    console.log('Raw headers:', allHeaders)
-    console.log('Cleaned headers:', allHeaders.map(h => cleanKey(h)))
-    console.log('First row keys (charCodes):', allHeaders.map(h => `"${h}" [${[...h].map(c => c.charCodeAt(0)).join(',')}]`))
-    console.log('First row values:', rows[0])
+    const allHeaders = rows.length > 0 ? Object.keys(rows[0]).map(cleanKey) : []
+
+    // Pre-scan: detect if 'volume' column contains lot sizes (decimals) or magic numbers (integers)
+    const volumeKey = Object.keys(rows[0] || {}).find(k => cleanKey(k) === 'volume')
+    let volumeIsLots = false
+    if (volumeKey) {
+      const hasDecimals = rows.some(r => {
+        const v = parseFloat(r[volumeKey] || '')
+        return v > 0 && !Number.isInteger(v)
+      })
+      volumeIsLots = hasDecimals
+    }
+
+    console.log('=== IMPORT ===', { rows: rows.length, headers: allHeaders, volumeIsLots })
+
     const trades: Record<string, unknown>[] = []
     for (const row of rows) {
-      const mapped = mapRow(row, allHeaders)
-      if (!mapped) {
-        const cleaned: Record<string, string> = {}
-        for (const [k, v] of Object.entries(row)) { cleaned[cleanKey(k)] = v }
-        console.log('SKIPPED row - cleaned keys:', Object.keys(cleaned).join(','), '| simbolo:', cleaned['simbolo'], '| apri:', cleaned['apri'])
-        skipped++; continue
-      }
+      const mapped = mapRow(row, allHeaders, volumeIsLots)
+      if (!mapped) { skipped++; continue }
       mapped.account_id = selectedAccount
       if (mapped.magic && stratMap.has(mapped.magic as number)) {
         mapped.strategy_id = stratMap.get(mapped.magic as number)
@@ -249,19 +272,39 @@ export default function ImportTradePage() {
       trades.push(mapped)
     }
 
-    // Upsert in batches
-    for (let i = 0; i < trades.length; i += 50) {
-      const batch = trades.slice(i, i + 50)
-      const { error } = await supabase.from('qel_trades').upsert(batch, { onConflict: 'account_id,ticket' })
-      if (error) {
-        errors.push(`Batch ${Math.floor(i/50)+1}: ${error.message}`)
-      } else {
-        imported += batch.length
+    if (trades.length === 0) {
+      setResult({ imported: 0, skipped, errors: ['Nessun trade valido trovato. Verifica che il CSV contenga colonne: Ticket, Apri, Simbolo, Prezzo, Profitto'] })
+      setImporting(false)
+      setProgress('')
+      return
+    }
+
+    // Upsert in batches of 50 with try/catch
+    const batchSize = 50
+    const totalBatches = Math.ceil(trades.length / batchSize)
+
+    for (let i = 0; i < trades.length; i += batchSize) {
+      const batchNum = Math.floor(i / batchSize) + 1
+      setProgress(`Batch ${batchNum}/${totalBatches} (${Math.min(i + batchSize, trades.length)}/${trades.length} trade)...`)
+
+      const batch = trades.slice(i, i + batchSize)
+      try {
+        const { error } = await supabase.from('qel_trades').upsert(batch, { onConflict: 'account_id,ticket' })
+        if (error) {
+          console.error('Batch error:', error)
+          errors.push(`Batch ${batchNum}: ${error.message}`)
+        } else {
+          imported += batch.length
+        }
+      } catch (err) {
+        console.error('Batch exception:', err)
+        errors.push(`Batch ${batchNum}: ${err instanceof Error ? err.message : 'Errore rete'}`)
       }
     }
 
     setResult({ imported, skipped, errors })
     setImporting(false)
+    setProgress('')
   }
 
   if (loading) return <p className="text-slate-500 p-4">Caricamento...</p>
@@ -320,7 +363,7 @@ export default function ImportTradePage() {
             <table className="w-full text-xs">
               <thead>
                 <tr className="text-slate-500 border-b border-slate-200">
-                  {Object.keys(preview[0]).slice(0, 10).map(h => (
+                  {Object.keys(preview[0]).slice(0, 12).map(h => (
                     <th key={h} className="text-left py-1.5 px-2 font-medium">{h}</th>
                   ))}
                 </tr>
@@ -328,7 +371,7 @@ export default function ImportTradePage() {
               <tbody className="divide-y divide-slate-100">
                 {preview.map((row, i) => (
                   <tr key={i}>
-                    {Object.values(row).slice(0, 10).map((v, j) => (
+                    {Object.values(row).slice(0, 12).map((v, j) => (
                       <td key={j} className="py-1.5 px-2 text-slate-700 truncate max-w-[120px]">{v}</td>
                     ))}
                   </tr>
@@ -351,6 +394,7 @@ export default function ImportTradePage() {
               {importing ? `Importazione...` : `Importa ${parseCSV(csvText).length} trade`}
             </button>
             {!selectedAccount && <span className="text-sm text-amber-600">Seleziona prima un conto</span>}
+            {importing && progress && <span className="text-sm text-violet-600 animate-pulse">{progress}</span>}
           </div>
         </div>
       )}
@@ -388,17 +432,16 @@ export default function ImportTradePage() {
             </ol>
           </div>
           <div>
-            <p className="text-xs font-medium text-violet-700 mb-1">Metodo 2: File HTML</p>
+            <p className="text-xs font-medium text-violet-700 mb-1">Metodo 2: File CSV</p>
             <ol className="text-xs text-violet-600 space-y-1 list-decimal list-inside">
-              <li>Su FTMO, tasto destro sulla pagina &rarr; <strong>Salva pagina come</strong></li>
-              <li>Salva come .html</li>
-              <li>Torna qui e carica il file</li>
+              <li>Su FTMO, vai al <strong>Trading Journal</strong></li>
+              <li>Clicca su <strong>Export CSV</strong></li>
+              <li>Torna qui e carica il file .csv</li>
             </ol>
           </div>
           <div className="text-xs text-violet-500">
             <p className="font-medium mb-1">Colonne riconosciute automaticamente:</p>
-            <p>Open Time, Close Time, Symbol, Action/Type/Direction, Volume/Lots, Open Price, Close Price, Profit, Commission, Swap, Magic Number, Ticket</p>
-            <p className="mt-1">Formati supportati: CSV, TSV, HTML</p>
+            <p>Ticket, Apri/Chiudi, Simbolo, Tipologia, Volume, Prezzo (open+close), Profitto, Commissioni, Swap, Pips, SL, TP, Magic</p>
           </div>
         </div>
       </div>
