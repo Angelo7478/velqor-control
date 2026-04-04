@@ -147,10 +147,16 @@ export default function ContiConfigPage() {
             <h1 className="text-2xl font-bold text-slate-900">Configurazione Conti FTMO</h1>
             <p className="text-sm text-slate-500 mt-1">Inserisci login e investor password MT5 per attivare il monitoraggio</p>
           </div>
-          <button onClick={() => { setShowAdd(!showAdd); setAddMsg('') }}
-            className="px-4 py-2 bg-violet-600 text-white rounded-lg text-sm font-medium hover:bg-violet-700 flex items-center gap-1.5">
-            <span className="text-lg leading-none">+</span> Aggiungi conto
-          </button>
+          <div className="flex items-center gap-2">
+            <a href="/divisioni/quant/import"
+              className="px-4 py-2 border border-violet-200 text-violet-600 rounded-lg text-sm font-medium hover:bg-violet-50">
+              Import CSV/HTML
+            </a>
+            <button onClick={() => { setShowAdd(!showAdd); setAddMsg('') }}
+              className="px-4 py-2 bg-violet-600 text-white rounded-lg text-sm font-medium hover:bg-violet-700 flex items-center gap-1.5">
+              <span className="text-lg leading-none">+</span> Aggiungi conto
+            </button>
+          </div>
         </div>
       </div>
 
