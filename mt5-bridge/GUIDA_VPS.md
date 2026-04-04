@@ -160,6 +160,43 @@ $Shortcut.Save()
 
 ---
 
+## Aggiornare il Bridge
+
+Quando viene rilasciata una nuova versione del bridge, aggiorna così:
+
+### 1. Ferma il bridge
+Chiudi la finestra PowerShell dove gira `python bridge.py loop` (oppure Ctrl+C).
+
+### 2. Scarica i file aggiornati
+
+```powershell
+Invoke-WebRequest -Uri "https://raw.githubusercontent.com/Angelo7478/velqor-control/main/mt5-bridge/bridge.py" -OutFile "C:\velqor-bridge\bridge.py"
+Invoke-WebRequest -Uri "https://raw.githubusercontent.com/Angelo7478/velqor-control/main/mt5-bridge/config.py" -OutFile "C:\velqor-bridge\config.py"
+```
+
+**Nota:** `config_local.py` NON va riscaricato — contiene le tue chiavi locali e non è su GitHub.
+
+### 3. Verifica con un test
+
+```powershell
+cd C:\velqor-bridge
+python bridge.py once
+```
+
+### 4. Riavvia il loop
+
+```powershell
+python bridge.py loop
+```
+
+### Comando rapido (tutto in una riga)
+
+```powershell
+Invoke-WebRequest -Uri "https://raw.githubusercontent.com/Angelo7478/velqor-control/main/mt5-bridge/bridge.py" -OutFile "C:\velqor-bridge\bridge.py"; Invoke-WebRequest -Uri "https://raw.githubusercontent.com/Angelo7478/velqor-control/main/mt5-bridge/config.py" -OutFile "C:\velqor-bridge\config.py"; cd C:\velqor-bridge; python bridge.py once
+```
+
+---
+
 ## Troubleshooting
 
 **"Conti attivi trovati: 0"**
