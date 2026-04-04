@@ -105,20 +105,53 @@ export default function ImportTradePage() {
   }
 
   // Map CSV columns to our trade fields
-  function mapRow(row: Record<string, string>): Record<string, unknown> | null {
-    // Common FTMO/MT5 CSV column names
-    const openTime = row['open time'] || row['open_time'] || row['opentime'] || row['time'] || row['open date'] || row['data apertura'] || ''
-    const closeTime = row['close time'] || row['close_time'] || row['closetime'] || row['close date'] || row['data chiusura'] || ''
-    const symbol = row['symbol'] || row['simbolo'] || row['instrument'] || row['strumento'] || ''
-    const direction = row['action'] || row['type'] || row['direction'] || row['tipo'] || row['side'] || ''
-    const lots = row['volume'] || row['lots'] || row['lotti'] || row['size'] || ''
-    const openPrice = row['open price'] || row['open_price'] || row['openprice'] || row['prezzo apertura'] || ''
-    const closePrice = row['close price'] || row['close_price'] || row['closeprice'] || row['prezzo chiusura'] || ''
-    const profit = row['profit'] || row['profitto'] || row['p/l'] || row['pnl'] || ''
-    const commission = row['commission'] || row['commissione'] || row['comm'] || ''
+  function mapRow(row: Record<string, string>, headers: string[]): Record<string, unknown> | null {
+    // FTMO Italian + English + generic column names
+    const openTime = row['apri'] || row['open time'] || row['open_time'] || row['opentime'] || row['time'] || row['open date'] || row['data apertura'] || ''
+    const closeTime = row['chiudi'] || row['close time'] || row['close_time'] || row['closetime'] || row['close date'] || row['data chiusura'] || ''
+    const symbol = row['simbolo'] || row['symbol'] || row['instrument'] || row['strumento'] || ''
+    const direction = row['tipologia'] || row['action'] || row['type'] || row['direction'] || row['tipo'] || row['side'] || ''
+    const openPrice = row['prezzo'] || row['open price'] || row['open_price'] || row['openprice'] || row['prezzo apertura'] || ''
+    const profit = row['profitto'] || row['profit'] || row['p/l'] || row['pnl'] || ''
+    const commission = row['commissione'] || row['commission'] || row['comm'] || ''
     const swap = row['swap'] || ''
-    const magic = row['magic'] || row['magic number'] || row['magic_number'] || row['expert id'] || ''
     const ticket = row['ticket'] || row['order'] || row['deal'] || row['position'] || row['id'] || ''
+    const sl = row['sl'] || row['stop loss'] || row['stoploss'] || ''
+    const tp = row['tp'] || row['take profit'] || row['takeprofit'] || ''
+
+    // FTMO CSV: columns after chiudi are: close_price, swap, commission, profit, pips, duration
+    // Detect by position if named columns don't have close price / magic
+    let closePrice = row['prezzo chiusura'] || row['close price'] || row['close_price'] || row['closeprice'] || ''
+    let magic = row['magic'] || row['magic number'] || row['magic_number'] || row['expert id'] || ''
+    let lots = row['lotti'] || row['lots'] || row['size'] || ''
+    const volume = row['volume'] || ''
+
+    // FTMO Italian CSV has this column order:
+    // ticket, apri, tipologia, volume(=magic!), simbolo, prezzo, sl, tp, chiudi, close_price, swap, commission, profit, pips, duration
+    // The "volume" column in FTMO is actually the magic number (3, 8, 12, etc.)
+    // Detect: if volume is a small integer (1-20) and we have no magic, it's probably magic
+    const volumeNum = parseFloat(volume)
+    if (volume && volumeNum > 0 && volumeNum <= 50 && Number.isInteger(volumeNum) && !magic) {
+      magic = volume
+      // Real lots not in this CSV format from FTMO
+      lots = ''
+    } else if (volume && !lots) {
+      lots = volume
+    }
+
+    // If close_price is empty, try to get it from positional data
+    // FTMO CSV: after chiudi, the next numeric column is close_price
+    if (!closePrice && headers.length > 9) {
+      // Find the column right after 'chiudi'
+      const chiudiIdx = headers.indexOf('chiudi')
+      if (chiudiIdx >= 0 && chiudiIdx + 1 < headers.length) {
+        const nextCol = headers[chiudiIdx + 1]
+        const nextVal = row[nextCol]
+        if (nextVal && parseFloat(nextVal) > 100) {
+          closePrice = nextVal
+        }
+      }
+    }
 
     if (!symbol || !openTime) return null
 
@@ -155,6 +188,8 @@ export default function ImportTradePage() {
       lots: lotsNum,
       open_price: parseFloat(openPrice) || 0,
       close_price: parseFloat(closePrice) || null,
+      sl: parseFloat(sl) || null,
+      tp: parseFloat(tp) || null,
       open_time: openTime,
       close_time: closeTime || null,
       profit: profitNum,
@@ -181,9 +216,10 @@ export default function ImportTradePage() {
     const errors: string[] = []
 
     // Process in batches of 50
+    const allHeaders = rows.length > 0 ? Object.keys(rows[0]) : []
     const trades: Record<string, unknown>[] = []
     for (const row of rows) {
-      const mapped = mapRow(row)
+      const mapped = mapRow(row, allHeaders)
       if (!mapped) { skipped++; continue }
       mapped.account_id = selectedAccount
       if (mapped.magic && stratMap.has(mapped.magic as number)) {
