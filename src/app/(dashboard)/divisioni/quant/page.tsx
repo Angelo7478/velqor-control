@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react'
 import { createClient } from '@/lib/supabase-browser'
 import { QelStrategy, QelAccount } from '@/types/database'
+import AccountDashboard from './account-dashboard'
 
 function fmt(n: number | null | undefined, decimals = 2): string {
   if (n === null || n === undefined) return '—'
@@ -81,6 +82,7 @@ export default function QuantPage() {
   const [selectedStrat, setSelectedStrat] = useState<QelStrategy | null>(null)
   const [groupFilter, setGroupFilter] = useState<string>('all')
   const [expandedAcc, setExpandedAcc] = useState<string | null>(null)
+  const [selectedAcc, setSelectedAcc] = useState<QelAccount | null>(null)
 
   useEffect(() => { loadData() }, [])
 
@@ -585,8 +587,13 @@ export default function QuantPage() {
         </div>
       )}
 
-      {/* ===== ACCOUNTS ===== */}
-      {tab === 'accounts' && (
+      {/* ===== ACCOUNT DETAIL (MyFXBook-style) ===== */}
+      {tab === 'accounts' && selectedAcc && (
+        <AccountDashboard account={selectedAcc} onClose={() => setSelectedAcc(null)} />
+      )}
+
+      {/* ===== ACCOUNTS LIST ===== */}
+      {tab === 'accounts' && !selectedAcc && (
         <div className="space-y-4">
           <div className="flex justify-between items-center">
             <h3 className="text-sm font-semibold text-slate-700">Conti attivi ({activeAccounts.length})</h3>
@@ -610,7 +617,8 @@ export default function QuantPage() {
               const maxTdd = Number(acc.max_total_loss_pct || 10)
 
               return (
-                <div key={acc.id} className={`bg-white rounded-xl border p-4 ${synced ? 'border-slate-200' : 'border-dashed border-slate-300'}`}>
+                <div key={acc.id} onClick={() => synced && setSelectedAcc(acc)}
+                  className={`bg-white rounded-xl border p-4 transition-all ${synced ? 'border-slate-200 hover:border-violet-300 hover:shadow-md cursor-pointer' : 'border-dashed border-slate-300'}`}>
                   <div className="flex justify-between items-start mb-3">
                     <div className="flex items-center gap-2">
                       {synced && <div className="w-2.5 h-2.5 rounded-full bg-green-500 animate-pulse" />}
