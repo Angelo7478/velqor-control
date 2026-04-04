@@ -325,31 +325,95 @@ export default function QuantPage() {
             </div>
           </div>
 
-          {/* Top Strategies by Ret/DD */}
-          <div className="bg-white rounded-xl border border-slate-200 p-4">
-            <h3 className="text-sm font-semibold text-slate-700 mb-3">Top strategie per Ret/DD</h3>
-            <div className="space-y-2">
-              {[...activeStrategies].sort((a, b) => Number(b.test_ret_dd || 0) - Number(a.test_ret_dd || 0)).slice(0, 6).map(s => (
-                <div key={s.id} className="flex items-center justify-between p-2 rounded-lg hover:bg-slate-50 cursor-pointer"
-                  onClick={() => { setTab('strategies'); setSelectedStrat(s); setStratView('detail') }}>
-                  <div className="flex items-center gap-2">
-                    <span className={`text-xs px-1.5 py-0.5 rounded font-medium ${groupColor(s.asset_group)}`}>{s.asset_group}</span>
-                    <span className="text-sm font-medium text-slate-900">{s.name}</span>
-                    <span className="text-xs text-slate-400">#{s.magic}</span>
-                  </div>
-                  <div className="flex items-center gap-4 text-sm">
-                    {s.real_trades > 0 && (
-                      <span className={`text-xs px-1.5 py-0.5 rounded ${Number(s.real_pl) >= 0 ? 'bg-green-50 text-green-700' : 'bg-red-50 text-red-700'}`}>
-                        LIVE {fmtUsd(s.real_pl)}
-                      </span>
-                    )}
-                    <span className="text-slate-500">Win {fmt(s.test_win_pct, 1)}%</span>
-                    <span className="font-bold text-violet-700">{fmt(s.test_ret_dd, 2)} R/DD</span>
-                  </div>
+          {/* Strategy Ranking — Real Performance (validated) */}
+          {(() => {
+            const MIN_REAL_TRADES = 15
+            const validated = strategies
+              .filter(s => (s.real_trades || 0) >= MIN_REAL_TRADES && s.test_trades)
+              .map(s => {
+                const realRDD = Number(s.real_ret_dd || 0)
+                const testRDD = Number(s.test_ret_dd || 0)
+                const realWR = s.real_trades > 0 ? null : null // calc from trades if needed
+                const testWR = Number(s.test_win_pct || 0)
+                // Consistency: how close real is to test (1.0 = perfect, >1 = outperforming)
+                const consistency = testRDD > 0 ? realRDD / testRDD : 0
+                return { ...s, realRDD, testRDD, consistency }
+              })
+              .sort((a, b) => b.realRDD - a.realRDD)
+            const earlyStage = strategies
+              .filter(s => (s.real_trades || 0) > 0 && (s.real_trades || 0) < MIN_REAL_TRADES)
+              .sort((a, b) => (b.real_trades || 0) - (a.real_trades || 0))
+
+            return (
+              <div className="bg-white rounded-xl border border-slate-200 p-4">
+                <div className="flex items-center justify-between mb-3">
+                  <h3 className="text-sm font-semibold text-slate-700">Ranking Strategie — Performance Reale</h3>
+                  <span className="text-[10px] text-slate-400">Min {MIN_REAL_TRADES} trade reali per validazione</span>
                 </div>
-              ))}
-            </div>
-          </div>
+                {validated.length > 0 ? (
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-xs">
+                      <thead>
+                        <tr className="text-slate-500 border-b border-slate-200">
+                          <th className="text-left py-2 font-medium">#</th>
+                          <th className="text-left py-2 font-medium">Strategia</th>
+                          <th className="text-center py-2 font-medium">Stato</th>
+                          <th className="text-right py-2 font-medium">Trade</th>
+                          <th className="text-right py-2 font-medium">P/L Real</th>
+                          <th className="text-right py-2 font-medium">R/DD Real</th>
+                          <th className="text-right py-2 font-medium">R/DD Test</th>
+                          <th className="text-center py-2 font-medium">Consistenza</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {validated.map((s, i) => {
+                          const consColor = s.consistency >= 1 ? 'text-green-700 bg-green-50' : s.consistency >= 0.5 ? 'text-amber-700 bg-amber-50' : s.consistency >= 0 ? 'text-orange-700 bg-orange-50' : 'text-red-700 bg-red-50'
+                          const consLabel = s.consistency >= 1.5 ? 'Outperform' : s.consistency >= 0.8 ? 'Confermata' : s.consistency >= 0.3 ? 'Sotto test' : s.consistency >= 0 ? 'Debole' : 'Invertita'
+                          return (
+                            <tr key={s.id} className="hover:bg-slate-50 cursor-pointer" onClick={() => { setTab('strategies'); setSelectedStrat(s); setStratView('detail') }}>
+                              <td className="py-2 font-bold text-slate-400">{i + 1}</td>
+                              <td className="py-2">
+                                <div className="flex items-center gap-2">
+                                  <span className={`text-[10px] px-1 py-0.5 rounded font-medium ${groupColor(s.asset_group)}`}>{s.asset_group}</span>
+                                  <span className="font-medium text-slate-900">{s.name}</span>
+                                </div>
+                              </td>
+                              <td className="text-center py-2">
+                                <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${s.status === 'active' ? 'bg-green-100 text-green-700' : 'bg-amber-100 text-amber-700'}`}>
+                                  {s.status === 'active' ? 'ON' : 'OFF'}
+                                </span>
+                              </td>
+                              <td className="text-right py-2 text-slate-700">{s.real_trades}<span className="text-slate-400">/{s.test_trades}</span></td>
+                              <td className={`text-right py-2 font-medium ${plColor(Number(s.real_pl || 0))}`}>{fmtUsd(s.real_pl)}</td>
+                              <td className={`text-right py-2 font-bold ${s.realRDD > 0 ? 'text-violet-700' : 'text-red-600'}`}>{fmt(s.realRDD, 2)}</td>
+                              <td className="text-right py-2 text-slate-500">{fmt(s.testRDD, 2)}</td>
+                              <td className="text-center py-2">
+                                <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${consColor}`}>{consLabel}</span>
+                              </td>
+                            </tr>
+                          )
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                ) : (
+                  <p className="text-sm text-slate-500">Nessuna strategia con {MIN_REAL_TRADES}+ trade reali ancora</p>
+                )}
+                {earlyStage.length > 0 && (
+                  <div className="mt-3 pt-3 border-t border-slate-100">
+                    <p className="text-[10px] text-slate-400 mb-2">In validazione (pochi trade reali)</p>
+                    <div className="flex flex-wrap gap-1.5">
+                      {earlyStage.map(s => (
+                        <span key={s.id} className="inline-flex items-center gap-1 text-[10px] px-2 py-1 rounded-full bg-slate-50 text-slate-500 border border-slate-200">
+                          #{s.magic} {s.name} <span className="text-slate-400">{s.real_trades}t</span>
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )
+          })()}
         </div>
       )}
 

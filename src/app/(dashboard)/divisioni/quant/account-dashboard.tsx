@@ -810,31 +810,36 @@ export default function AccountDashboard({ account, onClose }: Props) {
             const totalComm = closedTrades.reduce((s, t) => s + Number(t.commission || 0), 0)
             const totalCosts = totalSwap + totalComm
             const grossPL = closedTrades.reduce((s, t) => s + Number(t.profit || 0), 0)
-            const costsPct = grossPL !== 0 ? Math.abs(totalCosts / grossPL) * 100 : 0
+            const netPL = closedTrades.reduce((s, t) => s + Number(t.net_profit || t.profit || 0), 0)
+            const costsPctGross = grossPL !== 0 ? Math.abs(totalCosts / grossPL) * 100 : 0
+            const costsPctAccount = size > 0 ? Math.abs(totalCosts / size) * 100 : 0
+            const costsPctPerTrade = closedTrades.length > 0 ? Math.abs(totalCosts / closedTrades.length) : 0
             // Per-symbol breakdown
-            const costsBySymbol: Record<string, { swap: number; comm: number; trades: number }> = {}
+            const costsBySymbol: Record<string, { swap: number; comm: number; trades: number; pl: number }> = {}
             closedTrades.forEach(t => {
-              if (!costsBySymbol[t.symbol]) costsBySymbol[t.symbol] = { swap: 0, comm: 0, trades: 0 }
+              if (!costsBySymbol[t.symbol]) costsBySymbol[t.symbol] = { swap: 0, comm: 0, trades: 0, pl: 0 }
               costsBySymbol[t.symbol].swap += Number(t.swap || 0)
               costsBySymbol[t.symbol].comm += Number(t.commission || 0)
+              costsBySymbol[t.symbol].pl += Number(t.net_profit || t.profit || 0)
               costsBySymbol[t.symbol].trades++
             })
             // Per-strategy breakdown
-            const costsByStrat: Record<number, { name: string; swap: number; comm: number; trades: number }> = {}
+            const costsByStrat: Record<number, { name: string; swap: number; comm: number; trades: number; pl: number }> = {}
             closedTrades.filter(t => t.magic).forEach(t => {
               const m = t.magic!
               if (!costsByStrat[m]) {
                 const s = strategyMap.get(m)
-                costsByStrat[m] = { name: s ? (s.name || `#${m}`) : `#${m}`, swap: 0, comm: 0, trades: 0 }
+                costsByStrat[m] = { name: s ? (s.name || `#${m}`) : `#${m}`, swap: 0, comm: 0, trades: 0, pl: 0 }
               }
               costsByStrat[m].swap += Number(t.swap || 0)
               costsByStrat[m].comm += Number(t.commission || 0)
+              costsByStrat[m].pl += Number(t.net_profit || t.profit || 0)
               costsByStrat[m].trades++
             })
             return (
               <>
                 {/* Cost summary cards */}
-                <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-6 gap-3 mb-4">
+                <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-3 mb-4">
                   <div className={`rounded-lg p-3 ${totalSwap < 0 ? 'bg-red-50' : 'bg-green-50'}`}>
                     <p className={`text-lg font-bold ${plColor(totalSwap)}`}>{fmtUsd(totalSwap, 2)}</p>
                     <p className="text-xs text-slate-500">Swap totale</p>
@@ -847,9 +852,17 @@ export default function AccountDashboard({ account, onClose }: Props) {
                     <p className={`text-lg font-bold ${plColor(totalCosts)}`}>{fmtUsd(totalCosts, 2)}</p>
                     <p className="text-xs text-slate-500">Costi totali</p>
                   </div>
+                  <div className={`rounded-lg p-3 ${costsPctGross > 20 ? 'bg-red-50' : 'bg-slate-50'}`}>
+                    <p className={`text-lg font-bold ${costsPctGross > 20 ? 'text-red-600' : 'text-slate-900'}`}>{fmt(costsPctGross, 1)}%</p>
+                    <p className="text-xs text-slate-500">% su Gross P/L</p>
+                  </div>
+                  <div className={`rounded-lg p-3 ${costsPctAccount > 2 ? 'bg-red-50' : 'bg-slate-50'}`}>
+                    <p className={`text-lg font-bold ${costsPctAccount > 2 ? 'text-red-600' : 'text-slate-900'}`}>{fmt(costsPctAccount, 2)}%</p>
+                    <p className="text-xs text-slate-500">% su Capitale</p>
+                  </div>
                   <div className="bg-slate-50 rounded-lg p-3">
-                    <p className="text-lg font-bold text-slate-900">{fmt(costsPct, 1)}%</p>
-                    <p className="text-xs text-slate-500">Costi / Gross P/L</p>
+                    <p className="text-lg font-bold text-slate-900">{fmtUsd(costsPctPerTrade, 2)}</p>
+                    <p className="text-xs text-slate-500">Costo medio/trade</p>
                   </div>
                   <div className="bg-slate-50 rounded-lg p-3">
                     <p className="text-lg font-bold text-slate-900">{fmtUsd(closedTrades.length > 0 ? totalSwap / closedTrades.length : 0, 2)}</p>
@@ -874,20 +887,26 @@ export default function AccountDashboard({ account, onClose }: Props) {
                             <th className="text-right py-1.5 font-medium">Swap</th>
                             <th className="text-right py-1.5 font-medium">Comm</th>
                             <th className="text-right py-1.5 font-medium">Totale</th>
+                            <th className="text-right py-1.5 font-medium">% P/L</th>
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-slate-100">
                           {Object.entries(costsBySymbol)
                             .sort((a, b) => (a[1].swap + a[1].comm) - (b[1].swap + b[1].comm))
-                            .map(([sym, c]) => (
+                            .map(([sym, c]) => {
+                              const costs = c.swap + c.comm
+                              const pctPL = c.pl !== 0 ? Math.abs(costs / c.pl) * 100 : 0
+                              return (
                               <tr key={sym}>
                                 <td className="py-1.5 font-medium text-slate-900">{sym}</td>
                                 <td className="text-right py-1.5 text-slate-500">{c.trades}</td>
                                 <td className={`text-right py-1.5 ${plColor(c.swap)}`}>{fmtUsd(c.swap, 2)}</td>
                                 <td className={`text-right py-1.5 ${plColor(c.comm)}`}>{fmtUsd(c.comm, 2)}</td>
-                                <td className={`text-right py-1.5 font-medium ${plColor(c.swap + c.comm)}`}>{fmtUsd(c.swap + c.comm, 2)}</td>
+                                <td className={`text-right py-1.5 font-medium ${plColor(costs)}`}>{fmtUsd(costs, 2)}</td>
+                                <td className={`text-right py-1.5 ${pctPL > 30 ? 'text-red-600 font-medium' : 'text-slate-500'}`}>{fmt(pctPL, 0)}%</td>
                               </tr>
-                            ))}
+                              )
+                            })}
                         </tbody>
                       </table>
                     </div>
@@ -903,20 +922,26 @@ export default function AccountDashboard({ account, onClose }: Props) {
                             <th className="text-right py-1.5 font-medium">Swap</th>
                             <th className="text-right py-1.5 font-medium">Comm</th>
                             <th className="text-right py-1.5 font-medium">Totale</th>
+                            <th className="text-right py-1.5 font-medium">% P/L</th>
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-slate-100">
                           {Object.entries(costsByStrat)
                             .sort((a, b) => (a[1].swap + a[1].comm) - (b[1].swap + b[1].comm))
-                            .map(([m, c]) => (
+                            .map(([m, c]) => {
+                              const costs = c.swap + c.comm
+                              const pctPL = c.pl !== 0 ? Math.abs(costs / c.pl) * 100 : 0
+                              return (
                               <tr key={m}>
                                 <td className="py-1.5 font-medium text-slate-900">{c.name}</td>
                                 <td className="text-right py-1.5 text-slate-500">{c.trades}</td>
                                 <td className={`text-right py-1.5 ${plColor(c.swap)}`}>{fmtUsd(c.swap, 2)}</td>
                                 <td className={`text-right py-1.5 ${plColor(c.comm)}`}>{fmtUsd(c.comm, 2)}</td>
-                                <td className={`text-right py-1.5 font-medium ${plColor(c.swap + c.comm)}`}>{fmtUsd(c.swap + c.comm, 2)}</td>
+                                <td className={`text-right py-1.5 font-medium ${plColor(costs)}`}>{fmtUsd(costs, 2)}</td>
+                                <td className={`text-right py-1.5 ${pctPL > 30 ? 'text-red-600 font-medium' : 'text-slate-500'}`}>{fmt(pctPL, 0)}%</td>
                               </tr>
-                            ))}
+                              )
+                            })}
                         </tbody>
                       </table>
                     </div>
