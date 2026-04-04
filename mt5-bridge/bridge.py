@@ -288,16 +288,20 @@ def sync_account(account, strategy_map):
             pos["strategy_id"] = strategy_map[pos["magic"]]
         sb_upsert("qel_trades", pos, on_conflict="account_id,ticket")
 
-    # 4. Closed trades since last sync (or last 30 days)
+    # 4. Closed trades — full history on first sync, incremental after
+    history_days = getattr(sys.modules[__name__], 'HISTORY_DAYS', 1095)  # default 3 anni
+    force_full = getattr(sys.modules[__name__], 'FORCE_FULL_IMPORT', False)
     last_sync = account.get("last_sync_at")
-    if last_sync:
+
+    if force_full or not last_sync:
+        since = datetime.now(tz=timezone.utc) - timedelta(days=history_days)
+        log.info(f"  FULL IMPORT: scarico storico da {since.strftime('%Y-%m-%d')} ({history_days} giorni)")
+    else:
         try:
             since = datetime.fromisoformat(last_sync.replace("Z", "+00:00"))
             since = since - timedelta(hours=1)  # overlap per sicurezza
         except:
-            since = datetime.now(tz=timezone.utc) - timedelta(days=30)
-    else:
-        since = datetime.now(tz=timezone.utc) - timedelta(days=90)
+            since = datetime.now(tz=timezone.utc) - timedelta(days=history_days)
 
     closed = get_closed_deals(since)
     log.info(f"  Trade chiusi (da {since.strftime('%Y-%m-%d')}): {len(closed)}")

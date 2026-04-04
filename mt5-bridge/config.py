@@ -17,6 +17,12 @@ SYNC_INTERVAL = 300
 # Org ID Velqor
 ORG_ID = "a0000000-0000-0000-0000-000000000001"
 
+# History: quanti giorni di storico importare al primo sync
+HISTORY_DAYS = 1095  # 3 anni — copre tutto lo storico FTMO
+
+# Forza re-import completo (metti True, lancia bridge, poi rimetti False)
+FORCE_FULL_IMPORT = False
+
 # Logging
 LOG_FILE = "mt5_bridge.log"
 LOG_LEVEL = "INFO"  # DEBUG per piu' dettagli
