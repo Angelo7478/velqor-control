@@ -42,6 +42,7 @@ export default function AccountDashboard({ account, onClose }: Props) {
   const [strategies, setStrategies] = useState<QelStrategy[]>([])
   const [loadingData, setLoadingData] = useState(true)
   const [selectedMagic, setSelectedMagic] = useState<number | null>(null)
+  const [equityRange, setEquityRange] = useState<string>('ALL')
 
   const bal = Number(account.balance || 0)
   const eq = Number(account.equity || 0)
@@ -72,14 +73,6 @@ export default function AccountDashboard({ account, onClose }: Props) {
     setLoadingData(false)
   }
 
-  // Equity curve data
-  const equityData = snapshots.map(s => ({
-    ts: new Date(s.ts).toLocaleDateString('it-IT', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }),
-    equity: Number(s.equity),
-    balance: Number(s.balance),
-    dd: Number(s.total_dd_pct),
-  }))
-
   // Trade stats
   const closedTrades = trades.filter(t => !t.is_open && t.close_time)
   const openTrades = trades.filter(t => t.is_open)
@@ -98,6 +91,49 @@ export default function AccountDashboard({ account, onClose }: Props) {
     ? winTrades.reduce((s, t) => s + Number(t.net_profit || t.profit || 0), 0) / Math.abs(lossTrades.reduce((s, t) => s + Number(t.net_profit || t.profit || 0), 0))
     : 0
   const totalLots = closedTrades.reduce((s, t) => s + Number(t.lots || 0), 0)
+
+  // Trade-based equity curve (from imported trades — always available)
+  const tradeEquityCurve = (() => {
+    const sorted = [...closedTrades].sort((a, b) =>
+      (a.close_time || a.open_time || '').localeCompare(b.close_time || b.open_time || '')
+    )
+    let cumPL = 0
+    const points: { date: Date; equity: number; pl: number }[] = []
+    if (sorted.length > 0) {
+      points.push({ date: new Date(sorted[0].open_time), equity: size, pl: 0 })
+    }
+    sorted.forEach(t => {
+      cumPL += Number(t.net_profit || t.profit || 0)
+      points.push({ date: new Date(t.close_time || t.open_time), equity: size + cumPL, pl: cumPL })
+    })
+    return points
+  })()
+
+  // Filter by time range
+  const RANGES: Record<string, number> = { '1W': 7, '2W': 14, '1M': 30, '3M': 90, '6M': 180, '1Y': 365 }
+  const filteredEquity = (() => {
+    let data = tradeEquityCurve
+    if (equityRange !== 'ALL' && RANGES[equityRange]) {
+      const cutoff = new Date(Date.now() - RANGES[equityRange] * 86400000)
+      const before = data.filter(p => p.date < cutoff)
+      const after = data.filter(p => p.date >= cutoff)
+      // Add last point before cutoff as starting reference
+      if (before.length > 0 && after.length > 0) {
+        data = [{ ...before[before.length - 1], date: cutoff }, ...after]
+      } else {
+        data = after
+      }
+    }
+    // Format for chart
+    const isShort = equityRange === '1W' || equityRange === '2W'
+    return data.map(p => ({
+      ts: isShort
+        ? p.date.toLocaleDateString('it-IT', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })
+        : p.date.toLocaleDateString('it-IT', { day: '2-digit', month: '2-digit' }),
+      equity: p.equity,
+      pl: p.pl,
+    }))
+  })()
 
   // Monthly returns
   const monthlyReturns: Record<string, Record<number, number>> = {}
@@ -251,33 +287,84 @@ export default function AccountDashboard({ account, onClose }: Props) {
 
       {/* Equity Curve */}
       <div className="bg-white rounded-xl border border-slate-200 p-4">
-        <h3 className="text-sm font-semibold text-slate-700 mb-3">Equity Curve</h3>
-        {equityData.length >= 2 ? (
-          <ResponsiveContainer width="100%" height={300}>
-            <AreaChart data={equityData}>
-              <defs>
-                <linearGradient id="eqGrad" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="5%" stopColor="#7c3aed" stopOpacity={0.15} />
-                  <stop offset="95%" stopColor="#7c3aed" stopOpacity={0} />
-                </linearGradient>
-              </defs>
-              <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
-              <XAxis dataKey="ts" tick={{ fontSize: 10 }} stroke="#94a3b8" />
-              <YAxis tick={{ fontSize: 10 }} stroke="#94a3b8" domain={['dataMin - 500', 'dataMax + 500']} />
-              <Tooltip
-                contentStyle={{ fontSize: 12, borderRadius: 8, border: '1px solid #e2e8f0' }}
-                formatter={(val) => [`$${fmt(Number(val))}`, '']}
-              />
-              <Area type="monotone" dataKey="equity" stroke="#7c3aed" strokeWidth={2} fill="url(#eqGrad)" name="Equity" />
-              <Line type="monotone" dataKey="balance" stroke="#3b82f6" strokeWidth={1.5} dot={false} name="Balance" />
-            </AreaChart>
-          </ResponsiveContainer>
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="text-sm font-semibold text-slate-700">Equity Curve</h3>
+          {filteredEquity.length >= 2 && (
+            <div className="flex gap-1">
+              {['1W', '2W', '1M', '3M', '6M', '1Y', 'ALL'].map(r => (
+                <button key={r} onClick={() => setEquityRange(r)}
+                  className={`px-2 py-1 rounded text-[11px] font-medium transition-colors ${equityRange === r ? 'bg-violet-600 text-white' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'}`}>
+                  {r === 'ALL' ? 'Tutto' : r}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+        {filteredEquity.length >= 2 ? (
+          <>
+            {/* Summary bar */}
+            <div className="flex gap-4 mb-3 text-xs">
+              <span className="text-slate-500">
+                {filteredEquity.length} punti
+                {equityRange !== 'ALL' && ` (${equityRange})`}
+              </span>
+              {filteredEquity.length > 1 && (() => {
+                const first = filteredEquity[0].equity
+                const last = filteredEquity[filteredEquity.length - 1].equity
+                const diff = last - first
+                const pct = first > 0 ? (diff / first) * 100 : 0
+                const min = Math.min(...filteredEquity.map(d => d.equity))
+                const max = Math.max(...filteredEquity.map(d => d.equity))
+                return (
+                  <>
+                    <span className={diff >= 0 ? 'text-green-600 font-medium' : 'text-red-600 font-medium'}>
+                      {diff >= 0 ? '+' : ''}{fmtUsd(diff)} ({pct >= 0 ? '+' : ''}{fmt(pct, 2)}%)
+                    </span>
+                    <span className="text-slate-400">Min {fmtUsd(min)} · Max {fmtUsd(max)}</span>
+                  </>
+                )
+              })()}
+            </div>
+            <ResponsiveContainer width="100%" height={300}>
+              <AreaChart data={filteredEquity}>
+                <defs>
+                  <linearGradient id="eqGrad" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="5%" stopColor="#7c3aed" stopOpacity={0.15} />
+                    <stop offset="95%" stopColor="#7c3aed" stopOpacity={0} />
+                  </linearGradient>
+                </defs>
+                <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                <XAxis dataKey="ts" tick={{ fontSize: 10 }} stroke="#94a3b8" interval="preserveStartEnd" />
+                <YAxis tick={{ fontSize: 10 }} stroke="#94a3b8"
+                  domain={[(dataMin: number) => Math.floor(dataMin * 0.998), (dataMax: number) => Math.ceil(dataMax * 1.002)]}
+                  tickFormatter={(v) => `$${(v / 1000).toFixed(0)}k`} />
+                <Tooltip
+                  contentStyle={{ fontSize: 12, borderRadius: 8, border: '1px solid #e2e8f0' }}
+                  formatter={(val) => [fmtUsd(Number(val)), 'Equity']}
+                  labelStyle={{ fontSize: 11, color: '#64748b' }}
+                />
+                <Area type="monotone" dataKey="equity" stroke="#7c3aed" strokeWidth={2} fill="url(#eqGrad)" dot={false} />
+              </AreaChart>
+            </ResponsiveContainer>
+          </>
         ) : (
           <div className="h-48 flex items-center justify-center bg-slate-50 rounded-lg">
             <div className="text-center">
-              <p className="text-sm text-slate-500">Il grafico si popola con i dati del bridge</p>
-              <p className="text-xs text-slate-400 mt-1">{equityData.length} snapshot raccolti — servono almeno 2 punti</p>
-              <p className="text-xs text-violet-500 mt-2">Il bridge sincronizza ogni 5 minuti</p>
+              <p className="text-sm text-slate-500">
+                {closedTrades.length === 0
+                  ? 'Importa i trade per vedere la equity curve'
+                  : equityRange !== 'ALL'
+                    ? 'Nessun trade nel periodo selezionato'
+                    : 'Servono almeno 2 trade chiusi'}
+              </p>
+              {closedTrades.length === 0 && (
+                <p className="text-xs text-violet-500 mt-2">Vai su Conti &rarr; Import CSV per caricare lo storico</p>
+              )}
+              {equityRange !== 'ALL' && closedTrades.length > 0 && (
+                <button onClick={() => setEquityRange('ALL')} className="text-xs text-violet-600 hover:text-violet-800 mt-2 underline">
+                  Mostra tutto il periodo
+                </button>
+              )}
             </div>
           </div>
         )}
