@@ -154,6 +154,7 @@ $Shortcut.Save()
 |---------|---------|
 | `python bridge.py once` | Sync singolo (test) |
 | `python bridge.py loop` | Loop continuo ogni 5 min |
+| `python bridge.py enrich` | Aggiorna magic number sui trade importati da CSV |
 | `type mt5_bridge.log` | Vedi log |
 | `del mt5_bridge.log` | Pulisci log |
 

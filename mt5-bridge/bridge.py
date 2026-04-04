@@ -388,6 +388,118 @@ def update_strategy_real_metrics(strategy_map):
 
 
 # ============================================
+# ENRICH MAGIC NUMBERS
+# ============================================
+
+def run_enrich():
+    """Legge deal da MT5 e aggiorna i trade nel DB con i magic number mancanti."""
+    log.info("=" * 50)
+    log.info("ENRICH START — Aggiornamento magic number da MT5")
+
+    if not init_mt5():
+        return
+
+    try:
+        accounts = sb_get("qel_accounts", {
+            "select": "*",
+            "org_id": f"eq.{ORG_ID}",
+            "status": "not.in.(inactive,breached)"
+        })
+        log.info(f"Conti trovati: {len(accounts)}")
+
+        strategy_map = load_strategy_map()
+        total_updated = 0
+
+        for acc in accounts:
+            login = acc.get("login")
+            password = acc.get("investor_password")
+            server = acc.get("server")
+            acc_id = acc["id"]
+
+            if not login or not password or not server:
+                log.warning(f"  {acc['name']}: credenziali mancanti, skip")
+                continue
+
+            if not connect_account(login, password, server):
+                log.warning(f"  {acc['name']}: login fallito, skip")
+                continue
+
+            log.info(f"  Connesso a {acc['name']} ({login}@{server})")
+
+            # Read ALL deals from MT5
+            history_days = getattr(sys.modules[__name__], 'HISTORY_DAYS', 1095)
+            date_from = datetime.now(tz=timezone.utc) - timedelta(days=history_days)
+            date_to = datetime.now(tz=timezone.utc)
+            deals = mt5.history_deals_get(date_from, date_to)
+
+            if not deals or len(deals) == 0:
+                log.warning(f"  Nessun deal trovato in MT5")
+                continue
+
+            # Build maps: position_id -> magic, and fallback by symbol+time+profit
+            magic_by_ticket = {}
+            magic_by_match = {}
+            for d in deals:
+                m = int(d.magic)
+                if m > 0:
+                    magic_by_ticket[int(d.position_id)] = m
+                    # Fallback key: symbol + close_time_unix + profit (for FTMO-ticket imports)
+                    if d.entry == 1:  # DEAL_ENTRY_OUT
+                        key = f"{d.symbol}|{d.time}|{round(float(d.profit), 2)}"
+                        magic_by_match[key] = m
+
+            log.info(f"  MT5: {len(deals)} deals, {len(magic_by_ticket)} con magic (ticket match), {len(magic_by_match)} (fallback match)")
+
+            if not magic_by_ticket and not magic_by_match:
+                log.warning(f"  Nessun deal con magic number, skip")
+                continue
+
+            # Get trades without magic from DB
+            trades_no_magic = sb_get("qel_trades", {
+                "select": "id,ticket,symbol,close_time,profit",
+                "account_id": f"eq.{acc_id}",
+                "or": "(magic.is.null,magic.eq.0)",
+            })
+
+            log.info(f"  DB: {len(trades_no_magic)} trade senza magic")
+
+            updated = 0
+            for t in trades_no_magic:
+                ticket = int(t["ticket"])
+                magic = magic_by_ticket.get(ticket)
+
+                # Fallback: match by symbol + close_time + profit
+                if not magic and t.get("close_time") and t.get("profit"):
+                    try:
+                        ct = datetime.fromisoformat(t["close_time"].replace("Z", "+00:00"))
+                        ct_unix = int(ct.timestamp())
+                        profit_r = round(float(t["profit"]), 2)
+                        # Try exact second and +/- 1 second
+                        for offset in [0, -1, 1, -2, 2]:
+                            key = f"{t['symbol']}|{ct_unix + offset}|{profit_r}"
+                            if key in magic_by_match:
+                                magic = magic_by_match[key]
+                                break
+                    except:
+                        pass
+
+                if magic:
+                    patch_data = {"magic": magic}
+                    if magic in strategy_map:
+                        patch_data["strategy_id"] = strategy_map[magic]
+                    sb_patch("qel_trades", "id", t["id"], patch_data)
+                    updated += 1
+
+            log.info(f"  Aggiornati: {updated}/{len(trades_no_magic)} trade con magic number")
+            total_updated += updated
+
+        log.info(f"ENRICH COMPLETATO: {total_updated} trade aggiornati con magic number")
+
+    finally:
+        mt5.shutdown()
+
+
+# ============================================
 # MAIN LOOP
 # ============================================
 
@@ -447,6 +559,9 @@ def main():
     if mode == "once":
         log.info("Modalita: singola esecuzione")
         run_sync()
+    elif mode == "enrich":
+        log.info("Modalita: arricchimento magic number da MT5")
+        run_enrich()
     elif mode == "loop":
         log.info(f"Modalita: loop continuo (ogni {SYNC_INTERVAL}s)")
         while True:
@@ -457,9 +572,10 @@ def main():
             log.info(f"Prossimo sync tra {SYNC_INTERVAL}s...")
             time.sleep(SYNC_INTERVAL)
     else:
-        print(f"Uso: python bridge.py [once|loop]")
-        print(f"  once  - Esegue un singolo sync")
-        print(f"  loop  - Loop continuo (default, ogni {SYNC_INTERVAL}s)")
+        print(f"Uso: python bridge.py [once|loop|enrich]")
+        print(f"  once    - Esegue un singolo sync")
+        print(f"  loop    - Loop continuo (default, ogni {SYNC_INTERVAL}s)")
+        print(f"  enrich  - Aggiorna magic number sui trade esistenti leggendo da MT5")
 
 
 if __name__ == "__main__":
