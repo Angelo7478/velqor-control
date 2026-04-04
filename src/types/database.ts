@@ -162,6 +162,9 @@ export interface QelAccount {
   margin_used: number
   daily_dd_pct: number
   total_dd_pct: number
+  equity_peak: number
+  max_total_dd_pct: number
+  max_daily_dd_pct: number
   last_sync_at: string | null
   notes: string | null
   created_at: string

@@ -43,6 +43,9 @@ export default function AccountDashboard({ account, onClose }: Props) {
   const [loadingData, setLoadingData] = useState(true)
   const [selectedMagic, setSelectedMagic] = useState<number | null>(null)
   const [equityRange, setEquityRange] = useState<string>('ALL')
+  const [sortCol, setSortCol] = useState<string>('close_time')
+  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc')
+  const [showAllTrades, setShowAllTrades] = useState(false)
 
   const bal = Number(account.balance || 0)
   const eq = Number(account.equity || 0)
@@ -50,10 +53,10 @@ export default function AccountDashboard({ account, onClose }: Props) {
   const pl = bal - size
   const plPct = size > 0 ? (pl / size) * 100 : 0
   const floating = Number(account.floating_pl || 0)
-  const ddd = Number(account.daily_dd_pct || 0)
-  const tdd = Number(account.total_dd_pct || 0)
-  const maxDdd = Number(account.max_daily_loss_pct || 5)
-  const maxTdd = Number(account.max_total_loss_pct || 10)
+  const histMaxDDD = Number(account.max_daily_dd_pct || 0)
+  const histMaxTDD = Number(account.max_total_dd_pct || 0)
+  const limitDDD = Number(account.max_daily_loss_pct || 5)
+  const limitTDD = Number(account.max_total_loss_pct || 10)
 
   useEffect(() => {
     loadAccountData()
@@ -194,6 +197,50 @@ export default function AccountDashboard({ account, onClose }: Props) {
   const selStratStats = selectedMagic !== null ? calcStratStats(selectedMagic) : null
   const selStrategy = selectedMagic !== null ? strategyMap.get(selectedMagic) : null
 
+  // Show strategies that have trades on this account (any status) + active ones without trades
+  const accountMagics = new Set(trades.map(t => t.magic).filter((m): m is number => m !== null && m !== 0))
+  const visibleStrategies = strategies.filter(s => accountMagics.has(s.magic) || s.status === 'active')
+    .sort((a, b) => a.magic - b.magic)
+
+  // Sorted & filtered trade list
+  const sortedTrades = (() => {
+    const list = [...closedTrades]
+    list.sort((a, b) => {
+      let va: any, vb: any
+      switch (sortCol) {
+        case 'close_time': va = a.close_time || ''; vb = b.close_time || ''; break
+        case 'open_time': va = a.open_time || ''; vb = b.open_time || ''; break
+        case 'symbol': va = a.symbol || ''; vb = b.symbol || ''; break
+        case 'direction': va = a.direction || ''; vb = b.direction || ''; break
+        case 'lots': va = Number(a.lots || 0); vb = Number(b.lots || 0); break
+        case 'open_price': va = Number(a.open_price || 0); vb = Number(b.open_price || 0); break
+        case 'close_price': va = Number(a.close_price || 0); vb = Number(b.close_price || 0); break
+        case 'profit': va = Number(a.net_profit || a.profit || 0); vb = Number(b.net_profit || b.profit || 0); break
+        case 'swap': va = Number(a.swap || 0); vb = Number(b.swap || 0); break
+        case 'commission': va = Number(a.commission || 0); vb = Number(b.commission || 0); break
+        case 'duration': va = Number(a.duration_seconds || 0); vb = Number(b.duration_seconds || 0); break
+        case 'magic': va = Number(a.magic || 0); vb = Number(b.magic || 0); break
+        default: va = a.close_time || ''; vb = b.close_time || ''
+      }
+      if (va < vb) return sortDir === 'asc' ? -1 : 1
+      if (va > vb) return sortDir === 'asc' ? 1 : -1
+      return 0
+    })
+    return list
+  })()
+
+  function toggleSort(col: string) {
+    if (sortCol === col) setSortDir(d => d === 'asc' ? 'desc' : 'asc')
+    else { setSortCol(col); setSortDir('desc') }
+  }
+
+  function sortIcon(col: string) {
+    if (sortCol !== col) return '↕'
+    return sortDir === 'asc' ? '↑' : '↓'
+  }
+
+  const displayTrades = showAllTrades ? sortedTrades : sortedTrades.slice(0, 100)
+
   return (
     <div className="space-y-4">
       <button onClick={onClose} className="text-sm text-violet-600 hover:text-violet-800 flex items-center gap-1">
@@ -248,38 +295,38 @@ export default function AccountDashboard({ account, onClose }: Props) {
         </div>
       </div>
 
-      {/* DD Bars */}
+      {/* DD Bars — Historical Max */}
       <div className="bg-white rounded-xl border border-slate-200 p-4">
-        <h3 className="text-sm font-semibold text-slate-700 mb-3">Drawdown — Limiti FTMO</h3>
+        <h3 className="text-sm font-semibold text-slate-700 mb-3">Drawdown Storico — Limiti FTMO</h3>
         <div className="grid sm:grid-cols-2 gap-4">
           <div>
             <div className="flex justify-between text-xs mb-1.5">
-              <span className="text-slate-600 font-medium">Daily Drawdown</span>
-              <span className={ddd > 4 ? 'text-red-600 font-bold' : 'text-slate-700'}>{fmt(ddd, 2)}% / {maxDdd}%</span>
+              <span className="text-slate-600 font-medium">Max Daily Drawdown</span>
+              <span className={histMaxDDD > 4 ? 'text-red-600 font-bold' : 'text-slate-700'}>{fmt(histMaxDDD, 2)}% / {limitDDD}%</span>
             </div>
             <div className="h-4 bg-slate-100 rounded-full overflow-hidden">
-              <div className={`h-full rounded-full transition-all ${ddBarColor(ddd)}`}
-                style={{ width: `${Math.min((ddd / maxDdd) * 100, 100)}%` }} />
+              <div className={`h-full rounded-full transition-all ${ddBarColor(histMaxDDD)}`}
+                style={{ width: `${Math.min((histMaxDDD / limitDDD) * 100, 100)}%` }} />
             </div>
             <div className="flex justify-between text-[10px] text-slate-400 mt-1">
               <span>0%</span>
               <span className="text-amber-500">Warning 3%</span>
-              <span className="text-red-500">Limit {maxDdd}%</span>
+              <span className="text-red-500">Limit {limitDDD}%</span>
             </div>
           </div>
           <div>
             <div className="flex justify-between text-xs mb-1.5">
-              <span className="text-slate-600 font-medium">Total Drawdown</span>
-              <span className={tdd > 8 ? 'text-red-600 font-bold' : 'text-slate-700'}>{fmt(tdd, 2)}% / {maxTdd}%</span>
+              <span className="text-slate-600 font-medium">Max Total Drawdown</span>
+              <span className={histMaxTDD > 8 ? 'text-red-600 font-bold' : 'text-slate-700'}>{fmt(histMaxTDD, 2)}% / {limitTDD}%</span>
             </div>
             <div className="h-4 bg-slate-100 rounded-full overflow-hidden">
-              <div className={`h-full rounded-full transition-all ${ddBarColor(tdd)}`}
-                style={{ width: `${Math.min((tdd / maxTdd) * 100, 100)}%` }} />
+              <div className={`h-full rounded-full transition-all ${ddBarColor(histMaxTDD)}`}
+                style={{ width: `${Math.min((histMaxTDD / limitTDD) * 100, 100)}%` }} />
             </div>
             <div className="flex justify-between text-[10px] text-slate-400 mt-1">
               <span>0%</span>
               <span className="text-amber-500">Warning 7%</span>
-              <span className="text-red-500">Limit {maxTdd}%</span>
+              <span className="text-red-500">Limit {limitTDD}%</span>
             </div>
           </div>
         </div>
@@ -505,12 +552,14 @@ export default function AccountDashboard({ account, onClose }: Props) {
                 className={`px-3 py-1.5 rounded-full text-xs font-medium transition-colors ${selectedMagic === null ? 'bg-violet-600 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}>
                 Tutte
               </button>
-              {strategies.filter(s => s.status === 'active').map(s => {
+              {visibleStrategies.map(s => {
                 const st = calcStratStats(s.magic)
+                const isPaused = s.status !== 'active'
                 return (
                   <button key={s.magic} onClick={() => setSelectedMagic(selectedMagic === s.magic ? null : s.magic)}
-                    className={`px-3 py-1.5 rounded-full text-xs font-medium transition-colors flex items-center gap-1.5 ${selectedMagic === s.magic ? 'bg-violet-600 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}>
+                    className={`px-3 py-1.5 rounded-full text-xs font-medium transition-colors flex items-center gap-1.5 ${selectedMagic === s.magic ? 'bg-violet-600 text-white' : isPaused ? 'bg-amber-50 text-amber-700 hover:bg-amber-100 border border-amber-200' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}>
                     <span>#{s.magic} {s.name || s.strategy_id}</span>
+                    {isPaused && <span className={`text-[9px] ${selectedMagic === s.magic ? 'text-violet-200' : 'text-amber-500'}`}>⏸</span>}
                     {st.total > 0 && (
                       <span className={`${selectedMagic === s.magic ? 'text-violet-200' : st.totalPL >= 0 ? 'text-green-600' : 'text-red-600'}`}>
                         {st.total}t
@@ -529,22 +578,29 @@ export default function AccountDashboard({ account, onClose }: Props) {
                     <tr className="text-slate-500 border-b border-slate-200">
                       <th className="text-left py-2 font-medium">Strategia</th>
                       <th className="text-center py-2 font-medium">Magic</th>
+                      <th className="text-center py-2 font-medium">Stato</th>
                       <th className="text-right py-2 font-medium">Trade</th>
                       <th className="text-right py-2 font-medium">Win%</th>
                       <th className="text-right py-2 font-medium">P/L</th>
                       <th className="text-right py-2 font-medium">PF</th>
                       <th className="text-right py-2 font-medium">MaxDD</th>
                       <th className="text-right py-2 font-medium">R/DD</th>
+                      <th className="text-right py-2 font-medium">Exp</th>
                       <th className="text-right py-2 font-medium">Open</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100">
-                    {strategies.filter(s => s.status === 'active').map(s => {
+                    {visibleStrategies.map(s => {
                       const st = calcStratStats(s.magic)
                       return (
                         <tr key={s.magic} className="hover:bg-slate-50 cursor-pointer" onClick={() => setSelectedMagic(s.magic)}>
                           <td className="py-2 font-medium text-slate-900">{s.name || s.strategy_id}</td>
                           <td className="text-center py-2 text-slate-500">#{s.magic}</td>
+                          <td className="text-center py-2">
+                            <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${s.status === 'active' ? 'bg-green-100 text-green-700' : 'bg-amber-100 text-amber-700'}`}>
+                              {s.status === 'active' ? 'ON' : 'OFF'}
+                            </span>
+                          </td>
                           <td className="text-right py-2 text-slate-700">{st.total}</td>
                           <td className="text-right py-2 text-slate-700">{st.total > 0 ? `${fmt(st.wr, 1)}%` : '—'}</td>
                           <td className={`text-right py-2 font-medium ${st.total > 0 ? plColor(st.totalPL) : 'text-slate-300'}`}>
@@ -553,6 +609,7 @@ export default function AccountDashboard({ account, onClose }: Props) {
                           <td className="text-right py-2 text-slate-700">{st.total > 0 ? fmt(st.pf, 2) : '—'}</td>
                           <td className="text-right py-2 text-slate-700">{st.total > 0 ? fmtUsd(st.maxDD, 0) : '—'}</td>
                           <td className="text-right py-2 font-medium text-violet-700">{st.total > 0 ? fmt(st.retDD, 2) : '—'}</td>
+                          <td className="text-right py-2 text-slate-600">{st.total > 0 ? fmtUsd(st.totalPL / st.total, 2) : '—'}</td>
                           <td className="text-right py-2 text-slate-500">{st.open || '—'}</td>
                         </tr>
                       )
@@ -744,51 +801,211 @@ export default function AccountDashboard({ account, onClose }: Props) {
         </div>
       )}
 
+      {/* Costs Analysis */}
+      {closedTrades.length > 0 && (
+        <div className="bg-white rounded-xl border border-slate-200 p-4">
+          <h3 className="text-sm font-semibold text-slate-700 mb-3">Analisi Costi</h3>
+          {(() => {
+            const totalSwap = closedTrades.reduce((s, t) => s + Number(t.swap || 0), 0)
+            const totalComm = closedTrades.reduce((s, t) => s + Number(t.commission || 0), 0)
+            const totalCosts = totalSwap + totalComm
+            const grossPL = closedTrades.reduce((s, t) => s + Number(t.profit || 0), 0)
+            const costsPct = grossPL !== 0 ? Math.abs(totalCosts / grossPL) * 100 : 0
+            // Per-symbol breakdown
+            const costsBySymbol: Record<string, { swap: number; comm: number; trades: number }> = {}
+            closedTrades.forEach(t => {
+              if (!costsBySymbol[t.symbol]) costsBySymbol[t.symbol] = { swap: 0, comm: 0, trades: 0 }
+              costsBySymbol[t.symbol].swap += Number(t.swap || 0)
+              costsBySymbol[t.symbol].comm += Number(t.commission || 0)
+              costsBySymbol[t.symbol].trades++
+            })
+            // Per-strategy breakdown
+            const costsByStrat: Record<number, { name: string; swap: number; comm: number; trades: number }> = {}
+            closedTrades.filter(t => t.magic).forEach(t => {
+              const m = t.magic!
+              if (!costsByStrat[m]) {
+                const s = strategyMap.get(m)
+                costsByStrat[m] = { name: s ? (s.name || `#${m}`) : `#${m}`, swap: 0, comm: 0, trades: 0 }
+              }
+              costsByStrat[m].swap += Number(t.swap || 0)
+              costsByStrat[m].comm += Number(t.commission || 0)
+              costsByStrat[m].trades++
+            })
+            return (
+              <>
+                {/* Cost summary cards */}
+                <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-6 gap-3 mb-4">
+                  <div className={`rounded-lg p-3 ${totalSwap < 0 ? 'bg-red-50' : 'bg-green-50'}`}>
+                    <p className={`text-lg font-bold ${plColor(totalSwap)}`}>{fmtUsd(totalSwap, 2)}</p>
+                    <p className="text-xs text-slate-500">Swap totale</p>
+                  </div>
+                  <div className={`rounded-lg p-3 ${totalComm < 0 ? 'bg-red-50' : 'bg-slate-50'}`}>
+                    <p className={`text-lg font-bold ${plColor(totalComm)}`}>{fmtUsd(totalComm, 2)}</p>
+                    <p className="text-xs text-slate-500">Commissioni totali</p>
+                  </div>
+                  <div className={`rounded-lg p-3 ${totalCosts < 0 ? 'bg-red-50' : 'bg-slate-50'}`}>
+                    <p className={`text-lg font-bold ${plColor(totalCosts)}`}>{fmtUsd(totalCosts, 2)}</p>
+                    <p className="text-xs text-slate-500">Costi totali</p>
+                  </div>
+                  <div className="bg-slate-50 rounded-lg p-3">
+                    <p className="text-lg font-bold text-slate-900">{fmt(costsPct, 1)}%</p>
+                    <p className="text-xs text-slate-500">Costi / Gross P/L</p>
+                  </div>
+                  <div className="bg-slate-50 rounded-lg p-3">
+                    <p className="text-lg font-bold text-slate-900">{fmtUsd(closedTrades.length > 0 ? totalSwap / closedTrades.length : 0, 2)}</p>
+                    <p className="text-xs text-slate-500">Swap medio/trade</p>
+                  </div>
+                  <div className="bg-slate-50 rounded-lg p-3">
+                    <p className="text-lg font-bold text-slate-900">{fmtUsd(closedTrades.length > 0 ? totalComm / closedTrades.length : 0, 2)}</p>
+                    <p className="text-xs text-slate-500">Comm media/trade</p>
+                  </div>
+                </div>
+
+                {/* Cost breakdown by symbol + strategy side by side */}
+                <div className="grid sm:grid-cols-2 gap-4">
+                  <div>
+                    <p className="text-xs font-medium text-slate-500 mb-2">Per strumento</p>
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-xs">
+                        <thead>
+                          <tr className="text-slate-500 border-b border-slate-200">
+                            <th className="text-left py-1.5 font-medium">Simbolo</th>
+                            <th className="text-right py-1.5 font-medium">Trade</th>
+                            <th className="text-right py-1.5 font-medium">Swap</th>
+                            <th className="text-right py-1.5 font-medium">Comm</th>
+                            <th className="text-right py-1.5 font-medium">Totale</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100">
+                          {Object.entries(costsBySymbol)
+                            .sort((a, b) => (a[1].swap + a[1].comm) - (b[1].swap + b[1].comm))
+                            .map(([sym, c]) => (
+                              <tr key={sym}>
+                                <td className="py-1.5 font-medium text-slate-900">{sym}</td>
+                                <td className="text-right py-1.5 text-slate-500">{c.trades}</td>
+                                <td className={`text-right py-1.5 ${plColor(c.swap)}`}>{fmtUsd(c.swap, 2)}</td>
+                                <td className={`text-right py-1.5 ${plColor(c.comm)}`}>{fmtUsd(c.comm, 2)}</td>
+                                <td className={`text-right py-1.5 font-medium ${plColor(c.swap + c.comm)}`}>{fmtUsd(c.swap + c.comm, 2)}</td>
+                              </tr>
+                            ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                  <div>
+                    <p className="text-xs font-medium text-slate-500 mb-2">Per strategia</p>
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-xs">
+                        <thead>
+                          <tr className="text-slate-500 border-b border-slate-200">
+                            <th className="text-left py-1.5 font-medium">Strategia</th>
+                            <th className="text-right py-1.5 font-medium">Trade</th>
+                            <th className="text-right py-1.5 font-medium">Swap</th>
+                            <th className="text-right py-1.5 font-medium">Comm</th>
+                            <th className="text-right py-1.5 font-medium">Totale</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100">
+                          {Object.entries(costsByStrat)
+                            .sort((a, b) => (a[1].swap + a[1].comm) - (b[1].swap + b[1].comm))
+                            .map(([m, c]) => (
+                              <tr key={m}>
+                                <td className="py-1.5 font-medium text-slate-900">{c.name}</td>
+                                <td className="text-right py-1.5 text-slate-500">{c.trades}</td>
+                                <td className={`text-right py-1.5 ${plColor(c.swap)}`}>{fmtUsd(c.swap, 2)}</td>
+                                <td className={`text-right py-1.5 ${plColor(c.comm)}`}>{fmtUsd(c.comm, 2)}</td>
+                                <td className={`text-right py-1.5 font-medium ${plColor(c.swap + c.comm)}`}>{fmtUsd(c.swap + c.comm, 2)}</td>
+                              </tr>
+                            ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                </div>
+              </>
+            )
+          })()}
+        </div>
+      )}
+
       {/* Trade History */}
       <div className="bg-white rounded-xl border border-slate-200 p-4">
-        <h3 className="text-sm font-semibold text-slate-700 mb-3">Storico Trade</h3>
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="text-sm font-semibold text-slate-700">Storico Trade ({closedTrades.length})</h3>
+          {closedTrades.length > 100 && (
+            <button onClick={() => setShowAllTrades(!showAllTrades)}
+              className="text-xs text-violet-600 hover:text-violet-800 underline">
+              {showAllTrades ? 'Mostra ultimi 100' : `Mostra tutti (${closedTrades.length})`}
+            </button>
+          )}
+        </div>
         {closedTrades.length > 0 ? (
           <div className="overflow-x-auto">
             <table className="w-full text-xs">
               <thead>
                 <tr className="text-slate-500 border-b border-slate-200">
-                  <th className="text-left py-2 font-medium">Data</th>
-                  <th className="text-left py-2 font-medium">Simbolo</th>
-                  <th className="text-center py-2 font-medium">Dir</th>
-                  <th className="text-right py-2 font-medium">Lotti</th>
-                  <th className="text-right py-2 font-medium">Apertura</th>
-                  <th className="text-right py-2 font-medium">Chiusura</th>
-                  <th className="text-right py-2 font-medium">P/L</th>
-                  <th className="text-right py-2 font-medium">Durata</th>
-                  <th className="text-right py-2 font-medium">Magic</th>
+                  {[
+                    { key: 'close_time', label: 'Chiusura', align: 'text-left' },
+                    { key: 'open_time', label: 'Apertura', align: 'text-left' },
+                    { key: 'symbol', label: 'Simbolo', align: 'text-left' },
+                    { key: 'direction', label: 'Dir', align: 'text-center' },
+                    { key: 'lots', label: 'Lotti', align: 'text-right' },
+                    { key: 'open_price', label: 'P.Apertura', align: 'text-right' },
+                    { key: 'close_price', label: 'P.Chiusura', align: 'text-right' },
+                    { key: 'profit', label: 'P/L Lordo', align: 'text-right' },
+                    { key: 'swap', label: 'Swap', align: 'text-right' },
+                    { key: 'commission', label: 'Comm', align: 'text-right' },
+                    { key: 'duration', label: 'Durata', align: 'text-right' },
+                    { key: 'magic', label: 'Strategia', align: 'text-left' },
+                  ].map(col => (
+                    <th key={col.key} onClick={() => toggleSort(col.key)}
+                      className={`${col.align} py-2 font-medium cursor-pointer hover:text-violet-600 select-none whitespace-nowrap`}>
+                      {col.label} <span className="text-[10px] opacity-60">{sortIcon(col.key)}</span>
+                    </th>
+                  ))}
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
-                {closedTrades.slice(0, 50).map(t => {
+                {displayTrades.map(t => {
                   const durH = t.duration_seconds ? Number(t.duration_seconds) / 3600 : null
-                  const netPL = Number(t.net_profit || t.profit || 0)
+                  const grossPL = Number(t.profit || 0)
+                  const swap = Number(t.swap || 0)
+                  const comm = Number(t.commission || 0)
+                  const strat = t.magic ? strategyMap.get(t.magic) : null
                   return (
                     <tr key={t.id} className="hover:bg-slate-50">
-                      <td className="py-2 text-slate-600">
-                        {t.close_time ? new Date(t.close_time).toLocaleDateString('it-IT', { day: '2-digit', month: '2-digit', year: '2-digit' }) : '—'}
+                      <td className="py-1.5 text-slate-600 whitespace-nowrap">
+                        {t.close_time ? new Date(t.close_time).toLocaleDateString('it-IT', { day: '2-digit', month: '2-digit', year: '2-digit', hour: '2-digit', minute: '2-digit' }) : '—'}
                       </td>
-                      <td className="py-2 font-medium text-slate-900">{t.symbol}</td>
-                      <td className={`text-center py-2 font-medium ${t.direction === 'buy' ? 'text-green-600' : 'text-red-600'}`}>
-                        {t.direction === 'buy' ? 'B' : 'S'}
+                      <td className="py-1.5 text-slate-400 whitespace-nowrap">
+                        {new Date(t.open_time).toLocaleDateString('it-IT', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}
                       </td>
-                      <td className="text-right py-2 text-slate-700">{fmt(t.lots, 2)}</td>
-                      <td className="text-right py-2 text-slate-600">{fmt(t.open_price, 2)}</td>
-                      <td className="text-right py-2 text-slate-600">{t.close_price ? fmt(t.close_price, 2) : '—'}</td>
-                      <td className={`text-right py-2 font-medium ${plColor(netPL)}`}>{fmtUsd(netPL, 2)}</td>
-                      <td className="text-right py-2 text-slate-500">{durH !== null ? `${fmt(durH, 1)}h` : '—'}</td>
-                      <td className="text-right py-2 text-slate-400">#{t.magic}</td>
+                      <td className="py-1.5 font-medium text-slate-900">{t.symbol}</td>
+                      <td className={`text-center py-1.5 font-medium ${t.direction === 'buy' ? 'text-green-600' : 'text-red-600'}`}>
+                        {t.direction === 'buy' ? 'BUY' : 'SELL'}
+                      </td>
+                      <td className="text-right py-1.5 text-slate-700">{fmt(t.lots, 2)}</td>
+                      <td className="text-right py-1.5 text-slate-600">{fmt(t.open_price, 5)}</td>
+                      <td className="text-right py-1.5 text-slate-600">{t.close_price ? fmt(t.close_price, 5) : '—'}</td>
+                      <td className={`text-right py-1.5 font-medium ${plColor(grossPL)}`}>{fmtUsd(grossPL, 2)}</td>
+                      <td className={`text-right py-1.5 ${swap !== 0 ? plColor(swap) : 'text-slate-300'}`}>{swap !== 0 ? fmtUsd(swap, 2) : '—'}</td>
+                      <td className={`text-right py-1.5 ${comm !== 0 ? plColor(comm) : 'text-slate-300'}`}>{comm !== 0 ? fmtUsd(comm, 2) : '—'}</td>
+                      <td className="text-right py-1.5 text-slate-500 whitespace-nowrap">{durH !== null ? (durH < 1 ? `${Math.round(durH * 60)}m` : `${fmt(durH, 1)}h`) : '—'}</td>
+                      <td className="py-1.5 text-slate-600 whitespace-nowrap">
+                        {strat ? <span className="text-violet-700 font-medium">{strat.name || `#${t.magic}`}</span> : t.magic ? <span className="text-slate-400">#{t.magic}</span> : <span className="text-slate-300">—</span>}
+                      </td>
                     </tr>
                   )
                 })}
               </tbody>
             </table>
-            {closedTrades.length > 50 && (
-              <p className="text-xs text-slate-400 mt-2 text-center">Mostrati 50 di {closedTrades.length} trade</p>
+            {!showAllTrades && closedTrades.length > 100 && (
+              <div className="text-center mt-3">
+                <button onClick={() => setShowAllTrades(true)}
+                  className="text-xs text-violet-600 hover:text-violet-800 underline">
+                  Carica tutti i {closedTrades.length} trade
+                </button>
+              </div>
             )}
           </div>
         ) : (

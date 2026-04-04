@@ -114,7 +114,7 @@ export default function QuantPage() {
   const totalPL = totalBalance - totalSize
   const totalPLpct = totalSize > 0 ? (totalPL / totalSize) * 100 : 0
   const totalFloating = syncedAccounts.reduce((s, a) => s + Number(a.floating_pl || 0), 0)
-  const avgDD = syncedAccounts.length > 0 ? syncedAccounts.reduce((s, a) => s + Number(a.total_dd_pct || 0), 0) / syncedAccounts.length : 0
+  const maxDD = syncedAccounts.length > 0 ? Math.max(...syncedAccounts.map(a => Number(a.max_total_dd_pct || 0))) : 0
 
   const tabs = [
     { key: 'overview' as const, label: 'Overview' },
@@ -159,10 +159,10 @@ export default function QuantPage() {
               <p className={`text-xs mt-1 font-medium ${plColor(totalPLpct)}`}>{totalPLpct >= 0 ? '+' : ''}{fmt(totalPLpct, 1)}%</p>
             </div>
             <div className="bg-white rounded-xl border border-slate-200 p-4">
-              <p className="text-2xl font-bold text-slate-900">{fmt(avgDD, 1)}%</p>
-              <p className="text-sm text-slate-500">DD medio</p>
+              <p className={`text-2xl font-bold ${maxDD > 4 ? 'text-red-600' : maxDD > 3 ? 'text-amber-600' : 'text-slate-900'}`}>{fmt(maxDD, 1)}%</p>
+              <p className="text-sm text-slate-500">Max DD (storico)</p>
               <div className="h-1.5 bg-slate-100 rounded-full mt-2 overflow-hidden">
-                <div className={`h-full rounded-full ${ddBarColor(avgDD)}`} style={{ width: `${Math.min(avgDD * 10, 100)}%` }} />
+                <div className={`h-full rounded-full ${ddBarColor(maxDD)}`} style={{ width: `${Math.min(maxDD * 10, 100)}%` }} />
               </div>
             </div>
             <div className="bg-white rounded-xl border border-slate-200 p-4">
@@ -191,10 +191,10 @@ export default function QuantPage() {
                 const pl = bal - size
                 const plPct = size > 0 ? (pl / size) * 100 : 0
                 const floating = Number(acc.floating_pl || 0)
-                const ddd = Number(acc.daily_dd_pct || 0)
-                const tdd = Number(acc.total_dd_pct || 0)
-                const maxDdd = Number(acc.max_daily_loss_pct || 5)
-                const maxTdd = Number(acc.max_total_loss_pct || 10)
+                const histMaxDDD = Number(acc.max_daily_dd_pct || 0)
+                const histMaxTDD = Number(acc.max_total_dd_pct || 0)
+                const limitDDD = Number(acc.max_daily_loss_pct || 5)
+                const limitTDD = Number(acc.max_total_loss_pct || 10)
                 const margin = Number(acc.margin_used || 0)
 
                 return (
@@ -266,29 +266,29 @@ export default function QuantPage() {
                           </div>
                         </div>
 
-                        {/* DD Bars */}
+                        {/* DD Bars — Historical Max */}
                         <div className="grid grid-cols-2 gap-3">
                           <div>
                             <div className="flex justify-between text-xs mb-1">
-                              <span className="text-slate-500 font-medium">Daily DD</span>
-                              <span className={ddd > 4 ? 'text-red-600 font-bold' : 'text-slate-600'}>{fmt(ddd, 2)}% / {maxDdd}%</span>
+                              <span className="text-slate-500 font-medium">Max Daily DD</span>
+                              <span className={histMaxDDD > 4 ? 'text-red-600 font-bold' : 'text-slate-600'}>{fmt(histMaxDDD, 2)}% / {limitDDD}%</span>
                             </div>
                             <div className="h-2.5 bg-slate-100 rounded-full overflow-hidden">
-                              <div className={`h-full rounded-full transition-all ${ddBarColor(ddd)}`}
-                                style={{ width: `${Math.min((ddd / maxDdd) * 100, 100)}%` }} />
+                              <div className={`h-full rounded-full transition-all ${ddBarColor(histMaxDDD)}`}
+                                style={{ width: `${Math.min((histMaxDDD / limitDDD) * 100, 100)}%` }} />
                             </div>
-                            <p className="text-[10px] text-slate-400 mt-0.5">Limite FTMO: {maxDdd}%</p>
+                            <p className="text-[10px] text-slate-400 mt-0.5">Limite FTMO: {limitDDD}%</p>
                           </div>
                           <div>
                             <div className="flex justify-between text-xs mb-1">
-                              <span className="text-slate-500 font-medium">Total DD</span>
-                              <span className={tdd > 8 ? 'text-red-600 font-bold' : 'text-slate-600'}>{fmt(tdd, 2)}% / {maxTdd}%</span>
+                              <span className="text-slate-500 font-medium">Max Total DD</span>
+                              <span className={histMaxTDD > 8 ? 'text-red-600 font-bold' : 'text-slate-600'}>{fmt(histMaxTDD, 2)}% / {limitTDD}%</span>
                             </div>
                             <div className="h-2.5 bg-slate-100 rounded-full overflow-hidden">
-                              <div className={`h-full rounded-full transition-all ${ddBarColor(tdd)}`}
-                                style={{ width: `${Math.min((tdd / maxTdd) * 100, 100)}%` }} />
+                              <div className={`h-full rounded-full transition-all ${ddBarColor(histMaxTDD)}`}
+                                style={{ width: `${Math.min((histMaxTDD / limitTDD) * 100, 100)}%` }} />
                             </div>
-                            <p className="text-[10px] text-slate-400 mt-0.5">Limite FTMO: {maxTdd}%</p>
+                            <p className="text-[10px] text-slate-400 mt-0.5">Limite FTMO: {limitTDD}%</p>
                           </div>
                         </div>
 
@@ -611,10 +611,10 @@ export default function QuantPage() {
               const pl = bal - size
               const plPct = size > 0 ? (pl / size) * 100 : 0
               const floating = Number(acc.floating_pl || 0)
-              const ddd = Number(acc.daily_dd_pct || 0)
-              const tdd = Number(acc.total_dd_pct || 0)
-              const maxDdd = Number(acc.max_daily_loss_pct || 5)
-              const maxTdd = Number(acc.max_total_loss_pct || 10)
+              const histMaxDDD = Number(acc.max_daily_dd_pct || 0)
+              const histMaxTDD = Number(acc.max_total_dd_pct || 0)
+              const limitDDD = Number(acc.max_daily_loss_pct || 5)
+              const limitTDD = Number(acc.max_total_loss_pct || 10)
 
               return (
                 <div key={acc.id} onClick={() => synced && setSelectedAcc(acc)}
@@ -658,26 +658,26 @@ export default function QuantPage() {
                         </div>
                       </div>
 
-                      {/* DD indicators */}
+                      {/* DD indicators — Historical Max */}
                       <div className="space-y-2">
                         <div>
                           <div className="flex justify-between text-[10px] mb-0.5">
-                            <span className="text-slate-500">Daily DD</span>
-                            <span className={ddd > 4 ? 'text-red-600 font-medium' : 'text-slate-600'}>{fmt(ddd, 1)}% / {maxDdd}%</span>
+                            <span className="text-slate-500">Max Daily DD</span>
+                            <span className={histMaxDDD > 4 ? 'text-red-600 font-medium' : 'text-slate-600'}>{fmt(histMaxDDD, 1)}% / {limitDDD}%</span>
                           </div>
                           <div className="h-2 bg-slate-100 rounded-full overflow-hidden">
-                            <div className={`h-full rounded-full transition-all ${ddBarColor(ddd)}`}
-                              style={{ width: `${Math.min((ddd / maxDdd) * 100, 100)}%` }} />
+                            <div className={`h-full rounded-full transition-all ${ddBarColor(histMaxDDD)}`}
+                              style={{ width: `${Math.min((histMaxDDD / limitDDD) * 100, 100)}%` }} />
                           </div>
                         </div>
                         <div>
                           <div className="flex justify-between text-[10px] mb-0.5">
-                            <span className="text-slate-500">Total DD</span>
-                            <span className={tdd > 8 ? 'text-red-600 font-medium' : 'text-slate-600'}>{fmt(tdd, 1)}% / {maxTdd}%</span>
+                            <span className="text-slate-500">Max Total DD</span>
+                            <span className={histMaxTDD > 8 ? 'text-red-600 font-medium' : 'text-slate-600'}>{fmt(histMaxTDD, 1)}% / {limitTDD}%</span>
                           </div>
                           <div className="h-2 bg-slate-100 rounded-full overflow-hidden">
-                            <div className={`h-full rounded-full transition-all ${ddBarColor(tdd)}`}
-                              style={{ width: `${Math.min((tdd / maxTdd) * 100, 100)}%` }} />
+                            <div className={`h-full rounded-full transition-all ${ddBarColor(histMaxTDD)}`}
+                              style={{ width: `${Math.min((histMaxTDD / limitTDD) * 100, 100)}%` }} />
                           </div>
                         </div>
                       </div>

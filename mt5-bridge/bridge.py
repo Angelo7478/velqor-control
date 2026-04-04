@@ -217,6 +217,53 @@ def calc_dd(account_size, balance, equity):
     return round(total_dd, 2)
 
 
+def calc_historical_dd(acc_id, acc_size):
+    """Calculate max total DD and max daily DD from trade history."""
+    trades = sb_get("qel_trades", {
+        "select": "close_time,net_profit,profit",
+        "account_id": f"eq.{acc_id}",
+        "is_open": "eq.false",
+        "close_time": "not.is.null",
+        "order": "close_time.asc"
+    })
+    if not trades:
+        return 0, 0, acc_size
+
+    # Max total DD (peak-to-trough on equity curve)
+    cum_pl = 0
+    peak = acc_size
+    max_dd = 0
+    equity_peak = acc_size
+    for t in trades:
+        pl = float(t.get("net_profit") or t.get("profit") or 0)
+        cum_pl += pl
+        eq = acc_size + cum_pl
+        if eq > peak:
+            peak = eq
+        dd = peak - eq
+        if dd > max_dd:
+            max_dd = dd
+        if eq > equity_peak:
+            equity_peak = eq
+
+    max_total_dd_pct = round((max_dd / peak) * 100, 2) if peak > 0 else 0
+
+    # Max daily DD (worst single-day P/L)
+    from collections import defaultdict
+    daily = defaultdict(float)
+    for t in trades:
+        ct = t.get("close_time", "")
+        day = ct[:10] if ct else ""
+        if day:
+            pl = float(t.get("net_profit") or t.get("profit") or 0)
+            daily[day] += pl
+
+    worst_day = min(daily.values()) if daily else 0
+    max_daily_dd_pct = round(abs(worst_day) / acc_size * 100, 2) if worst_day < 0 else 0
+
+    return max_total_dd_pct, max_daily_dd_pct, equity_peak
+
+
 # ============================================
 # STRATEGY MATCHING
 # ============================================
@@ -255,6 +302,9 @@ def sync_account(account, strategy_map):
 
     total_dd = calc_dd(acc_size, info["balance"], info["equity"])
 
+    # Calculate historical max DD from trade data
+    max_total_dd, max_daily_dd, eq_peak = calc_historical_dd(acc_id, acc_size)
+
     # Update account
     now = datetime.now(tz=timezone.utc).isoformat()
     sb_patch("qel_accounts", "id", acc_id, {
@@ -263,9 +313,12 @@ def sync_account(account, strategy_map):
         "floating_pl": info["floating_pl"],
         "margin_used": info["margin_used"],
         "total_dd_pct": total_dd,
+        "equity_peak": eq_peak,
+        "max_total_dd_pct": max_total_dd,
+        "max_daily_dd_pct": max_daily_dd,
         "last_sync_at": now,
     })
-    log.info(f"  Account: balance=${info['balance']:.2f} equity=${info['equity']:.2f} floating=${info['floating_pl']:.2f} DD={total_dd:.1f}%")
+    log.info(f"  Account: balance=${info['balance']:.2f} equity=${info['equity']:.2f} floating=${info['floating_pl']:.2f} DD={total_dd:.1f}% maxDD={max_total_dd:.1f}% maxDailyDD={max_daily_dd:.1f}%")
 
     # 2. Snapshot
     sb_insert("qel_account_snapshots", {
