@@ -399,11 +399,11 @@ def run_sync():
         return
 
     try:
-        # Load accounts
+        # Load accounts (all except inactive/breached)
         accounts = sb_get("qel_accounts", {
             "select": "*",
             "org_id": f"eq.{ORG_ID}",
-            "status": "eq.active"
+            "status": "not.in.(inactive,breached)"
         })
         log.info(f"Conti attivi trovati: {len(accounts)}")
 
