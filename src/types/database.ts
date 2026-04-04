@@ -16,6 +16,9 @@ export type QelTradeDirection = 'buy' | 'sell'
 export type QelSizingMode = 'static' | 'risk_budget' | 'preset' | 'dynamic'
 export type QelAccessLevel = 'admin' | 'trader' | 'analyst' | 'student' | 'viewer'
 export type QelFileType = 'sqx_test' | 'sqx_wfm' | 'sqx_monte_carlo' | 'sqx_oos' | 'pdf_report' | 'csv_data' | 'code_easylanguage' | 'code_mql5' | 'other'
+export type QelStrategyStyle = 'mean_reversion' | 'trend_following' | 'seasonal' | 'breakout' | 'hybrid'
+export type QelStrategyCategory = 'intraday' | 'daily' | 'swing' | 'weekly'
+export type QelSizingStatus = 'recommended' | 'applied' | 'overridden' | 'suspended'
 
 export interface Organization {
   id: string
@@ -234,6 +237,22 @@ export interface QelStrategy {
   real_avg_duration_hours: number | null
   real_ret_dd: number
   include_in_portfolio: boolean
+  // Phase 2 columns
+  strategy_style: QelStrategyStyle | null
+  strategy_category: QelStrategyCategory | null
+  point_value: number | null
+  test_sharpe: number | null
+  test_sortino: number | null
+  test_calmar: number | null
+  test_profit_factor: number | null
+  test_recovery_factor: number | null
+  test_avg_trade_usd: number | null
+  test_kelly: number | null
+  test_optimal_f: number | null
+  real_kelly: number | null
+  real_optimal_f: number | null
+  benchmark_asset_return_pct: number | null
+  alpha_vs_benchmark: number | null
   notes: string | null
   created_at: string
   updated_at: string
@@ -279,9 +298,115 @@ export interface QelPortfolio {
   safety_factor: number
   overlap_mode: string
   is_active: boolean
+  // Phase 2 columns
+  kelly_fraction_mode: string
+  correlation_lookback_days: number
+  vol_target_annual_pct: number
+  style_balance_target: Record<string, number> | null
+  max_concurrent_positions: number | null
+  max_single_asset_pct: number
+  deleverage_threshold_pct: number
+  last_optimization_at: string | null
+  optimization_result: Record<string, unknown> | null
   notes: string | null
   created_at: string
   updated_at: string
+}
+
+export interface QelPortfolioStrategy {
+  id: string
+  portfolio_id: string
+  strategy_id: string
+  is_active: boolean
+  lot_override: number | null
+  lot_suggested: number | null
+  sizing_notes: string | null
+  // Phase 2 columns
+  kelly_lots: number | null
+  vol_adjusted_lots: number | null
+  hrp_lots: number | null
+  final_lots: number | null
+  dd_budget_allocation_pct: number | null
+  weight: number | null
+  risk_contribution_pct: number | null
+  created_at: string
+  updated_at: string
+}
+
+export interface QelStrategyTest {
+  id: string
+  strategy_id: string
+  test_type: string
+  test_date: string | null
+  period_start: string | null
+  period_end: string | null
+  trades: number | null
+  win_pct: number | null
+  payoff: number | null
+  expectancy: number | null
+  max_dd: number | null
+  ret_dd: number | null
+  mc95_dd: number | null
+  stability: number | null
+  profit_factor: number | null
+  sharpe: number | null
+  parameters: Record<string, unknown> | null
+  notes: string | null
+  created_at: string
+}
+
+export interface QelStrategySizing {
+  id: string
+  portfolio_id: string
+  strategy_id: string
+  run_id: string | null
+  kelly_fraction: number | null
+  half_kelly: number | null
+  quarter_kelly: number | null
+  optimal_f: number | null
+  chosen_fraction: number | null
+  fraction_method: string
+  strategy_volatility: number | null
+  vol_target_pct: number | null
+  vol_adjusted_lots: number | null
+  dd_budget_pct: number | null
+  dd_budget_usd: number | null
+  correlation_cluster: string | null
+  hrp_weight: number | null
+  hrp_adjusted_lots: number | null
+  recommended_lots: number | null
+  current_lots: number | null
+  lots_change_pct: number | null
+  ror_pct: number | null
+  ror_at_current: number | null
+  status: QelSizingStatus
+  override_lots: number | null
+  override_reason: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface QelSizingEngineRun {
+  id: string
+  portfolio_id: string
+  account_id: string | null
+  run_type: string
+  input_params: Record<string, unknown> | null
+  output_summary: Record<string, unknown> | null
+  strategy_results: Record<string, unknown> | null
+  created_at: string
+}
+
+export interface QelBenchmark {
+  id: number
+  symbol: string
+  ts: string
+  open_price: number | null
+  high: number | null
+  low: number | null
+  close_price: number | null
+  volume: number | null
+  created_at: string
 }
 
 export interface QelStrategyFile {

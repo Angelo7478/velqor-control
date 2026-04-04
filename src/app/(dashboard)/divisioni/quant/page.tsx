@@ -3,72 +3,8 @@
 import { useEffect, useState } from 'react'
 import { createClient } from '@/lib/supabase-browser'
 import { QelStrategy, QelAccount } from '@/types/database'
+import { fmt, fmtUsd, timeAgo, statusBadge, groupColor, plColor, ddBarColor } from '@/lib/quant-utils'
 import AccountDashboard from './account-dashboard'
-
-function fmt(n: number | null | undefined, decimals = 2): string {
-  if (n === null || n === undefined) return '—'
-  return Number(n).toLocaleString('it-IT', { minimumFractionDigits: decimals, maximumFractionDigits: decimals })
-}
-
-function fmtUsd(n: number | null | undefined, decimals = 0): string {
-  if (n === null || n === undefined) return '—'
-  const v = Number(n)
-  const prefix = v >= 0 ? '' : '-'
-  return `${prefix}$${Math.abs(v).toLocaleString('it-IT', { minimumFractionDigits: decimals, maximumFractionDigits: decimals })}`
-}
-
-function timeAgo(dateStr: string | null): string {
-  if (!dateStr) return 'Mai sincronizzato'
-  const diff = Date.now() - new Date(dateStr).getTime()
-  const mins = Math.floor(diff / 60000)
-  if (mins < 1) return 'Ora'
-  if (mins < 60) return `${mins}min fa`
-  const hours = Math.floor(mins / 60)
-  if (hours < 24) return `${hours}h fa`
-  return `${Math.floor(hours / 24)}g fa`
-}
-
-function statusBadge(status: string) {
-  const colors: Record<string, string> = {
-    active: 'bg-green-100 text-green-700',
-    paused: 'bg-amber-100 text-amber-700',
-    retired: 'bg-slate-100 text-slate-500',
-    testing: 'bg-blue-100 text-blue-700',
-    candidate: 'bg-violet-100 text-violet-700',
-    inactive: 'bg-slate-100 text-slate-500',
-    funded: 'bg-emerald-100 text-emerald-700',
-    challenge: 'bg-blue-100 text-blue-700',
-    verification: 'bg-amber-100 text-amber-700',
-    breached: 'bg-red-100 text-red-700',
-    payout: 'bg-green-100 text-green-700',
-  }
-  return colors[status] || 'bg-slate-100 text-slate-500'
-}
-
-function groupColor(group: string | null) {
-  const colors: Record<string, string> = {
-    INDICI_US: 'bg-blue-100 text-blue-700',
-    SP500: 'bg-indigo-100 text-indigo-700',
-    BTC: 'bg-orange-100 text-orange-700',
-    DAX: 'bg-emerald-100 text-emerald-700',
-    OIL: 'bg-amber-100 text-amber-700',
-    FX: 'bg-cyan-100 text-cyan-700',
-  }
-  return colors[group || ''] || 'bg-slate-100 text-slate-500'
-}
-
-function plColor(n: number): string {
-  if (n > 0) return 'text-green-600'
-  if (n < 0) return 'text-red-600'
-  return 'text-slate-500'
-}
-
-function ddBarColor(pct: number): string {
-  if (pct > 8) return 'bg-red-500'
-  if (pct > 5) return 'bg-amber-500'
-  if (pct > 3) return 'bg-yellow-500'
-  return 'bg-green-500'
-}
 
 type Tab = 'overview' | 'strategies' | 'accounts'
 type StrategyView = 'list' | 'detail'
@@ -124,11 +60,19 @@ export default function QuantPage() {
 
   return (
     <div className="max-w-6xl mx-auto">
-      <div className="mb-6">
-        <h1 className="text-2xl font-bold text-slate-900">Quant Engine</h1>
-        <p className="text-sm text-slate-500 mt-1">
-          Trading sistematico &middot; QuantEdgeLab &middot; {activeStrategies.length} strategie &middot; {syncedAccounts.length}/{accounts.length} conti sincronizzati
-        </p>
+      <div className="mb-6 flex items-start justify-between">
+        <div>
+          <h1 className="text-2xl font-bold text-slate-900">Quant Engine</h1>
+          <p className="text-sm text-slate-500 mt-1">
+            Trading sistematico &middot; QuantEdgeLab &middot; {activeStrategies.length} strategie &middot; {syncedAccounts.length}/{accounts.length} conti sincronizzati
+          </p>
+        </div>
+        <a
+          href="/divisioni/quant/sizing"
+          className="px-4 py-2 bg-indigo-600 text-white text-sm font-medium rounded-lg hover:bg-indigo-700 transition"
+        >
+          Sizing Engine
+        </a>
       </div>
 
       {/* Tabs */}

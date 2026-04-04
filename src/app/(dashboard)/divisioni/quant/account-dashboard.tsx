@@ -4,32 +4,7 @@ import { useEffect, useState } from 'react'
 import { createClient } from '@/lib/supabase-browser'
 import { QelAccount, QelAccountSnapshot, QelTrade, QelStrategy } from '@/types/database'
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, AreaChart, Area } from 'recharts'
-
-function fmt(n: number | null | undefined, decimals = 2): string {
-  if (n === null || n === undefined) return '—'
-  return Number(n).toLocaleString('it-IT', { minimumFractionDigits: decimals, maximumFractionDigits: decimals })
-}
-
-function fmtUsd(n: number | null | undefined, decimals = 0): string {
-  if (n === null || n === undefined) return '—'
-  const v = Number(n)
-  return `${v < 0 ? '-' : ''}$${Math.abs(v).toLocaleString('it-IT', { minimumFractionDigits: decimals, maximumFractionDigits: decimals })}`
-}
-
-function plColor(n: number): string {
-  if (n > 0) return 'text-green-600'
-  if (n < 0) return 'text-red-600'
-  return 'text-slate-500'
-}
-
-function ddBarColor(pct: number): string {
-  if (pct > 8) return 'bg-red-500'
-  if (pct > 5) return 'bg-amber-500'
-  if (pct > 3) return 'bg-yellow-500'
-  return 'bg-green-500'
-}
-
-const MONTHS = ['Gen', 'Feb', 'Mar', 'Apr', 'Mag', 'Giu', 'Lug', 'Ago', 'Set', 'Ott', 'Nov', 'Dic']
+import { fmt, fmtUsd, plColor, ddBarColor, MONTHS } from '@/lib/quant-utils'
 
 interface Props {
   account: QelAccount
