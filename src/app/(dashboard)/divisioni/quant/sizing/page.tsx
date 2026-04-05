@@ -7,12 +7,13 @@ import {
   fmt, fmtUsd, fmtPct, fmtLots, plColor, ddBarColor, statusBadge,
   groupColor, styleColor, styleLabel, fitnessColor, fitnessLabel,
   calcKelly, calcHalfKelly, calcRiskOfRuin, calcFitnessScore,
-  runSizingEngine, SizingInput, PortfolioSizingOutput, KellyMode, KELLY_MODES,
+  runSizingEngine, buildCorrelationMatrix, SizingInput, PortfolioSizingOutput,
+  DailyPnl, CorrelationEntry, KellyMode, KELLY_MODES,
   FTMO_DAILY_DD_LIMIT, FTMO_TOTAL_DD_LIMIT,
 } from '@/lib/quant-utils'
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell, PieChart, Pie } from 'recharts'
 
-type Tab = 'grid' | 'dd_budget' | 'fitness'
+type Tab = 'grid' | 'dd_budget' | 'fitness' | 'correlations'
 
 interface StrategyRow extends QelStrategy {
   ps?: QelPortfolioStrategy
@@ -24,6 +25,8 @@ export default function SizingPage() {
   const [account, setAccount] = useState<QelAccount | null>(null)
   const [strategies, setStrategies] = useState<StrategyRow[]>([])
   const [output, setOutput] = useState<PortfolioSizingOutput | null>(null)
+  const [correlations, setCorrelations] = useState<CorrelationEntry[]>([])
+  const [dailyPnl, setDailyPnl] = useState<DailyPnl[]>([])
   const [tab, setTab] = useState<Tab>('grid')
   const [kellyMode, setKellyMode] = useState<KellyMode>('half_kelly')
   const [safetyFactor, setSafetyFactor] = useState(0.5)
@@ -56,6 +59,19 @@ export default function SizingPage() {
       supabase.from('qel_strategies').select('*').order('magic'),
     ])
 
+    // Fetch daily P/L from view
+    const { data: pnlData } = await supabase
+      .from('v_strategy_daily_pnl')
+      .select('strategy_id, trade_date, daily_pnl')
+      .order('trade_date')
+    if (pnlData) {
+      setDailyPnl(pnlData.map((r: { strategy_id: string; trade_date: string; daily_pnl: number }) => ({
+        strategyId: r.strategy_id,
+        date: r.trade_date,
+        pnl: Number(r.daily_pnl),
+      })))
+    }
+
     if (accRes.data) setAccount(accRes.data)
 
     const psMap = new Map<string, QelPortfolioStrategy>()
@@ -87,6 +103,7 @@ export default function SizingPage() {
       asset: s.asset,
       assetGroup: s.asset_group,
       style: s.strategy_style,
+      family: s.strategy_family,
       testWinPct: s.test_win_pct,
       testPayoff: s.test_payoff,
       testMc95Dd: s.test_mc95_dd,
@@ -102,6 +119,13 @@ export default function SizingPage() {
       lotNeutral: s.lot_neutral,
       overlapMed: s.test_overlap_med,
     }))
+
+    // Build correlation matrix
+    const corrMatrix = buildCorrelationMatrix(
+      dailyPnl,
+      strategies.map(s => ({ id: s.id, family: s.strategy_family, style: s.strategy_style }))
+    )
+    setCorrelations(corrMatrix)
 
     const result = runSizingEngine(
       inputs,
@@ -197,7 +221,7 @@ export default function SizingPage() {
           sub={output ? fmtPct(output.totalDdBudgetUsedPct) : '—'}
           color={output && output.totalDdBudgetUsedPct > 90 ? 'text-red-600' : output && output.totalDdBudgetUsedPct > 70 ? 'text-amber-600' : 'text-green-600'}
         />
-        <KPI label="Strategie" value={`${strategies.length}`} />
+        <KPI label="Strategie" value={`${strategies.length}`} sub={output ? `${output.familyCount} famiglie` : ''} />
         <KPI label="Kelly Mode" value={kellyMode === 'half_kelly' ? 'Half' : kellyMode === 'quarter_kelly' ? '1/4' : 'Full'} />
         <KPI label="RoR Medio" value={output?.avgRor !== null && output?.avgRor !== undefined ? fmtPct(output.avgRor * 100, 4) : '—'} />
       </div>
@@ -240,6 +264,7 @@ export default function SizingPage() {
         {([
           { key: 'grid', label: 'Strategy Grid' },
           { key: 'dd_budget', label: 'DD Budget' },
+          { key: 'correlations', label: 'Correlazioni' },
           { key: 'fitness', label: 'Fitness Report' },
         ] as { key: Tab; label: string }[]).map(t => (
           <button
@@ -257,6 +282,7 @@ export default function SizingPage() {
       {/* Tab content */}
       {tab === 'grid' && <StrategyGrid strategies={strategies} output={output} />}
       {tab === 'dd_budget' && <DDBudget strategies={strategies} output={output} ddBudgetUsd={ddBudgetUsd} />}
+      {tab === 'correlations' && <CorrelationTab strategies={strategies} correlations={correlations} output={output} />}
       {tab === 'fitness' && <FitnessReport strategies={strategies} output={output} />}
     </div>
   )
@@ -578,6 +604,117 @@ function FitnessReport({ strategies, output }: { strategies: StrategyRow[]; outp
           )}
         </div>
       ))}
+    </div>
+  )
+}
+
+// --- Correlation Tab ---
+
+function CorrelationTab({ strategies, correlations, output }: {
+  strategies: StrategyRow[]; correlations: CorrelationEntry[]; output: PortfolioSizingOutput | null
+}) {
+  if (correlations.length === 0) {
+    return <div className="bg-white rounded-xl border border-slate-200 p-8 text-center text-slate-400">Clicca &quot;Ottimizza&quot; per calcolare le correlazioni</div>
+  }
+
+  // Build correlation lookup
+  const corrMap = new Map<string, number>()
+  for (const c of correlations) {
+    corrMap.set(`${c.strategyAId}_${c.strategyBId}`, c.correlation)
+    corrMap.set(`${c.strategyBId}_${c.strategyAId}`, c.correlation)
+  }
+
+  // Color for correlation value
+  function corrColor(v: number): string {
+    if (v >= 0.7) return 'bg-red-500 text-white'
+    if (v >= 0.4) return 'bg-red-200 text-red-800'
+    if (v >= 0.1) return 'bg-orange-100 text-orange-700'
+    if (v >= -0.1) return 'bg-slate-50 text-slate-500'
+    if (v >= -0.4) return 'bg-blue-100 text-blue-700'
+    return 'bg-blue-500 text-white'
+  }
+
+  return (
+    <div className="space-y-4">
+      {/* Heatmap */}
+      <div className="bg-white rounded-xl border border-slate-200 p-4 overflow-x-auto">
+        <h3 className="text-sm font-semibold text-slate-700 mb-1">Matrice Correlazione</h3>
+        <p className="text-[10px] text-slate-400 mb-3">
+          Statistiche dove disponibili (&ge;10 giorni overlap), family-based dove dati insufficienti.
+          Rosso = correlati (rischio concentrazione) | Blu = decorrelati (diversificazione).
+        </p>
+        <table className="text-[10px]">
+          <thead>
+            <tr>
+              <th className="px-1 py-1"></th>
+              {strategies.map(s => (
+                <th key={s.id} className="px-1 py-1 font-normal text-slate-500 writing-mode-vertical" style={{ writingMode: 'vertical-lr', textOrientation: 'mixed' }}>
+                  M{s.magic}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {strategies.map(row => (
+              <tr key={row.id}>
+                <td className="px-1 py-0.5 font-medium text-slate-600 whitespace-nowrap">M{row.magic}</td>
+                {strategies.map(col => {
+                  if (row.id === col.id) {
+                    return <td key={col.id} className="px-1 py-0.5"><div className="w-8 h-6 bg-slate-800 text-white text-center rounded text-[9px] leading-6">1.00</div></td>
+                  }
+                  const corr = corrMap.get(`${row.id}_${col.id}`)
+                  if (corr === undefined) return <td key={col.id} className="px-1 py-0.5"><div className="w-8 h-6 bg-slate-50 text-slate-300 text-center rounded text-[9px] leading-6">—</div></td>
+                  return (
+                    <td key={col.id} className="px-1 py-0.5">
+                      <div className={`w-8 h-6 text-center rounded text-[9px] leading-6 ${corrColor(corr)}`}>
+                        {corr.toFixed(2)}
+                      </div>
+                    </td>
+                  )
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {/* Legend */}
+        <div className="flex items-center gap-3 mt-3 text-[10px] text-slate-500">
+          <span>Legenda:</span>
+          <div className="flex items-center gap-1"><div className="w-4 h-3 bg-blue-500 rounded" /> &lt; -0.4</div>
+          <div className="flex items-center gap-1"><div className="w-4 h-3 bg-blue-100 rounded" /> -0.4 a -0.1</div>
+          <div className="flex items-center gap-1"><div className="w-4 h-3 bg-slate-50 border rounded" /> neutro</div>
+          <div className="flex items-center gap-1"><div className="w-4 h-3 bg-orange-100 rounded" /> 0.1 a 0.4</div>
+          <div className="flex items-center gap-1"><div className="w-4 h-3 bg-red-200 rounded" /> 0.4 a 0.7</div>
+          <div className="flex items-center gap-1"><div className="w-4 h-3 bg-red-500 rounded" /> &gt; 0.7</div>
+        </div>
+      </div>
+
+      {/* Family Allocation (HRP result) */}
+      {output && output.familyBalance && (
+        <div className="bg-white rounded-xl border border-slate-200 p-4">
+          <h3 className="text-sm font-semibold text-slate-700 mb-3">Allocazione per Famiglia (HRP)</h3>
+          <p className="text-[10px] text-slate-400 mb-3">
+            Budget DD allocato a livello di famiglia (inverse variance), poi diviso equamente tra le varianti.
+            Famiglie con DD atteso alto ricevono meno budget = protezione dalla concentrazione.
+          </p>
+          <div className="space-y-2">
+            {Object.entries(output.familyBalance)
+              .sort(([, a], [, b]) => b.weight - a.weight)
+              .map(([family, data]) => (
+                <div key={family} className="flex items-center gap-3">
+                  <span className="text-xs font-mono text-slate-600 w-28 truncate">{family}</span>
+                  <div className="flex-1 h-5 bg-slate-100 rounded-full overflow-hidden">
+                    <div
+                      className="h-full bg-indigo-400 rounded-full"
+                      style={{ width: `${Math.min(data.weight, 100)}%` }}
+                    />
+                  </div>
+                  <span className="text-xs font-mono text-slate-700 w-14 text-right">{fmt(data.weight, 1)}%</span>
+                  <span className="text-[10px] text-slate-400 w-16">{data.strategies} strat.</span>
+                </div>
+              ))}
+          </div>
+        </div>
+      )}
     </div>
   )
 }

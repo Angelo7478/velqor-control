@@ -330,6 +330,7 @@ export interface SizingInput {
   asset: string
   assetGroup: string | null
   style: string | null
+  family: string | null
   testWinPct: number | null
   testPayoff: number | null
   testMc95Dd: number | null
@@ -354,6 +355,8 @@ export interface SizingResult {
   rorPct: number | null
   ddBudgetPct: number
   ddBudgetUsd: number
+  hrpWeight: number | null
+  family: string | null
   recommendedLots: number
   currentLots: number | null
   lotsChangePct: number | null
@@ -367,12 +370,23 @@ export interface PortfolioSizingOutput {
   totalDdBudgetUsedUsd: number
   ddBudgetAvailableUsd: number
   strategyCount: number
+  familyCount: number
   avgRor: number | null
   styleBalance: Record<string, number>
+  familyBalance: Record<string, { weight: number; strategies: number }>
   results: SizingResult[]
 }
 
-/** Main sizing engine: compute optimal lots for a portfolio */
+/**
+ * Main sizing engine v2: family-aware HRP + Kelly sizing.
+ *
+ * Flow:
+ * 1. Per-strategy: Kelly/Half-Kelly, RoR, fitness
+ * 2. HRP: allocate DD budget across FAMILIES (inverse variance),
+ *    then split equally within each family
+ * 3. Convert budget to lots via MC95 DD
+ * 4. RoR cap + FTMO budget constraint
+ */
 export function runSizingEngine(
   strategies: SizingInput[],
   equityBase: number,
@@ -384,9 +398,8 @@ export function runSizingEngine(
   const results: SizingResult[] = []
   const styleCount: Record<string, number> = {}
 
-  // Step 1: Calculate Kelly and raw sizing per strategy
+  // Step 1: Calculate Kelly and fitness per strategy
   for (const s of strategies) {
-    // Use blended metrics if enough real trades
     const useReal = s.realTrades >= 30
     const winPct = useReal ? (s.realWinPct ?? s.testWinPct) : s.testWinPct
     const payoff = useReal ? (s.realPayoff ?? s.testPayoff) : s.testPayoff
@@ -400,12 +413,10 @@ export function runSizingEngine(
     else if (kellyMode === 'quarter_kelly') chosenFraction = quarterKelly
     else chosenFraction = kellyF
 
-    // RoR at chosen fraction
     const rorPct = (chosenFraction && winPct && payoff)
       ? calcRiskOfRuin(winPct, payoff, chosenFraction, maxDdTargetPct)
       : null
 
-    // Fitness (with confidence)
     const fitnessResult = calcFitnessScore({
       test_win_pct: s.testWinPct,
       test_payoff: s.testPayoff,
@@ -418,7 +429,6 @@ export function runSizingEngine(
       real_trades: s.realTrades,
     })
 
-    // Style tracking
     if (s.style) styleCount[s.style] = (styleCount[s.style] || 0) + 1
 
     results.push({
@@ -427,8 +437,10 @@ export function runSizingEngine(
       halfKelly,
       quarterKelly,
       rorPct,
-      ddBudgetPct: 0, // calculated in step 2
+      ddBudgetPct: 0,
       ddBudgetUsd: 0,
+      hrpWeight: null,
+      family: s.family,
       recommendedLots: 0,
       currentLots: s.lotNeutral,
       lotsChangePct: null,
@@ -438,36 +450,55 @@ export function runSizingEngine(
     })
   }
 
-  // Step 2: Allocate DD budget proportionally to MC95 DD
-  const totalMc95 = strategies.reduce((sum, s) => sum + (s.mc95DdScaled ?? s.testMc95Dd ?? 0), 0)
+  // Step 2: HRP family-aware DD budget allocation
+  const hrpWeights = calcHRPWeights(
+    strategies.map(s => ({
+      id: s.strategyId,
+      family: s.family,
+      mc95Dd: s.mc95DdScaled ?? s.testMc95Dd ?? 0,
+    }))
+  )
+
+  const familyBalance: Record<string, { weight: number; strategies: number }> = {}
 
   for (let i = 0; i < strategies.length; i++) {
     const s = strategies[i]
     const r = results[i]
     const mc95 = s.mc95DdScaled ?? s.testMc95Dd ?? 0
+    const hrpW = hrpWeights.get(s.strategyId) || (1 / strategies.length)
 
-    if (totalMc95 > 0 && mc95 > 0) {
-      // Equal risk allocation (inverse to DD contribution)
-      const equalWeight = 1 / strategies.length
-      r.ddBudgetPct = equalWeight * 100
-      r.ddBudgetUsd = ddBudgetUsd * equalWeight
+    r.hrpWeight = hrpW
+    r.ddBudgetPct = hrpW * 100
+    r.ddBudgetUsd = ddBudgetUsd * hrpW
 
-      // Recommended lots: DD budget / MC95 per lot, floored
+    // Track family balance
+    const fam = s.family || `solo_${s.magic}`
+    if (!familyBalance[fam]) familyBalance[fam] = { weight: 0, strategies: 0 }
+    familyBalance[fam].weight += hrpW * 100
+    familyBalance[fam].strategies++
+
+    // Lots from DD budget
+    if (mc95 > 0) {
       r.recommendedLots = Math.floor((r.ddBudgetUsd / mc95) * 100) / 100
     }
 
-    // RoR cap: if RoR > 5%, reduce lots iteratively
+    // RoR cap
     if (r.rorPct !== null && r.rorPct > 0.05) {
       r.recommendedLots = Math.floor(r.recommendedLots * 0.9 * 100) / 100
     }
 
-    // Min lot: 0.01
+    // Min lot
     if (r.recommendedLots < 0.01) r.recommendedLots = 0.01
 
     // Change %
     if (r.currentLots && r.currentLots > 0) {
       r.lotsChangePct = ((r.recommendedLots - r.currentLots) / r.currentLots) * 100
     }
+  }
+
+  // Round family weights
+  for (const fam of Object.keys(familyBalance)) {
+    familyBalance[fam].weight = Math.round(familyBalance[fam].weight * 10) / 10
   }
 
   // Step 3: Verify total DD fits budget
@@ -477,14 +508,12 @@ export function runSizingEngine(
     totalDdUsed += results[i].recommendedLots * mc95
   }
 
-  // If over budget, scale down proportionally
   if (totalDdUsed > ddBudgetUsd && ddBudgetUsd > 0) {
     const scaleFactor = ddBudgetUsd / totalDdUsed
     for (const r of results) {
       r.recommendedLots = Math.floor(r.recommendedLots * scaleFactor * 100) / 100
       if (r.recommendedLots < 0.01) r.recommendedLots = 0.01
     }
-    // Recalculate
     totalDdUsed = 0
     for (let i = 0; i < strategies.length; i++) {
       const mc95 = strategies[i].mc95DdScaled ?? strategies[i].testMc95Dd ?? 0
@@ -499,6 +528,9 @@ export function runSizingEngine(
     styleBalance[style] = Math.round((count / totalStrats) * 100)
   }
 
+  // Count unique families
+  const uniqueFamilies = new Set(strategies.map(s => s.family || `solo_${s.magic}`))
+
   // Avg RoR
   const rors = results.filter(r => r.rorPct !== null).map(r => r.rorPct!)
   const avgRor = rors.length > 0 ? rors.reduce((a, b) => a + b, 0) / rors.length : null
@@ -508,10 +540,188 @@ export function runSizingEngine(
     totalDdBudgetUsedUsd: Math.round(totalDdUsed * 100) / 100,
     ddBudgetAvailableUsd: Math.round((ddBudgetUsd - totalDdUsed) * 100) / 100,
     strategyCount: strategies.length,
+    familyCount: uniqueFamilies.size,
     avgRor,
     styleBalance,
+    familyBalance,
     results,
   }
+}
+
+// --- Correlation & HRP ---
+
+export interface DailyPnl {
+  strategyId: string
+  date: string
+  pnl: number
+}
+
+export interface CorrelationEntry {
+  strategyAId: string
+  strategyBId: string
+  correlation: number
+  sampleDays: number
+}
+
+/**
+ * Compute Pearson correlation between two P/L series.
+ * Only uses overlapping dates. Returns null if < 5 overlapping days.
+ */
+export function pearsonCorrelation(seriesA: Map<string, number>, seriesB: Map<string, number>): { corr: number | null; overlap: number } {
+  const commonDates: string[] = []
+  for (const date of seriesA.keys()) {
+    if (seriesB.has(date)) commonDates.push(date)
+  }
+
+  if (commonDates.length < 5) return { corr: null, overlap: commonDates.length }
+
+  const a = commonDates.map(d => seriesA.get(d)!)
+  const b = commonDates.map(d => seriesB.get(d)!)
+  const n = a.length
+
+  const meanA = a.reduce((s, v) => s + v, 0) / n
+  const meanB = b.reduce((s, v) => s + v, 0) / n
+
+  let cov = 0, varA = 0, varB = 0
+  for (let i = 0; i < n; i++) {
+    const da = a[i] - meanA
+    const db = b[i] - meanB
+    cov += da * db
+    varA += da * da
+    varB += db * db
+  }
+
+  const denom = Math.sqrt(varA * varB)
+  if (denom === 0) return { corr: 0, overlap: n }
+
+  return { corr: Math.round((cov / denom) * 10000) / 10000, overlap: n }
+}
+
+/**
+ * Build pairwise correlation matrix from daily P/L data.
+ * Uses statistical correlation where enough data, family-based
+ * assumptions where not.
+ *
+ * Family assumptions:
+ * - Same family (e.g. RSI2_SP500 variants): 0.75
+ * - Same style, different family: 0.30
+ * - Different style: -0.10
+ */
+export function buildCorrelationMatrix(
+  dailyPnl: DailyPnl[],
+  strategies: { id: string; family: string | null; style: string | null }[],
+  minOverlap = 10
+): CorrelationEntry[] {
+  // Build per-strategy date->pnl maps
+  const seriesMap = new Map<string, Map<string, number>>()
+  for (const dp of dailyPnl) {
+    if (!seriesMap.has(dp.strategyId)) seriesMap.set(dp.strategyId, new Map())
+    const m = seriesMap.get(dp.strategyId)!
+    m.set(dp.date, (m.get(dp.date) ?? 0) + dp.pnl)
+  }
+
+  const results: CorrelationEntry[] = []
+  const stratMap = new Map(strategies.map(s => [s.id, s]))
+
+  for (let i = 0; i < strategies.length; i++) {
+    for (let j = i + 1; j < strategies.length; j++) {
+      const a = strategies[i]
+      const b = strategies[j]
+      const seriesA = seriesMap.get(a.id)
+      const seriesB = seriesMap.get(b.id)
+
+      let corr: number
+      let sampleDays: number
+
+      if (seriesA && seriesB) {
+        const result = pearsonCorrelation(seriesA, seriesB)
+        if (result.corr !== null && result.overlap >= minOverlap) {
+          corr = result.corr
+          sampleDays = result.overlap
+        } else {
+          // Fallback to family-based assumption
+          corr = assumedCorrelation(a.family, a.style, b.family, b.style)
+          sampleDays = result.overlap
+        }
+      } else {
+        corr = assumedCorrelation(a.family, a.style, b.family, b.style)
+        sampleDays = 0
+      }
+
+      results.push({ strategyAId: a.id, strategyBId: b.id, correlation: corr, sampleDays })
+    }
+  }
+
+  return results
+}
+
+/** Family-based correlation assumption when insufficient data */
+function assumedCorrelation(familyA: string | null, styleA: string | null, familyB: string | null, styleB: string | null): number {
+  // Same family = highly correlated (same edge, same asset)
+  if (familyA && familyB && familyA === familyB) return 0.75
+  // Same style, different family = moderate positive
+  if (styleA && styleB && styleA === styleB) return 0.30
+  // Mean reversion vs trend following = negatively correlated
+  if ((styleA === 'mean_reversion' && styleB === 'trend_following') ||
+      (styleA === 'trend_following' && styleB === 'mean_reversion')) return -0.15
+  // Seasonal vs others = low correlation
+  if (styleA === 'seasonal' || styleB === 'seasonal') return 0.10
+  // Default
+  return 0.20
+}
+
+/**
+ * Family-aware HRP (Hierarchical Risk Parity).
+ *
+ * Simplified 2-level approach:
+ * Level 1: Allocate budget across FAMILIES inversely proportional to
+ *          family aggregate variance (sum of MC95 DDs)
+ * Level 2: Within each family, allocate equally among active strategies
+ *
+ * This ensures RSI2_SP500 (5 variants) gets ~1 family allocation,
+ * not 5x a single-strategy family.
+ */
+export function calcHRPWeights(
+  strategies: { id: string; family: string | null; mc95Dd: number }[]
+): Map<string, number> {
+  // Group by family
+  const families = new Map<string, { ids: string[]; totalMc95: number }>()
+  for (const s of strategies) {
+    const fam = s.family || `solo_${s.id}`
+    if (!families.has(fam)) families.set(fam, { ids: [], totalMc95: 0 })
+    const f = families.get(fam)!
+    f.ids.push(s.id)
+    f.totalMc95 += s.mc95Dd
+  }
+
+  // Level 1: Inverse-variance across families
+  // Use 1/totalMc95 as proxy for inverse variance
+  let totalInvVar = 0
+  const familyWeights = new Map<string, number>()
+  for (const [fam, data] of families) {
+    const invVar = data.totalMc95 > 0 ? 1 / data.totalMc95 : 0
+    familyWeights.set(fam, invVar)
+    totalInvVar += invVar
+  }
+
+  // Normalize family weights
+  if (totalInvVar > 0) {
+    for (const [fam, w] of familyWeights) {
+      familyWeights.set(fam, w / totalInvVar)
+    }
+  }
+
+  // Level 2: Equal weight within each family
+  const weights = new Map<string, number>()
+  for (const [fam, data] of families) {
+    const familyWeight = familyWeights.get(fam) || 0
+    const perStrategy = data.ids.length > 0 ? familyWeight / data.ids.length : 0
+    for (const id of data.ids) {
+      weights.set(id, Math.round(perStrategy * 10000) / 10000)
+    }
+  }
+
+  return weights
 }
 
 // --- Constants ---

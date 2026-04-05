@@ -240,6 +240,8 @@ export interface QelStrategy {
   // Phase 2 columns
   strategy_style: QelStrategyStyle | null
   strategy_category: QelStrategyCategory | null
+  strategy_family: string | null
+  family_description: string | null
   point_value: number | null
   test_sharpe: number | null
   test_sortino: number | null
