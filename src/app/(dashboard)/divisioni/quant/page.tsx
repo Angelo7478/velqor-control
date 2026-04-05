@@ -67,12 +67,20 @@ export default function QuantPage() {
             Trading sistematico &middot; QuantEdgeLab &middot; {activeStrategies.length} strategie &middot; {syncedAccounts.length}/{accounts.length} conti sincronizzati
           </p>
         </div>
-        <a
-          href="/divisioni/quant/sizing"
-          className="px-4 py-2 bg-indigo-600 text-white text-sm font-medium rounded-lg hover:bg-indigo-700 transition"
-        >
-          Sizing Engine
-        </a>
+        <div className="flex gap-2">
+          <a
+            href="/divisioni/quant/sizing"
+            className="px-4 py-2 bg-indigo-600 text-white text-sm font-medium rounded-lg hover:bg-indigo-700 transition"
+          >
+            Sizing Engine
+          </a>
+          <a
+            href="/divisioni/quant/health"
+            className="px-4 py-2 bg-white border border-slate-200 text-slate-700 text-sm font-medium rounded-lg hover:bg-slate-50 transition"
+          >
+            Health Monitor
+          </a>
+        </div>
       </div>
 
       {/* Tabs */}

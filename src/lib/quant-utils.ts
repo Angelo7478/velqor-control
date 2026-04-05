@@ -287,38 +287,204 @@ export function calcFitnessScore(strategy: {
   return { score: Math.max(0, Math.min(100, finalScore)), details, confidence: Math.round(confidence * 100) }
 }
 
-/** Pendulum state: detect drawdown phase for a strategy */
+/**
+ * Pendulum state: detect drawdown phase and compute size multiplier.
+ *
+ * Based on the Pendulum Effect from institutional sizing:
+ * - At equity highs: REDUCE size (next DD is statistically imminent)
+ * - During drawdown: INCREASE size (mean reversion probability rises)
+ * - Recovery: neutral size
+ *
+ * The multiplier range is 0.7x (at highs) to 1.3x (deep DD).
+ * This is conservative — never exceeds 30% increase.
+ */
 export function detectPendulumState(
-  recentTrades: { net_profit: number | null }[],
-  equityHigh: number,
-  currentEquity: number
-): { state: 'base' | 'drawdown' | 'recovery'; consecLosses: number; ddFromPeak: number; multiplier: number } {
-  // Count consecutive losses from most recent
-  let consecLosses = 0
-  for (let i = recentTrades.length - 1; i >= 0; i--) {
-    if ((recentTrades[i].net_profit ?? 0) < 0) consecLosses++
-    else break
-  }
-
-  const ddFromPeak = equityHigh > 0 ? ((equityHigh - currentEquity) / equityHigh) * 100 : 0
+  consecLosses: number,
+  cumulativePnl: number,
+  equityPeak: number,
+): { state: 'base' | 'drawdown' | 'recovery'; ddFromPeak: number; multiplier: number } {
+  const ddFromPeak = equityPeak > 0 ? ((equityPeak - cumulativePnl) / equityPeak) * 100 : 0
 
   let state: 'base' | 'drawdown' | 'recovery' = 'base'
   let multiplier = 1.0
 
-  if (ddFromPeak < 0.5 && consecLosses === 0) {
-    // At equity high → reduce to base (Pendulum: reduce at highs)
+  if (ddFromPeak < 1 && consecLosses === 0) {
+    // At or near equity high → reduce to base
     state = 'base'
-    multiplier = 0.8
-  } else if (consecLosses >= 3 || ddFromPeak > 3) {
-    // In drawdown → increase (Pendulum: increase during DD)
+    multiplier = 0.7 + (ddFromPeak / 1) * 0.3 // 0.7 at peak, 1.0 at 1% DD
+  } else if (consecLosses >= 3 || ddFromPeak > 5) {
+    // In significant drawdown → increase (pendulum effect)
     state = 'drawdown'
     multiplier = 1.0 + Math.min(consecLosses * 0.1, 0.3) // max 1.3x
-  } else {
+  } else if (ddFromPeak > 1) {
+    // Moderate DD or recent losses → recovery
     state = 'recovery'
+    multiplier = 1.0 + Math.min(ddFromPeak / 10, 0.15) // up to 1.15x
+  } else {
+    state = 'base'
     multiplier = 1.0
   }
 
-  return { state, consecLosses, ddFromPeak, multiplier }
+  return { state, ddFromPeak: Math.round(ddFromPeak * 100) / 100, multiplier: Math.round(multiplier * 100) / 100 }
+}
+
+/**
+ * Full health report for a strategy.
+ * Combines: fitness score + pendulum state + decommissioning check.
+ *
+ * Decommissioning thresholds:
+ * - SUSPEND: real DD > 2x test DD AND confidence > 60%
+ * - WARNING: real DD > 1.5x test DD OR win rate deviation > 25%
+ * - REGIME: strategy may be in wrong market regime (not broken)
+ */
+export interface HealthReport {
+  strategyId: string
+  magic: number
+  name: string
+  family: string | null
+
+  // Fitness
+  fitnessScore: number
+  fitnessConfidence: number
+
+  // Pendulum
+  pendulumState: 'base' | 'drawdown' | 'recovery'
+  pendulumMultiplier: number
+  consecLosses: number
+  ddFromPeak: number
+  cumulativePnl: number
+  equityPeak: number
+
+  // Health status
+  healthScore: number
+  healthStatus: 'healthy' | 'warning' | 'critical' | 'regime_mismatch' | 'insufficient_data'
+  recommendation: string
+  flags: string[]
+}
+
+export function calcHealthReport(strategy: {
+  id: string
+  magic: number
+  name: string | null
+  strategy_family: string | null
+  strategy_style: string | null
+  test_win_pct: number | null
+  test_payoff: number | null
+  test_max_dd: number | null
+  test_expectancy: number | null
+  test_max_consec_loss: number | null
+  real_trades: number
+  real_win_pct: number | null
+  real_payoff: number | null
+  real_max_dd: number
+  real_expectancy: number | null
+  real_pl: number
+}, liveData: {
+  consecLosses: number
+  cumulativePnl: number
+  equityPeak: number
+  recentWinPct: number | null
+  avgTrade: number | null
+  totalTrades: number
+}): HealthReport {
+  const flags: string[] = []
+
+  // 1. Fitness score
+  const fitness = calcFitnessScore({
+    test_win_pct: strategy.test_win_pct,
+    test_payoff: strategy.test_payoff,
+    test_max_dd: strategy.test_max_dd,
+    test_expectancy: strategy.test_expectancy,
+    real_win_pct: strategy.real_win_pct,
+    real_payoff: strategy.real_payoff,
+    real_max_dd: strategy.real_max_dd,
+    real_expectancy: strategy.real_expectancy,
+    real_trades: strategy.real_trades,
+  })
+
+  // 2. Pendulum
+  const pendulum = detectPendulumState(
+    liveData.consecLosses,
+    liveData.cumulativePnl,
+    liveData.equityPeak,
+  )
+
+  // 3. Decommissioning checks
+  let healthScore = fitness.score
+  let healthStatus: HealthReport['healthStatus'] = 'healthy'
+  let recommendation = 'Operativa normale'
+
+  // Insufficient data
+  if (strategy.real_trades < 5) {
+    healthStatus = 'insufficient_data'
+    recommendation = 'Dati insufficienti — monitorare'
+    flags.push('early_stage')
+  } else {
+    // DD breach check
+    if (strategy.test_max_dd && strategy.real_max_dd > strategy.test_max_dd * 2 && fitness.confidence > 60) {
+      healthScore = Math.min(healthScore, 25)
+      healthStatus = 'critical'
+      flags.push('dd_breach_2x')
+      recommendation = 'DD reale > 2x test. Candidata alla sospensione.'
+    } else if (strategy.test_max_dd && strategy.real_max_dd > strategy.test_max_dd * 1.5) {
+      healthScore = Math.min(healthScore, 45)
+      healthStatus = 'warning'
+      flags.push('dd_breach_1.5x')
+    }
+
+    // Win rate collapse
+    if (strategy.test_win_pct && strategy.real_win_pct !== null) {
+      const wrDev = ((strategy.real_win_pct - strategy.test_win_pct) / strategy.test_win_pct) * 100
+      if (wrDev < -30 && fitness.confidence > 50) {
+        flags.push('win_rate_collapse')
+        if (healthStatus === 'healthy') healthStatus = 'warning'
+      }
+    }
+
+    // Expectancy turned negative
+    if (strategy.real_expectancy !== null && strategy.real_expectancy < 0 && strategy.real_trades >= 15) {
+      flags.push('negative_expectancy')
+      if (healthStatus === 'healthy') healthStatus = 'warning'
+      recommendation = 'Expectancy negativa. Monitorare.'
+    }
+
+    // Regime mismatch detection (trend strategies in range market)
+    if (strategy.strategy_style === 'trend_following' && strategy.real_expectancy !== null && strategy.real_expectancy < 0) {
+      healthStatus = 'regime_mismatch'
+      recommendation = 'Possibile regime mismatch — strategia trend in mercato laterale. Mantenere attiva per validazione.'
+      flags.push('regime_mismatch')
+    }
+
+    // Consecutive losses alert
+    if (liveData.consecLosses >= 5) {
+      flags.push('high_consec_losses')
+      if (healthStatus === 'healthy') healthStatus = 'warning'
+    }
+
+    // Healthy with strong performance
+    if (healthStatus === 'healthy' && fitness.score >= 70) {
+      recommendation = 'Performance in linea con i test. Continuare.'
+    }
+  }
+
+  return {
+    strategyId: strategy.id,
+    magic: strategy.magic,
+    name: strategy.name || `Magic ${strategy.magic}`,
+    family: strategy.strategy_family,
+    fitnessScore: fitness.score,
+    fitnessConfidence: fitness.confidence,
+    pendulumState: pendulum.state,
+    pendulumMultiplier: pendulum.multiplier,
+    consecLosses: liveData.consecLosses,
+    ddFromPeak: pendulum.ddFromPeak,
+    cumulativePnl: liveData.cumulativePnl,
+    equityPeak: liveData.equityPeak,
+    healthScore,
+    healthStatus,
+    recommendation,
+    flags,
+  }
 }
 
 // --- Portfolio-Level Calculations ---
