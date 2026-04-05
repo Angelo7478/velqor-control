@@ -462,7 +462,7 @@ function FitnessReport({ strategies, output }: { strategies: StrategyRow[]; outp
   const fitnessData = strategies.map((s, i) => {
     const r = output?.results[i]
     const fitness = r
-      ? { score: r.fitnessScore, details: r.fitnessDetails }
+      ? { score: r.fitnessScore, details: r.fitnessDetails, confidence: r.fitnessDetails.confidence ?? 0 }
       : calcFitnessScore({
           test_win_pct: s.test_win_pct,
           test_payoff: s.test_payoff,
@@ -479,7 +479,14 @@ function FitnessReport({ strategies, output }: { strategies: StrategyRow[]; outp
 
   return (
     <div className="space-y-3">
-      {fitnessData.map(({ strategy: s, score, details }) => (
+      {/* Legend */}
+      <div className="bg-white rounded-xl border border-slate-200 p-3 text-xs text-slate-500">
+        <strong className="text-slate-700">Fitness Score</strong> — Coerenza tra backtest e operatività reale.
+        Componenti: Win Rate (25%), DD Containment (30%), Expectancy (25%), Payoff (10%), Sample Size (10%).
+        Score ponderato per confidence (log del n. trade): pochi trade → score tende al neutro.
+      </div>
+
+      {fitnessData.map(({ strategy: s, score, details, confidence }) => (
         <div
           key={s.id}
           className={`bg-white rounded-xl border p-4 ${
@@ -500,28 +507,73 @@ function FitnessReport({ strategies, output }: { strategies: StrategyRow[]; outp
               </div>
             </div>
             <div className="text-right">
-              <div className={`text-2xl font-bold ${fitnessColor(score)}`}>{score}</div>
+              <div className={`text-2xl font-bold ${fitnessColor(score)}`}>{score}%</div>
               <div className={`text-xs ${fitnessColor(score)}`}>{fitnessLabel(score)}</div>
+              <div className="text-[10px] text-slate-400 mt-0.5">
+                Confidence: {confidence}%
+              </div>
             </div>
+          </div>
+
+          {/* Confidence bar */}
+          <div className="mt-2 flex items-center gap-2">
+            <div className="flex-1 h-1.5 bg-slate-100 rounded-full overflow-hidden">
+              <div
+                className={`h-full rounded-full ${
+                  score >= 70 ? 'bg-green-400' : score >= 40 ? 'bg-amber-400' : 'bg-red-400'
+                }`}
+                style={{ width: `${score}%` }}
+              />
+            </div>
+            <span className="text-[10px] text-slate-400 w-8 text-right">{s.real_trades}t</span>
           </div>
 
           {/* Metrics comparison */}
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mt-3 text-xs">
+          <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 mt-3 text-xs">
             <MetricCompare label="Win %" test={s.test_win_pct} real={s.real_win_pct} suffix="%" />
             <MetricCompare label="Max DD" test={s.test_max_dd} real={s.real_max_dd} prefix="$" invert />
             <MetricCompare label="Expectancy" test={s.test_expectancy} real={s.real_expectancy} prefix="$" />
+            <MetricCompare label="Payoff" test={s.test_payoff} real={s.real_payoff} />
             <div>
-              <span className="text-slate-400">Trade (real)</span>
+              <span className="text-slate-400">Trade</span>
               <div className="font-mono font-bold text-slate-700 mt-0.5">{s.real_trades}</div>
-              {s.real_trades < 30 && <div className="text-[10px] text-amber-500">Sample basso</div>}
+              {s.real_trades < 10 && <div className="text-[10px] text-slate-400">Early stage</div>}
+              {s.real_trades >= 10 && s.real_trades < 30 && <div className="text-[10px] text-amber-500">In validazione</div>}
+              {s.real_trades >= 30 && <div className="text-[10px] text-green-500">Validato</div>}
             </div>
           </div>
 
+          {/* Component breakdown */}
+          {details.win_pct_dev !== undefined && (
+            <div className="flex flex-wrap gap-2 mt-2">
+              {details.win_pct_dev !== undefined && (
+                <span className={`text-[10px] px-2 py-0.5 rounded-full ${Math.abs(details.win_pct_dev) <= 10 ? 'bg-green-50 text-green-600' : Math.abs(details.win_pct_dev) <= 20 ? 'bg-amber-50 text-amber-600' : 'bg-red-50 text-red-600'}`}>
+                  WR {details.win_pct_dev > 0 ? '+' : ''}{fmt(details.win_pct_dev, 1)}%
+                </span>
+              )}
+              {details.dd_ratio !== undefined && (
+                <span className={`text-[10px] px-2 py-0.5 rounded-full ${details.dd_ratio <= 1.0 ? 'bg-green-50 text-green-600' : details.dd_ratio <= 1.5 ? 'bg-amber-50 text-amber-600' : 'bg-red-50 text-red-600'}`}>
+                  DD {fmt(details.dd_ratio, 2)}x test
+                </span>
+              )}
+              {details.exp_dev !== undefined && (
+                <span className={`text-[10px] px-2 py-0.5 rounded-full ${details.exp_dev >= -25 ? 'bg-green-50 text-green-600' : details.exp_dev >= -50 ? 'bg-amber-50 text-amber-600' : 'bg-red-50 text-red-600'}`}>
+                  Exp {details.exp_dev > 0 ? '+' : ''}{fmt(details.exp_dev, 1)}%
+                </span>
+              )}
+            </div>
+          )}
+
           {/* Alert */}
-          {score < 40 && s.real_trades >= 30 && (
+          {score < 40 && confidence > 60 && (
             <div className="mt-2 px-3 py-1.5 bg-red-50 border border-red-100 rounded-lg text-xs text-red-700">
               Candidata alla sospensione: performance reali significativamente sotto i test.
               {details.dd_ratio && details.dd_ratio > 1.5 && ` DD reale ${fmt(details.dd_ratio, 1)}x il test.`}
+            </div>
+          )}
+          {score < 40 && confidence <= 60 && (
+            <div className="mt-2 px-3 py-1.5 bg-amber-50 border border-amber-100 rounded-lg text-xs text-amber-700">
+              Dati insufficienti per giudizio definitivo. Monitorare — serve campione più ampio.
             </div>
           )}
         </div>
