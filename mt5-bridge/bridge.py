@@ -1,42 +1,86 @@
 """
-VELQOR MT5 BRIDGE v1.0
-Connette MT5 via investor password (read-only) e pusha dati su Supabase.
-Progettato per girare su VPS Windows con MT5 installato.
+VELQOR MT5 BRIDGE v2.1
+Un processo per terminale MT5. Non fa login — legge il conto già loggato.
+Lanciato dal launcher.py o manualmente con --mt5-path.
+
+Uso:
+  python bridge.py --mt5-path "C:\\MT5_10K\\terminal64.exe"
+  python bridge.py --mt5-path "C:\\MT5_10K\\terminal64.exe" once
+  python bridge.py --mt5-path "C:\\MT5_10K\\terminal64.exe" enrich
+  python bridge.py --mt5-path "C:\\MT5_10K\\terminal64.exe" status
 """
 
 import sys
+import os
 import time
 import json
 import logging
+import argparse
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 try:
     import MetaTrader5 as mt5
 except ImportError:
-    print("ERRORE: MetaTrader5 non installato. Esegui: pip install MetaTrader5")
+    print("ERRORE: pip install MetaTrader5")
     sys.exit(1)
 
 import requests
 
-# Config
+# ============================================
+# CONFIG
+# ============================================
+
+# Defaults — sovrascritti da config_local.py se esiste
+SUPABASE_URL = "https://gotbfzdgasuvfskzeycm.supabase.co"
+SUPABASE_SERVICE_KEY = ""
+ORG_ID = "a0000000-0000-0000-0000-000000000001"
+SYNC_INTERVAL = 300
+HISTORY_DAYS = 1095
+FORCE_FULL_IMPORT = False
+LOG_LEVEL = "INFO"
+
 try:
     from config_local import *
 except ImportError:
-    from config import *
+    try:
+        from config import *
+    except ImportError:
+        pass
 
-# Logging
+# ============================================
+# ARGS
+# ============================================
+
+parser = argparse.ArgumentParser(description="Velqor MT5 Bridge v2.1")
+parser.add_argument("mode", nargs="?", default="loop", choices=["loop", "once", "enrich", "status"])
+parser.add_argument("--mt5-path", required=True, help="Percorso terminal64.exe")
+parser.add_argument("--interval", type=int, default=None, help="Override sync interval (secondi)")
+parser.add_argument("--log-file", default=None, help="Override log file path")
+args = parser.parse_args()
+
+MT5_PATH = args.mt5_path
+if args.interval:
+    SYNC_INTERVAL = args.interval
+
+# Log file — auto-genera dal nome cartella MT5
+if args.log_file:
+    log_file = args.log_file
+else:
+    mt5_folder = Path(MT5_PATH).parent.name
+    log_file = f"bridge_{mt5_folder}.log"
+
 logging.basicConfig(
     level=getattr(logging, LOG_LEVEL, logging.INFO),
-    format="%(asctime)s [%(levelname)s] %(message)s",
+    format=f"%(asctime)s [{mt5_folder if not args.log_file else 'BRIDGE'}] [%(levelname)s] %(message)s",
     handlers=[
-        logging.FileHandler(LOG_FILE, encoding="utf-8"),
+        logging.FileHandler(log_file, encoding="utf-8"),
         logging.StreamHandler()
     ]
 )
 log = logging.getLogger("mt5_bridge")
 
-# Supabase REST helpers
+# Supabase REST
 HEADERS = {
     "apikey": SUPABASE_SERVICE_KEY,
     "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
@@ -53,10 +97,7 @@ def sb_get(table, params=None):
 
 
 def sb_patch(table, match_col, match_val, data):
-    r = requests.patch(
-        f"{API}/{table}?{match_col}=eq.{match_val}",
-        headers=HEADERS, json=data
-    )
+    r = requests.patch(f"{API}/{table}?{match_col}=eq.{match_val}", headers=HEADERS, json=data)
     r.raise_for_status()
     return r
 
@@ -80,26 +121,34 @@ def sb_insert(table, data):
 
 
 # ============================================
-# MT5 CONNECTION
+# MT5 — NO LOGIN, SOLO READ
 # ============================================
 
 def init_mt5():
-    kwargs = {}
-    if MT5_PATH:
-        kwargs["path"] = MT5_PATH
-    if not mt5.initialize(**kwargs):
-        log.error(f"MT5 initialize failed: {mt5.last_error()}")
+    if not mt5.initialize(path=MT5_PATH):
+        log.error(f"MT5 init failed ({MT5_PATH}): {mt5.last_error()}")
         return False
-    log.info(f"MT5 initialized: {mt5.terminal_info().name} v{mt5.version()}")
+    info = mt5.account_info()
+    if info is None:
+        log.error(f"MT5 connesso ma nessun conto loggato su {MT5_PATH}")
+        mt5.shutdown()
+        return False
+    log.info(f"MT5 OK → {info.login}@{info.server} Balance=${info.balance:.2f}")
     return True
 
 
-def connect_account(login, password, server):
-    login_int = int(login)
-    if not mt5.login(login_int, password=password, server=server):
-        log.error(f"MT5 login failed for {login}: {mt5.last_error()}")
-        return False
-    return True
+def get_mt5_login():
+    info = mt5.account_info()
+    return str(info.login) if info else None
+
+
+def find_account_by_login(login_str):
+    accounts = sb_get("qel_accounts", {
+        "select": "*",
+        "login": f"eq.{login_str}",
+        "org_id": f"eq.{ORG_ID}",
+    })
+    return accounts[0] if accounts else None
 
 
 # ============================================
@@ -143,14 +192,11 @@ def get_open_positions():
 
 
 def get_closed_deals(since_date):
-    """Get closed deals since a given date."""
-    date_from = since_date
     date_to = datetime.now(tz=timezone.utc)
-    deals = mt5.history_deals_get(date_from, date_to)
+    deals = mt5.history_deals_get(since_date, date_to)
     if deals is None or len(deals) == 0:
         return []
 
-    # Group deals by position ticket (entry + exit)
     trades = {}
     for d in deals:
         if d.entry == 0:  # DEAL_ENTRY_IN
@@ -176,7 +222,6 @@ def get_closed_deals(since_date):
                 trades[pos_id]["swap"] = float(d.swap)
                 trades[pos_id]["commission"] = trades[pos_id].get("commission", 0) + (float(d.commission) if hasattr(d, 'commission') else 0)
                 trades[pos_id]["is_open"] = False
-                # Calculate net profit and duration
                 net = float(d.profit) + float(d.swap) + trades[pos_id]["commission"]
                 trades[pos_id]["net_profit"] = net
                 try:
@@ -186,12 +231,11 @@ def get_closed_deals(since_date):
                 except:
                     pass
             else:
-                # Exit without matching entry (trade opened before our window)
                 trades[pos_id] = {
                     "ticket": int(pos_id),
                     "magic": int(d.magic),
                     "symbol": d.symbol,
-                    "direction": "sell" if d.type == 0 else "buy",  # reverse for exit
+                    "direction": "sell" if d.type == 0 else "buy",
                     "lots": float(d.volume),
                     "open_price": 0,
                     "close_price": float(d.price),
@@ -208,7 +252,7 @@ def get_closed_deals(since_date):
 
 
 # ============================================
-# DRAWDOWN CALCULATION
+# DRAWDOWN
 # ============================================
 
 def calc_dd(account_size, balance, equity):
@@ -218,7 +262,6 @@ def calc_dd(account_size, balance, equity):
 
 
 def calc_historical_dd(acc_id, acc_size):
-    """Calculate max total DD and max daily DD from trade history."""
     trades = sb_get("qel_trades", {
         "select": "close_time,net_profit,profit",
         "account_id": f"eq.{acc_id}",
@@ -229,7 +272,6 @@ def calc_historical_dd(acc_id, acc_size):
     if not trades:
         return 0, 0, acc_size
 
-    # Max total DD (peak-to-trough on equity curve)
     cum_pl = 0
     peak = acc_size
     max_dd = 0
@@ -248,7 +290,6 @@ def calc_historical_dd(acc_id, acc_size):
 
     max_total_dd_pct = round((max_dd / peak) * 100, 2) if peak > 0 else 0
 
-    # Max daily DD (worst single-day P/L)
     from collections import defaultdict
     daily = defaultdict(float)
     for t in trades:
@@ -265,47 +306,30 @@ def calc_historical_dd(acc_id, acc_size):
 
 
 # ============================================
-# STRATEGY MATCHING
+# STRATEGY MAP
 # ============================================
 
 def load_strategy_map():
-    """Load magic -> strategy_id mapping from Supabase."""
     strategies = sb_get("qel_strategies", {"select": "id,magic", "org_id": f"eq.{ORG_ID}"})
     return {s["magic"]: s["id"] for s in strategies}
 
 
 # ============================================
-# SYNC LOGIC
+# SYNC — SINGOLO CONTO
 # ============================================
 
-def sync_account(account, strategy_map):
+def sync_current_account(account, strategy_map):
     acc_id = account["id"]
-    login = account.get("login")
-    password = account.get("investor_password")
-    server = account.get("server")
     acc_size = float(account.get("account_size", 100000))
 
-    if not login or not password or not server:
-        log.warning(f"  Skipping {account['name']}: login/password/server non configurati")
-        return False
-
-    log.info(f"  Connessione a {account['name']} (login: {login}, server: {server})...")
-
-    if not connect_account(login, password, server):
-        return False
-
-    # 1. Account info
     info = get_account_info()
     if not info:
-        log.error(f"  Impossibile leggere account info per {login}")
+        log.error("Impossibile leggere account info")
         return False
 
     total_dd = calc_dd(acc_size, info["balance"], info["equity"])
-
-    # Calculate historical max DD from trade data
     max_total_dd, max_daily_dd, eq_peak = calc_historical_dd(acc_id, acc_size)
 
-    # Update account
     now = datetime.now(tz=timezone.utc).isoformat()
     sb_patch("qel_accounts", "id", acc_id, {
         "balance": info["balance"],
@@ -318,9 +342,8 @@ def sync_account(account, strategy_map):
         "max_daily_dd_pct": max_daily_dd,
         "last_sync_at": now,
     })
-    log.info(f"  Account: balance=${info['balance']:.2f} equity=${info['equity']:.2f} floating=${info['floating_pl']:.2f} DD={total_dd:.1f}% maxDD={max_total_dd:.1f}% maxDailyDD={max_daily_dd:.1f}%")
+    log.info(f"  Bal=${info['balance']:.2f} Eq=${info['equity']:.2f} Float=${info['floating_pl']:.2f} DD={total_dd:.1f}%")
 
-    # 2. Snapshot
     sb_insert("qel_account_snapshots", {
         "account_id": acc_id,
         "balance": info["balance"],
@@ -331,22 +354,18 @@ def sync_account(account, strategy_map):
         "open_trades": len(get_open_positions()),
     })
 
-    # 3. Open positions -> update trades
     positions = get_open_positions()
     log.info(f"  Posizioni aperte: {len(positions)}")
-
     for pos in positions:
         pos["account_id"] = acc_id
         if pos["magic"] in strategy_map:
             pos["strategy_id"] = strategy_map[pos["magic"]]
         sb_upsert("qel_trades", pos, on_conflict="account_id,ticket")
 
-    # 4. Closed trades — full history on first sync or 0 trades, incremental after
-    history_days = getattr(sys.modules[__name__], 'HISTORY_DAYS', 1095)  # default 3 anni
-    force_full = getattr(sys.modules[__name__], 'FORCE_FULL_IMPORT', False)
+    # Closed trades
+    force_full = FORCE_FULL_IMPORT
     last_sync = account.get("last_sync_at")
 
-    # Check how many trades we have in DB for this account
     existing_trades = sb_get("qel_trades", {
         "select": "id",
         "account_id": f"eq.{acc_id}",
@@ -354,20 +373,18 @@ def sync_account(account, strategy_map):
     })
     trade_count = len(existing_trades) if existing_trades else 0
 
-    # Full import if: forced, first sync, or we have very few trades
     if force_full or not last_sync or trade_count < 10:
-        since = datetime.now(tz=timezone.utc) - timedelta(days=history_days)
-        log.info(f"  FULL IMPORT: {trade_count} trade in DB, scarico storico da {since.strftime('%Y-%m-%d')} ({history_days} giorni)")
+        since = datetime.now(tz=timezone.utc) - timedelta(days=HISTORY_DAYS)
+        log.info(f"  FULL IMPORT: {trade_count} trade in DB")
     else:
         try:
             since = datetime.fromisoformat(last_sync.replace("Z", "+00:00"))
-            since = since - timedelta(hours=1)  # overlap per sicurezza
+            since = since - timedelta(hours=1)
         except:
-            since = datetime.now(tz=timezone.utc) - timedelta(days=history_days)
+            since = datetime.now(tz=timezone.utc) - timedelta(days=HISTORY_DAYS)
 
     closed = get_closed_deals(since)
-    log.info(f"  Trade chiusi (da {since.strftime('%Y-%m-%d')}): {len(closed)}")
-
+    log.info(f"  Trade chiusi: {len(closed)}")
     for trade in closed:
         trade["account_id"] = acc_id
         if trade["magic"] in strategy_map:
@@ -378,7 +395,6 @@ def sync_account(account, strategy_map):
 
 
 def update_strategy_real_metrics(strategy_map):
-    """Ricalcola metriche real per ogni strategia basandosi sui trade chiusi."""
     for magic, strat_id in strategy_map.items():
         trades = sb_get("qel_trades", {
             "select": "profit,net_profit,swap,commission,duration_seconds",
@@ -387,7 +403,6 @@ def update_strategy_real_metrics(strategy_map):
             "close_time": "not.is.null",
             "order": "close_time.asc"
         })
-
         if not trades:
             continue
 
@@ -406,7 +421,6 @@ def update_strategy_real_metrics(strategy_map):
         profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else 0
         expectancy = total_pl / n if n > 0 else 0
 
-        # Max drawdown
         peak = 0
         max_dd = 0
         equity_curve = 0
@@ -419,9 +433,7 @@ def update_strategy_real_metrics(strategy_map):
                 max_dd = dd
 
         ret_dd = (total_pl / max_dd) if max_dd > 0 else 0
-        recovery = (total_pl / max_dd) if max_dd > 0 else 0
 
-        # Avg duration
         durations = [float(t["duration_seconds"]) for t in trades if t.get("duration_seconds")]
         avg_dur_hours = (sum(durations) / len(durations) / 3600) if durations else None
 
@@ -433,203 +445,138 @@ def update_strategy_real_metrics(strategy_map):
             "real_payoff": round(payoff, 2),
             "real_expectancy": round(expectancy, 2),
             "real_profit_factor": round(profit_factor, 2),
-            "real_recovery_factor": round(recovery, 2),
+            "real_recovery_factor": round(ret_dd, 2),
             "real_ret_dd": round(ret_dd, 2),
             "real_avg_duration_hours": round(avg_dur_hours, 2) if avg_dur_hours else None,
         })
-        log.info(f"  Strategy {magic}: {n} trades, P/L=${total_pl:.2f}, Win={win_pct:.1f}%, R/DD={ret_dd:.2f}")
+        log.info(f"  M{magic}: {n}t ${total_pl:.2f} Win={win_pct:.1f}%")
 
 
 # ============================================
-# ENRICH MAGIC NUMBERS
+# ENRICH
 # ============================================
 
 def run_enrich():
-    """Legge deal da MT5 e aggiorna i trade nel DB con i magic number mancanti."""
     log.info("=" * 50)
-    log.info("ENRICH START — Aggiornamento magic number da MT5")
+    log.info("ENRICH START")
 
     if not init_mt5():
         return
 
     try:
-        accounts = sb_get("qel_accounts", {
-            "select": "*",
-            "org_id": f"eq.{ORG_ID}",
-            "status": "not.in.(inactive,breached)"
-        })
-        log.info(f"Conti trovati: {len(accounts)}")
+        login = get_mt5_login()
+        account = find_account_by_login(login)
+        if not account:
+            log.error(f"Login {login} non trovato in Supabase")
+            return
 
+        acc_id = account["id"]
         strategy_map = load_strategy_map()
-        total_updated = 0
+        log.info(f"Enrich: {account['name']} ({login})")
 
-        for acc in accounts:
-            login = acc.get("login")
-            password = acc.get("investor_password")
-            server = acc.get("server")
-            acc_id = acc["id"]
+        date_from = datetime.now(tz=timezone.utc) - timedelta(days=HISTORY_DAYS)
+        deals = mt5.history_deals_get(date_from, datetime.now(tz=timezone.utc))
+        if not deals:
+            log.warning("Nessun deal")
+            return
 
-            if not login or not password or not server:
-                log.warning(f"  {acc['name']}: credenziali mancanti, skip")
-                continue
+        magic_by_ticket = {}
+        magic_by_match = {}
+        for d in deals:
+            m = int(d.magic)
+            if m > 0:
+                magic_by_ticket[int(d.position_id)] = m
+                if d.entry == 1:
+                    key = f"{d.symbol}|{d.time}|{round(float(d.profit), 2)}"
+                    magic_by_match[key] = m
 
-            if not connect_account(login, password, server):
-                log.warning(f"  {acc['name']}: login fallito, skip")
-                continue
+        trades_no_magic = sb_get("qel_trades", {
+            "select": "id,ticket,symbol,close_time,profit",
+            "account_id": f"eq.{acc_id}",
+            "or": "(magic.is.null,magic.eq.0)",
+        })
 
-            log.info(f"  Connesso a {acc['name']} ({login}@{server})")
+        updated = 0
+        for t in trades_no_magic:
+            ticket = int(t["ticket"])
+            magic = magic_by_ticket.get(ticket)
+            if not magic and t.get("close_time") and t.get("profit"):
+                try:
+                    ct = datetime.fromisoformat(t["close_time"].replace("Z", "+00:00"))
+                    ct_unix = int(ct.timestamp())
+                    profit_r = round(float(t["profit"]), 2)
+                    for offset in [0, -1, 1, -2, 2]:
+                        key = f"{t['symbol']}|{ct_unix + offset}|{profit_r}"
+                        if key in magic_by_match:
+                            magic = magic_by_match[key]
+                            break
+                except:
+                    pass
+            if magic:
+                patch_data = {"magic": magic}
+                if magic in strategy_map:
+                    patch_data["strategy_id"] = strategy_map[magic]
+                sb_patch("qel_trades", "id", t["id"], patch_data)
+                updated += 1
 
-            # Read ALL deals from MT5
-            history_days = getattr(sys.modules[__name__], 'HISTORY_DAYS', 1095)
-            date_from = datetime.now(tz=timezone.utc) - timedelta(days=history_days)
-            date_to = datetime.now(tz=timezone.utc)
-            deals = mt5.history_deals_get(date_from, date_to)
-
-            if not deals or len(deals) == 0:
-                log.warning(f"  Nessun deal trovato in MT5")
-                continue
-
-            # Build maps: position_id -> magic, and fallback by symbol+time+profit
-            magic_by_ticket = {}
-            magic_by_match = {}
-            for d in deals:
-                m = int(d.magic)
-                if m > 0:
-                    magic_by_ticket[int(d.position_id)] = m
-                    # Fallback key: symbol + close_time_unix + profit (for FTMO-ticket imports)
-                    if d.entry == 1:  # DEAL_ENTRY_OUT
-                        key = f"{d.symbol}|{d.time}|{round(float(d.profit), 2)}"
-                        magic_by_match[key] = m
-
-            log.info(f"  MT5: {len(deals)} deals, {len(magic_by_ticket)} con magic (ticket match), {len(magic_by_match)} (fallback match)")
-
-            if not magic_by_ticket and not magic_by_match:
-                log.warning(f"  Nessun deal con magic number, skip")
-                continue
-
-            # Get trades without magic from DB
-            trades_no_magic = sb_get("qel_trades", {
-                "select": "id,ticket,symbol,close_time,profit",
-                "account_id": f"eq.{acc_id}",
-                "or": "(magic.is.null,magic.eq.0)",
-            })
-
-            log.info(f"  DB: {len(trades_no_magic)} trade senza magic")
-
-            updated = 0
-            for t in trades_no_magic:
-                ticket = int(t["ticket"])
-                magic = magic_by_ticket.get(ticket)
-
-                # Fallback: match by symbol + close_time + profit
-                if not magic and t.get("close_time") and t.get("profit"):
-                    try:
-                        ct = datetime.fromisoformat(t["close_time"].replace("Z", "+00:00"))
-                        ct_unix = int(ct.timestamp())
-                        profit_r = round(float(t["profit"]), 2)
-                        # Try exact second and +/- 1 second
-                        for offset in [0, -1, 1, -2, 2]:
-                            key = f"{t['symbol']}|{ct_unix + offset}|{profit_r}"
-                            if key in magic_by_match:
-                                magic = magic_by_match[key]
-                                break
-                    except:
-                        pass
-
-                if magic:
-                    patch_data = {"magic": magic}
-                    if magic in strategy_map:
-                        patch_data["strategy_id"] = strategy_map[magic]
-                    sb_patch("qel_trades", "id", t["id"], patch_data)
-                    updated += 1
-
-            log.info(f"  Aggiornati: {updated}/{len(trades_no_magic)} trade con magic number")
-            total_updated += updated
-
-        log.info(f"ENRICH COMPLETATO: {total_updated} trade aggiornati con magic number")
-
+        log.info(f"ENRICH: {updated}/{len(trades_no_magic)} aggiornati")
     finally:
         mt5.shutdown()
 
 
 # ============================================
-# MAIN LOOP
+# MAIN
 # ============================================
 
 def run_sync():
-    log.info("=" * 50)
-    log.info("SYNC START")
-
+    log.info("=" * 40)
     if not init_mt5():
         return
 
     try:
-        # Load accounts (all except inactive/breached)
-        accounts = sb_get("qel_accounts", {
-            "select": "*",
-            "org_id": f"eq.{ORG_ID}",
-            "status": "not.in.(inactive,breached)"
-        })
-        log.info(f"Conti attivi trovati: {len(accounts)}")
+        login = get_mt5_login()
+        account = find_account_by_login(login)
+        if not account:
+            log.error(f"Login {login} non trovato in Supabase")
+            return
 
-        # Load strategy map
+        log.info(f"SYNC: {account['name']} ({login})")
         strategy_map = load_strategy_map()
-        log.info(f"Strategie caricate: {len(strategy_map)}")
 
-        # Sync each account
-        synced = 0
-        for acc in accounts:
-            try:
-                if sync_account(acc, strategy_map):
-                    synced += 1
-            except Exception as e:
-                log.error(f"  Errore sync {acc['name']}: {e}")
-
-        # Update real metrics
-        if synced > 0:
-            log.info("Aggiornamento metriche real strategie...")
+        if sync_current_account(account, strategy_map):
             try:
                 update_strategy_real_metrics(strategy_map)
             except Exception as e:
-                log.error(f"Errore aggiornamento metriche: {e}")
-
-        log.info(f"SYNC COMPLETATO: {synced}/{len(accounts)} conti sincronizzati")
-
+                log.error(f"Errore metriche: {e}")
+            log.info("SYNC OK")
+        else:
+            log.error("SYNC FALLITO")
     finally:
         mt5.shutdown()
 
 
-def main():
-    if not SUPABASE_SERVICE_KEY:
-        print("ERRORE: SUPABASE_SERVICE_KEY non configurata.")
-        print("1. Vai su Supabase Dashboard > Settings > API")
-        print("2. Copia 'service_role' key (NON anon key)")
-        print("3. Incollala in config_local.py")
+if args.mode == "status":
+    if not init_mt5():
         sys.exit(1)
-
-    mode = sys.argv[1] if len(sys.argv) > 1 else "loop"
-
-    if mode == "once":
-        log.info("Modalita: singola esecuzione")
-        run_sync()
-    elif mode == "enrich":
-        log.info("Modalita: arricchimento magic number da MT5")
-        run_enrich()
-    elif mode == "loop":
-        log.info(f"Modalita: loop continuo (ogni {SYNC_INTERVAL}s)")
-        while True:
-            try:
-                run_sync()
-            except Exception as e:
-                log.error(f"Errore ciclo sync: {e}")
-            log.info(f"Prossimo sync tra {SYNC_INTERVAL}s...")
-            time.sleep(SYNC_INTERVAL)
-    else:
-        print(f"Uso: python bridge.py [once|loop|enrich]")
-        print(f"  once    - Esegue un singolo sync")
-        print(f"  loop    - Loop continuo (default, ogni {SYNC_INTERVAL}s)")
-        print(f"  enrich  - Aggiorna magic number sui trade esistenti leggendo da MT5")
-
-
-if __name__ == "__main__":
-    main()
+    login = get_mt5_login()
+    info = get_account_info()
+    account = find_account_by_login(login) if login else None
+    print(f"\n  MT5 Path:  {MT5_PATH}")
+    print(f"  Login:     {login}")
+    print(f"  Balance:   ${info['balance']:.2f}" if info else "  No info")
+    print(f"  Equity:    ${info['equity']:.2f}" if info else "")
+    print(f"  Supabase:  {account['name']}" if account else "  ⚠️ NON TROVATO in Supabase!")
+    print()
+    mt5.shutdown()
+elif args.mode == "once":
+    run_sync()
+elif args.mode == "enrich":
+    run_enrich()
+elif args.mode == "loop":
+    log.info(f"Loop: ogni {SYNC_INTERVAL}s | MT5: {MT5_PATH}")
+    while True:
+        try:
+            run_sync()
+        except Exception as e:
+            log.error(f"Errore: {e}")
+        time.sleep(SYNC_INTERVAL)

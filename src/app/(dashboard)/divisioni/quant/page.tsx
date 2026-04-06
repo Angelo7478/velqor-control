@@ -161,6 +161,13 @@ export default function QuantPage() {
                 const limitTDD = Number(acc.max_total_loss_pct || 10)
                 const margin = Number(acc.margin_used || 0)
 
+                // Bridge status
+                const syncMinutes = acc.last_sync_at ? (Date.now() - new Date(acc.last_sync_at).getTime()) / 60000 : Infinity
+                const bridgeOnline = syncMinutes < 10
+                const bridgeWarning = syncMinutes >= 10 && syncMinutes < 60
+                const bridgeColor = bridgeOnline ? 'bg-green-500' : bridgeWarning ? 'bg-amber-500' : synced ? 'bg-red-500' : 'bg-slate-300'
+                const bridgeLabel = bridgeOnline ? 'Bridge online' : bridgeWarning ? `Sync ${Math.round(syncMinutes)}m fa` : synced ? `Offline ${Math.round(syncMinutes / 60)}h` : 'Non configurato'
+
                 return (
                   <div key={acc.id}
                     className={`rounded-xl border transition-all ${synced ? 'border-slate-200 hover:border-slate-300 cursor-pointer' : 'border-dashed border-slate-300 bg-slate-50'}`}
@@ -169,9 +176,13 @@ export default function QuantPage() {
                     {/* Header row — always visible */}
                     <div className="p-3 flex items-center justify-between">
                       <div className="flex items-center gap-2 min-w-0">
-                        {synced && <div className="w-2.5 h-2.5 rounded-full bg-green-500 shrink-0" />}
+                        <div className="relative shrink-0" title={bridgeLabel}>
+                          <div className={`w-2.5 h-2.5 rounded-full ${bridgeColor}`} />
+                          {bridgeOnline && <div className={`absolute inset-0 w-2.5 h-2.5 rounded-full ${bridgeColor} animate-ping opacity-50`} />}
+                        </div>
                         <p className="text-sm font-semibold text-slate-900 truncate">{acc.name}</p>
                         <span className={`text-[10px] px-1.5 py-0.5 rounded shrink-0 ${statusBadge(acc.status)}`}>{acc.status}</span>
+                        <span className={`text-[10px] shrink-0 ${bridgeOnline ? 'text-green-600' : bridgeWarning ? 'text-amber-600' : 'text-red-500'}`}>{bridgeLabel}</span>
                       </div>
                       {synced ? (
                         <div className="flex items-center gap-3">
@@ -644,15 +655,24 @@ export default function QuantPage() {
               const limitDDD = Number(acc.max_daily_loss_pct || 5)
               const limitTDD = Number(acc.max_total_loss_pct || 10)
 
+              const syncMin = acc.last_sync_at ? (Date.now() - new Date(acc.last_sync_at).getTime()) / 60000 : Infinity
+              const bOnline = syncMin < 10
+              const bWarn = syncMin >= 10 && syncMin < 60
+              const bColor = bOnline ? 'bg-green-500' : bWarn ? 'bg-amber-500' : synced ? 'bg-red-500' : 'bg-slate-300'
+              const bText = bOnline ? 'Online' : bWarn ? `${Math.round(syncMin)}m fa` : synced ? `Offline` : ''
+
               return (
                 <div key={acc.id} onClick={() => synced && setSelectedAcc(acc)}
                   className={`bg-white rounded-xl border p-4 transition-all ${synced ? 'border-slate-200 hover:border-violet-300 hover:shadow-md cursor-pointer' : 'border-dashed border-slate-300'}`}>
                   <div className="flex justify-between items-start mb-3">
                     <div className="flex items-center gap-2">
-                      {synced && <div className="w-2.5 h-2.5 rounded-full bg-green-500 animate-pulse" />}
+                      <div className="relative shrink-0">
+                        <div className={`w-2.5 h-2.5 rounded-full ${bColor}`} />
+                        {bOnline && <div className={`absolute inset-0 w-2.5 h-2.5 rounded-full ${bColor} animate-ping opacity-50`} />}
+                      </div>
                       <div>
                         <p className="font-semibold text-slate-900">{acc.name}</p>
-                        <p className="text-xs text-slate-400">{acc.broker} &middot; {acc.currency} &middot; {fmtUsd(size)}</p>
+                        <p className="text-xs text-slate-400">{acc.broker} &middot; {acc.currency} &middot; {fmtUsd(size)} &middot; <span className={bOnline ? 'text-green-600' : bWarn ? 'text-amber-600' : 'text-red-500'}>{bText}</span></p>
                       </div>
                     </div>
                     <span className={`text-xs px-2 py-0.5 rounded ${statusBadge(acc.status)}`}>{acc.status}</span>

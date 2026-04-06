@@ -170,6 +170,8 @@ export interface QelAccount {
   max_daily_dd_pct: number
   last_sync_at: string | null
   notes: string | null
+  mt5_terminal_path: string | null
+  vps_name: string | null
   created_at: string
   updated_at: string
 }
