@@ -10,6 +10,7 @@ import {
   runSizingEngine, SizingInput, PortfolioSizingOutput, KellyMode,
 } from '@/lib/quant-utils'
 import QuantNav from '../quant-nav'
+import InfoTooltip from '@/components/ui/InfoTooltip'
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend,
   ResponsiveContainer, ReferenceLine, Area, ComposedChart,
@@ -1414,10 +1415,16 @@ function StatsGrid({ stats, equityBase }: { stats: CurveStats | PortfolioStats; 
   )
 }
 
+const STAT_TOOLTIPS: Record<string, import('@/lib/tooltip-content').TooltipKey> = {
+  'Win Rate': 'win_rate', 'Max DD': 'max_dd', 'Profit Factor': 'profit_factor',
+  'Sharpe': 'sharpe', 'Recovery': 'recovery_factor', 'Avg Trade': 'expectancy',
+}
+
 function StatBox({ label, value, color, sub }: { label: string; value: string; color?: string; sub?: string }) {
+  const tip = STAT_TOOLTIPS[label]
   return (
     <div>
-      <div className="text-[10px] uppercase text-slate-400">{label}</div>
+      <div className="text-[10px] uppercase text-slate-400">{label}{tip && <InfoTooltip metricKey={tip} />}</div>
       <div className={`text-sm font-bold font-mono ${color || 'text-slate-800'}`}>{value}</div>
       {sub && <div className="text-[10px] text-slate-400">{sub}</div>}
     </div>

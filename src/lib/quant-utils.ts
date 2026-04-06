@@ -26,6 +26,28 @@ export function fmtLots(n: number | null | undefined): string {
   return Number(n).toFixed(3)
 }
 
+export function fmtAlpha(n: number | null | undefined): string {
+  if (n === null || n === undefined) return '—'
+  const v = Number(n)
+  return `${v >= 0 ? '+' : ''}${v.toFixed(1)}%`
+}
+
+export function alphaColor(n: number | null | undefined): string {
+  if (n === null || n === undefined) return 'text-slate-400'
+  return Number(n) >= 0 ? 'text-green-600' : 'text-red-500'
+}
+
+// Asset → Yahoo Finance label mapping
+export const ASSET_BENCHMARK_LABEL: Record<string, string> = {
+  'US500.cash': 'S&P 500',
+  'US100.cash': 'Nasdaq',
+  'GER40.cash': 'DAX',
+  'BTCUSD': 'Bitcoin',
+  'UKOIL.cash': 'Brent',
+  'USDJPY': 'USD/JPY',
+  'USDCAD': 'USD/CAD',
+}
+
 export function timeAgo(dateStr: string | null): string {
   if (!dateStr) return 'Mai sincronizzato'
   const diff = Date.now() - new Date(dateStr).getTime()

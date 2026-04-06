@@ -8,6 +8,7 @@ import {
   fitnessColor, calcHealthReport, HealthReport,
 } from '@/lib/quant-utils'
 import QuantNav from '../quant-nav'
+import InfoTooltip from '@/components/ui/InfoTooltip'
 
 // --- Italian labels ---
 
@@ -258,7 +259,8 @@ function StrategyCard({ card }: { card: HealthCardData }) {
         </div>
 
         {/* Pendulum */}
-        <div className="text-right bg-slate-50 rounded-lg px-3 py-1.5">
+        <div className="text-right bg-slate-50 rounded-lg px-3 py-1.5 relative">
+          <InfoTooltip metricKey="pendulum" className="absolute top-1 right-1" />
           <div className={`flex items-center gap-1 justify-end ${pdl.color}`}>
             <span>{pdl.emoji}</span>
             <span className="text-lg font-bold">{card.pendulumMultiplier}x</span>

@@ -13,6 +13,7 @@ import {
 } from '@/lib/quant-utils'
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell, PieChart, Pie } from 'recharts'
 import QuantNav from '../quant-nav'
+import InfoTooltip from '@/components/ui/InfoTooltip'
 
 type Tab = 'grid' | 'dd_budget' | 'fitness' | 'correlations'
 
@@ -237,7 +238,7 @@ export default function SizingPage() {
         <div>
           <QuantNav />
           <h1 className="text-2xl font-bold text-slate-900 mt-1">Sizing Engine</h1>
-          <p className="text-sm text-slate-500 mt-0.5">Position sizing istituzionale — Kelly / Half-Kelly / Risk of Ruin</p>
+          <p className="text-sm text-slate-500 mt-0.5">Position sizing istituzionale — Kelly<InfoTooltip metricKey="kelly" /> / Half-Kelly<InfoTooltip metricKey="half_kelly" /> / Risk of Ruin<InfoTooltip metricKey="ror" /></p>
         </div>
         <div className="flex items-center gap-3">
           {/* Portfolio selector */}
@@ -315,10 +316,10 @@ export default function SizingPage() {
       <div className="flex gap-1 bg-slate-100 rounded-lg p-1 w-fit">
         {([
           { key: 'grid', label: 'Strategy Grid' },
-          { key: 'dd_budget', label: 'DD Budget' },
-          { key: 'correlations', label: 'Correlazioni' },
-          { key: 'fitness', label: 'Fitness Report' },
-        ] as { key: Tab; label: string }[]).map(t => (
+          { key: 'dd_budget', label: 'DD Budget', tip: 'dd_budget' as const },
+          { key: 'correlations', label: 'Correlazioni', tip: 'correlation' as const },
+          { key: 'fitness', label: 'Fitness Report', tip: 'fitness' as const },
+        ] as { key: Tab; label: string; tip?: string }[]).map(t => (
           <button
             key={t.key}
             onClick={() => setTab(t.key)}
@@ -327,6 +328,7 @@ export default function SizingPage() {
             }`}
           >
             {t.label}
+            {t.tip && <InfoTooltip metricKey={t.tip as import('@/lib/tooltip-content').TooltipKey} />}
           </button>
         ))}
       </div>

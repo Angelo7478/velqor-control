@@ -27,6 +27,7 @@ export default function ImportTradePage() {
   const [selectedAccount, setSelectedAccount] = useState<string>('')
   const [loading, setLoading] = useState(true)
   const [csvText, setCsvText] = useState('')
+  const [parsedRows, setParsedRows] = useState<Record<string, string>[]>([])
   const [preview, setPreview] = useState<Record<string, string>[]>([])
   const [importing, setImporting] = useState(false)
   const [result, setResult] = useState<{ imported: number; skipped: number; errors: string[] } | null>(null)
@@ -109,6 +110,7 @@ export default function ImportTradePage() {
       const text = ev.target?.result as string
       setCsvText(text)
       const rows = parseCSV(text)
+      setParsedRows(rows)
       setPreview(rows.slice(0, 5))
       setResult(null)
     }
@@ -118,6 +120,7 @@ export default function ImportTradePage() {
   function handlePaste(text: string) {
     setCsvText(text)
     const rows = parseCSV(text)
+    setParsedRows(rows)
     setPreview(rows.slice(0, 5))
     setResult(null)
   }
@@ -233,7 +236,7 @@ export default function ImportTradePage() {
 
   async function importTrades() {
     if (!selectedAccount) { setResult({ imported: 0, skipped: 0, errors: ['Seleziona un conto'] }); return }
-    const rows = parseCSV(csvText)
+    const rows = parsedRows
     if (rows.length === 0) { setResult({ imported: 0, skipped: 0, errors: ['Nessuna riga trovata nel CSV'] }); return }
 
     setImporting(true)
@@ -357,7 +360,7 @@ export default function ImportTradePage() {
       {preview.length > 0 && (
         <div className="bg-white rounded-xl border border-slate-200 p-4 mb-4">
           <h3 className="text-sm font-semibold text-slate-700 mb-2">
-            3. Anteprima ({parseCSV(csvText).length} righe trovate)
+            3. Anteprima ({parsedRows.length} righe trovate)
           </h3>
           <div className="overflow-x-auto">
             <table className="w-full text-xs">
@@ -379,8 +382,8 @@ export default function ImportTradePage() {
               </tbody>
             </table>
           </div>
-          {preview.length < parseCSV(csvText).length && (
-            <p className="text-xs text-slate-400 mt-2">Mostrate prime 5 righe di {parseCSV(csvText).length}</p>
+          {preview.length < parsedRows.length && (
+            <p className="text-xs text-slate-400 mt-2">Mostrate prime 5 righe di {parsedRows.length}</p>
           )}
         </div>
       )}
@@ -391,7 +394,7 @@ export default function ImportTradePage() {
           <div className="flex items-center gap-3">
             <button onClick={importTrades} disabled={importing || !selectedAccount}
               className="px-6 py-2.5 bg-violet-600 text-white rounded-lg text-sm font-medium hover:bg-violet-700 disabled:opacity-50">
-              {importing ? `Importazione...` : `Importa ${parseCSV(csvText).length} trade`}
+              {importing ? `Importazione...` : `Importa ${parsedRows.length} trade`}
             </button>
             {!selectedAccount && <span className="text-sm text-amber-600">Seleziona prima un conto</span>}
             {importing && progress && <span className="text-sm text-violet-600 animate-pulse">{progress}</span>}

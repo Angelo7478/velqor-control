@@ -9,6 +9,7 @@ import {
 } from '@/lib/quant-utils'
 import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts'
 import QuantNav from '../quant-nav'
+import InfoTooltip from '@/components/ui/InfoTooltip'
 
 export default function ScenariosPage() {
   const [portfolio, setPortfolio] = useState<QelPortfolio | null>(null)
@@ -84,7 +85,7 @@ export default function ScenariosPage() {
         <QuantNav />
         <h1 className="text-2xl font-bold text-slate-900 mt-1">Simulazione Scenari</h1>
         <p className="text-sm text-slate-500 mt-0.5">
-          Monte Carlo bootstrap — {trades.length} trade reali come base — {portfolio?.name}
+          Monte Carlo<InfoTooltip metricKey="monte_carlo" /> bootstrap — {trades.length} trade reali come base — {portfolio?.name}
         </p>
       </div>
 

@@ -3,8 +3,9 @@
 import { useEffect, useState } from 'react'
 import { createClient } from '@/lib/supabase-browser'
 import { QelStrategy, QelAccount } from '@/types/database'
-import { fmt, fmtUsd, timeAgo, statusBadge, groupColor, plColor, ddBarColor } from '@/lib/quant-utils'
+import { fmt, fmtUsd, timeAgo, statusBadge, groupColor, plColor, ddBarColor, fmtAlpha, alphaColor } from '@/lib/quant-utils'
 import AccountDashboard from './account-dashboard'
+import InfoTooltip from '@/components/ui/InfoTooltip'
 
 type Tab = 'overview' | 'strategies' | 'accounts'
 type StrategyView = 'list' | 'detail'
@@ -19,6 +20,8 @@ export default function QuantPage() {
   const [groupFilter, setGroupFilter] = useState<string>('all')
   const [expandedAcc, setExpandedAcc] = useState<string | null>(null)
   const [selectedAcc, setSelectedAcc] = useState<QelAccount | null>(null)
+  const [benchLoading, setBenchLoading] = useState(false)
+  const [benchResult, setBenchResult] = useState<string | null>(null)
 
   useEffect(() => { loadData() }, [])
 
@@ -31,6 +34,28 @@ export default function QuantPage() {
     setStrategies(stratRes.data || [])
     setAccounts(accRes.data || [])
     setLoading(false)
+  }
+
+  async function refreshBenchmarks() {
+    setBenchLoading(true)
+    setBenchResult(null)
+    try {
+      const supabase = createClient()
+      const { data: { session } } = await supabase.auth.getSession()
+      const res = await fetch(`https://gotbfzdgasuvfskzeycm.supabase.co/functions/v1/fetch-benchmarks`, {
+        headers: { 'Content-Type': 'application/json' },
+      })
+      const json = await res.json()
+      if (json.success) {
+        setBenchResult(`Benchmark aggiornati: ${json.benchmarks?.reduce((s: number, b: { rows: number }) => s + b.rows, 0)} prezzi, ${json.alpha?.length} strategie`)
+        await loadData()
+      } else {
+        setBenchResult(`Errore: ${json.error}`)
+      }
+    } catch (err) {
+      setBenchResult(`Errore: ${err instanceof Error ? err.message : 'rete'}`)
+    }
+    setBenchLoading(false)
   }
 
   if (loading) return <p className="text-slate-500 p-4">Caricamento...</p>
@@ -92,8 +117,20 @@ export default function QuantPage() {
           >
             Builder
           </a>
+          <button
+            onClick={refreshBenchmarks}
+            disabled={benchLoading}
+            className="px-4 py-2 bg-white border border-slate-200 text-slate-700 text-sm font-medium rounded-lg hover:bg-slate-50 transition disabled:opacity-50"
+          >
+            {benchLoading ? 'Aggiornamento...' : 'Benchmark'}
+          </button>
         </div>
       </div>
+      {benchResult && (
+        <div className="mb-4 p-3 bg-violet-50 border border-violet-200 rounded-lg text-sm text-violet-700">
+          {benchResult}
+        </div>
+      )}
 
       {/* Tabs */}
       <div className="flex gap-1 mb-6 bg-slate-100 rounded-lg p-1">
@@ -124,7 +161,7 @@ export default function QuantPage() {
             </div>
             <div className="bg-white rounded-xl border border-slate-200 p-4">
               <p className={`text-2xl font-bold ${maxDD > 4 ? 'text-red-600' : maxDD > 3 ? 'text-amber-600' : 'text-slate-900'}`}>{fmt(maxDD, 1)}%</p>
-              <p className="text-sm text-slate-500">Max DD (storico)</p>
+              <p className="text-sm text-slate-500">Max DD (storico)<InfoTooltip metricKey="max_dd" /></p>
               <div className="h-1.5 bg-slate-100 rounded-full mt-2 overflow-hidden">
                 <div className={`h-full rounded-full ${ddBarColor(maxDD)}`} style={{ width: `${Math.min(maxDD * 10, 100)}%` }} />
               </div>
@@ -335,8 +372,9 @@ export default function QuantPage() {
                           <th className="text-center py-2 font-medium">Stato</th>
                           <th className="text-right py-2 font-medium">Trade</th>
                           <th className="text-right py-2 font-medium">P/L Real</th>
-                          <th className="text-right py-2 font-medium">R/DD Real</th>
+                          <th className="text-right py-2 font-medium">R/DD Real<InfoTooltip metricKey="return_dd" /></th>
                           <th className="text-right py-2 font-medium">R/DD Test</th>
+                          <th className="text-right py-2 font-medium">Alpha<InfoTooltip metricKey="alpha" /></th>
                           <th className="text-center py-2 font-medium">Consistenza</th>
                         </tr>
                       </thead>
@@ -362,6 +400,7 @@ export default function QuantPage() {
                               <td className={`text-right py-2 font-medium ${plColor(Number(s.real_pl || 0))}`}>{fmtUsd(s.real_pl)}</td>
                               <td className={`text-right py-2 font-bold ${s.realRDD > 0 ? 'text-violet-700' : 'text-red-600'}`}>{fmt(s.realRDD, 2)}</td>
                               <td className="text-right py-2 text-slate-500">{fmt(s.testRDD, 2)}</td>
+                              <td className={`text-right py-2 font-medium ${alphaColor(s.alpha_vs_benchmark)}`}>{fmtAlpha(s.alpha_vs_benchmark)}</td>
                               <td className="text-center py-2">
                                 <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${consColor}`}>{consLabel}</span>
                               </td>
@@ -532,22 +571,24 @@ export default function QuantPage() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
-                  {[
+                  {([
                     { label: 'Trades', test: selectedStrat.test_trades, real: selectedStrat.real_trades || null, suffix: '' },
-                    { label: 'Win Rate', test: selectedStrat.test_win_pct, real: selectedStrat.real_win_pct, suffix: '%' },
-                    { label: 'Payoff', test: selectedStrat.test_payoff, real: selectedStrat.real_payoff, suffix: '' },
-                    { label: 'Expectancy', test: selectedStrat.test_expectancy, real: selectedStrat.real_expectancy, suffix: '', prefix: '$' },
-                    { label: 'Max DD', test: selectedStrat.test_max_dd, real: selectedStrat.real_max_dd || null, suffix: '', prefix: '$' },
-                    { label: 'Profit Factor', test: null, real: selectedStrat.real_profit_factor, suffix: '' },
-                    { label: 'Recovery Factor', test: null, real: selectedStrat.real_recovery_factor, suffix: '' },
-                    { label: 'Ret/DD', test: selectedStrat.test_ret_dd, real: selectedStrat.real_ret_dd || null, suffix: '', highlight: true },
-                  ].map((row, i) => {
+                    { label: 'Win Rate', test: selectedStrat.test_win_pct, real: selectedStrat.real_win_pct, suffix: '%', tip: 'win_rate' },
+                    { label: 'Payoff', test: selectedStrat.test_payoff, real: selectedStrat.real_payoff, suffix: '', tip: 'payoff' },
+                    { label: 'Expectancy', test: selectedStrat.test_expectancy, real: selectedStrat.real_expectancy, suffix: '', prefix: '$', tip: 'expectancy' },
+                    { label: 'Max DD', test: selectedStrat.test_max_dd, real: selectedStrat.real_max_dd || null, suffix: '', prefix: '$', tip: 'max_dd' },
+                    { label: 'Profit Factor', test: null, real: selectedStrat.real_profit_factor, suffix: '', tip: 'profit_factor' },
+                    { label: 'Recovery Factor', test: null, real: selectedStrat.real_recovery_factor, suffix: '', tip: 'recovery_factor' },
+                    { label: 'Ret/DD', test: selectedStrat.test_ret_dd, real: selectedStrat.real_ret_dd || null, suffix: '', highlight: true, tip: 'return_dd' },
+                  ] as { label: string; test: number | null; real: number | null; suffix: string; prefix?: string; highlight?: boolean; tip?: string }[]).map((row, i) => {
                     const testVal = row.test !== null && row.test !== undefined ? Number(row.test) : null
                     const realVal = row.real !== null && row.real !== undefined && Number(row.real) !== 0 ? Number(row.real) : null
                     const delta = testVal !== null && realVal !== null ? realVal - testVal : null
                     return (
                       <tr key={i} className={row.highlight ? 'bg-violet-50' : ''}>
-                        <td className={`py-2 ${row.highlight ? 'font-semibold text-violet-700' : 'text-slate-700'}`}>{row.label}</td>
+                        <td className={`py-2 ${row.highlight ? 'font-semibold text-violet-700' : 'text-slate-700'}`}>
+                          {row.label}{row.tip && <InfoTooltip metricKey={row.tip as import('@/lib/tooltip-content').TooltipKey} />}
+                        </td>
                         <td className="text-right py-2 text-slate-600">
                           {testVal !== null ? `${row.prefix || ''}${fmt(testVal)}${row.suffix}` : '—'}
                         </td>

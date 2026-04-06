@@ -5,6 +5,7 @@ import { createClient } from '@/lib/supabase-browser'
 import { QelAccount, QelAccountSnapshot, QelTrade, QelStrategy } from '@/types/database'
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, AreaChart, Area } from 'recharts'
 import { fmt, fmtUsd, plColor, ddBarColor, MONTHS } from '@/lib/quant-utils'
+import InfoTooltip from '@/components/ui/InfoTooltip'
 
 interface Props {
   account: QelAccount
@@ -407,11 +408,11 @@ export default function AccountDashboard({ account, onClose }: Props) {
             </div>
             <div className="bg-slate-50 rounded-lg p-3">
               <p className="text-lg font-bold text-green-600">{fmt(winRate, 1)}%</p>
-              <p className="text-xs text-slate-500">Win Rate</p>
+              <p className="text-xs text-slate-500">Win Rate<InfoTooltip metricKey="win_rate" /></p>
             </div>
             <div className="bg-slate-50 rounded-lg p-3">
               <p className="text-lg font-bold text-slate-900">{fmt(profitFactor, 2)}</p>
-              <p className="text-xs text-slate-500">Profit Factor</p>
+              <p className="text-xs text-slate-500">Profit Factor<InfoTooltip metricKey="profit_factor" /></p>
             </div>
             <div className="bg-green-50 rounded-lg p-3">
               <p className="text-lg font-bold text-green-600">{fmtUsd(avgWin, 2)}</p>
