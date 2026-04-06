@@ -110,15 +110,29 @@ mt5-bridge/
 
 ## Phase 2 — Institutional Sizing & Portfolio Analysis (dal 2026-04-04)
 
-### Cosa è stato fatto (Sprint 1)
-- [x] Migration 004: nuove colonne strategy_style/category, Kelly, portfolio params, sizing tables
-- [x] Classificazione 18 strategie: 11 mean_reversion, 4 seasonal, 2 trend_following
-- [x] Portfolio FTMO 10K creato (ID: b32e16ca-...) con 16 strategie linkate
-- [x] Kelly f calcolato per tutte le strategie da test data
-- [x] `src/lib/quant-utils.ts` — Utility condivise + Sizing Engine client-side
-- [x] Pagina `/divisioni/quant/sizing` — 3 tab: Strategy Grid, DD Budget, Fitness Report
-- [x] Refactor: utility duplicate eliminate da page.tsx e account-dashboard.tsx
-- [x] Tipi aggiornati: QelPortfolioStrategy, QelStrategySizing, QelSizingEngineRun, QelStrategyTest, QelBenchmark
+### Sprint 1 — Sizing Engine + Kelly + HRP
+- [x] Migration 004-005: strategy_style/category/family, Kelly, portfolio params, sizing tables, correlations
+- [x] Classificazione 17 strategie in 7 famiglie: RSI2_SP500(5), RSI2_DAX(2), RSI2_FX_JPY(2), RSI2_FX_CAD(2), BTC_TREND(2), NQ_SEASONAL(2), OIL_SEASONAL(2)
+- [x] Portfolio FTMO 10K (ID: b32e16ca-...) con 17 strategie (M14 riattivata)
+- [x] `quant-utils.ts` — Sizing engine: Kelly/Half-Kelly, RoR, HRP family-aware, correlazioni (Pearson + family-based), fitness scoring con confidence logaritmica e normalizzazione DD per lotti
+- [x] `/divisioni/quant/sizing` — 4 tab: Strategy Grid, DD Budget (barre HTML), Correlazioni (heatmap + allocazione famiglie), Fitness Report (per-conto)
+
+### Sprint 2 — Correlazioni + Family HRP
+- [x] Migration 005: strategy_family, qel_strategy_correlations, HRP columns
+- [x] Pearson correlation dove >= 10 giorni overlap, family-based dove insufficiente
+- [x] HRP 2 livelli: budget tra famiglie (inverse variance) → equi-split dentro famiglia
+
+### Sprint 3 — Health Monitor + Pendulum
+- [x] Migration 006: qel_strategy_health, v_strategy_equity_curve, v_strategy_recent_performance
+- [x] `/divisioni/quant/health` — Traffic-light per strategia, pendulum context-aware, regime detection
+- [x] Pendulum: 0.85x al peak (se underperforming), 1.0x (se outperforming), fino a 1.3x in DD (se edge validato)
+- [x] Regime mismatch: strategie trend con expectancy negativa → "fase sbagliata" non "rotta"
+- [x] Dati per-conto: DD, win rate, expectancy filtrati per account_id, DD normalizzato per lotti
+
+### Sprint 4 — Monte Carlo + Scenari
+- [x] Monte Carlo bootstrap: resample trade reali → N equity paths con percentili 5/25/50/75/95
+- [x] `/divisioni/quant/scenarios` — Confronto 3 scenari (1/4 Kelly, 1/2 Kelly, Full Kelly) + fan chart
+- [x] Statistiche: rendimento mediano, DD mediano/peggiore, probabilità rovina, probabilità profitto
 
 ### Nuove tabelle Phase 2
 | Tabella | Scopo |
@@ -148,22 +162,22 @@ mt5-bridge/
 ### Struttura Phase 2
 ```
 src/
-  lib/quant-utils.ts              ← Utility condivise + Sizing Engine
+  lib/quant-utils.ts              ← Utility condivise + Sizing + MC + Health (~1000 righe)
   app/(dashboard)/divisioni/quant/
-    sizing/page.tsx               ← Pagina Sizing Engine (3 tab)
+    sizing/page.tsx               ← Sizing Engine (4 tab: Grid, DD Budget, Correlazioni, Fitness)
+    health/page.tsx               ← Health Monitor (traffic-light, pendulum, regime)
+    scenarios/page.tsx            ← Monte Carlo + 3 scenari + fan chart
 ```
 
-### Cosa resta da fare (Phase 2)
-- [ ] ~108 trade senza magic → bridge enrich da VPS
-- [ ] Correlazioni tra strategie + heatmap
-- [ ] HRP clustering per pesi portafoglio
-- [ ] Pendulum state tracking (DD detection automatica)
-- [ ] Health monitoring automatico con alert
-- [ ] Monte Carlo simulation + scenario analysis
-- [ ] Generatore config per 8 nuovi conti
-- [ ] Import XLSX per dati test/WFM
+### Cosa resta (Sprint 5+)
+- [ ] Portfolio Builder: seleziona strategie + capitale + limiti → genera config nuovi conti
+- [ ] Import dati WFM/MC da SQX → popolare qel_strategy_tests
+- [ ] Benchmark: confronto strategia vs buy-and-hold sottostante (alpha)
+- [ ] Costi per trade: spread + commissioni + swap → expectancy netta
+- [ ] Tooltip didattici (?) su metriche tecniche
 - [ ] AI Sizing Advisor
-- [ ] N8N: weekly optimization + sync monitor
+- [ ] N8N: weekly optimization + sync monitor + alert Telegram
+- [ ] ~108 trade senza magic → bridge enrich da VPS
 
 ### Cosa resta da Phase 1
 - [ ] Aggiornare bridge sulla VPS (nuova versione con DD storico)
