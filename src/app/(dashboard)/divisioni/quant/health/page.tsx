@@ -103,6 +103,30 @@ export default function HealthPage() {
       }
     }
 
+    // Calculate average lot per strategy on this account (for DD normalization)
+    const avgLotMap = new Map<string, number>()
+    if (ptf.account_id) {
+      const { data: lotAvgs } = await supabase
+        .from('qel_trades')
+        .select('strategy_id, lots')
+        .eq('account_id', ptf.account_id)
+        .eq('is_open', false)
+        .not('strategy_id', 'is', null)
+      if (lotAvgs) {
+        const sums = new Map<string, { total: number; count: number }>()
+        for (const row of lotAvgs) {
+          if (!row.strategy_id) continue
+          if (!sums.has(row.strategy_id)) sums.set(row.strategy_id, { total: 0, count: 0 })
+          const s = sums.get(row.strategy_id)!
+          s.total += Number(row.lots)
+          s.count++
+        }
+        for (const [sid, s] of sums) {
+          avgLotMap.set(sid, s.total / s.count)
+        }
+      }
+    }
+
     if (stratRes.data) {
       const result: HealthCardData[] = stratRes.data.map(s => {
         const perf = perfMap.get(s.id)
@@ -118,6 +142,7 @@ export default function HealthPage() {
         }
 
         const report = calcHealthReport(stratOverride, {
+          avgRealLot: avgLotMap.get(s.id) ?? null,
           consecLosses: perf?.consecLosses ?? 0,
           cumulativePnl: peaks?.last ?? 0,
           equityPeak: peaks?.peak ?? 0,

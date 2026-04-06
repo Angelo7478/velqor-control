@@ -190,6 +190,9 @@ export function calcFitnessScore(strategy: {
   real_max_dd: number | null
   real_expectancy: number | null
   real_trades: number
+  // Lot normalization: test DD was at test_lot, real DD at avg_real_lot
+  test_lot?: number | null
+  avg_real_lot?: number | null
 }): { score: number; details: Record<string, number>; confidence: number } {
   const { real_trades } = strategy
   const details: Record<string, number> = {}
@@ -223,8 +226,13 @@ export function calcFitnessScore(strategy: {
   }
 
   // --- DD containment (30%) — Most critical for FTMO ---
+  // NORMALIZE DD by lot size: test DD was at test_lot, real DD at avg_real_lot
   if (strategy.test_max_dd && strategy.real_max_dd) {
-    const ratio = strategy.real_max_dd / strategy.test_max_dd
+    let normalizedTestDd = strategy.test_max_dd
+    if (strategy.test_lot && strategy.avg_real_lot && strategy.test_lot > 0) {
+      normalizedTestDd = strategy.test_max_dd * (strategy.avg_real_lot / strategy.test_lot)
+    }
+    const ratio = normalizedTestDd > 0 ? strategy.real_max_dd / normalizedTestDd : 1
     details.dd_ratio = Math.round(ratio * 100) / 100
 
     let ddScore: number
@@ -387,6 +395,7 @@ export function calcHealthReport(strategy: {
   test_max_dd: number | null
   test_expectancy: number | null
   test_max_consec_loss: number | null
+  lot_static: number | null
   real_trades: number
   real_win_pct: number | null
   real_payoff: number | null
@@ -394,6 +403,7 @@ export function calcHealthReport(strategy: {
   real_expectancy: number | null
   real_pl: number
 }, liveData: {
+  avgRealLot: number | null
   consecLosses: number
   cumulativePnl: number
   equityPeak: number
@@ -403,7 +413,7 @@ export function calcHealthReport(strategy: {
 }): HealthReport {
   const flags: string[] = []
 
-  // 1. Fitness score
+  // 1. Fitness score (with lot normalization for DD)
   const fitness = calcFitnessScore({
     test_win_pct: strategy.test_win_pct,
     test_payoff: strategy.test_payoff,
@@ -414,6 +424,8 @@ export function calcHealthReport(strategy: {
     real_max_dd: strategy.real_max_dd,
     real_expectancy: strategy.real_expectancy,
     real_trades: strategy.real_trades,
+    test_lot: strategy.lot_static,
+    avg_real_lot: liveData.avgRealLot,
   })
 
   // 2. Determine if strategy is outperforming (for pendulum context)
@@ -457,8 +469,13 @@ export function calcHealthReport(strategy: {
       healthScore = Math.max(healthScore, 65) // minimum 65 if outperforming
     }
 
-    // DD breach check — but contextualized
-    if (strategy.test_max_dd && strategy.real_max_dd > strategy.test_max_dd * 2 && fitness.confidence > 60) {
+    // DD breach check — NORMALIZED by lot size
+    let normalizedTestDd = strategy.test_max_dd ?? 0
+    if (strategy.lot_static && liveData.avgRealLot && strategy.lot_static > 0) {
+      normalizedTestDd = (strategy.test_max_dd ?? 0) * (liveData.avgRealLot / strategy.lot_static)
+    }
+
+    if (normalizedTestDd > 0 && strategy.real_max_dd > normalizedTestDd * 2 && fitness.confidence > 60) {
       if (isOutperforming) {
         // Outperforming but DD high → warning, not critical (DD may be from sizing, not broken edge)
         healthScore = Math.min(healthScore, 50)
@@ -471,9 +488,8 @@ export function calcHealthReport(strategy: {
         flags.push('dd_breach_2x')
         recommendation = 'DD reale > 2x test con P/L negativo. Candidata alla sospensione.'
       }
-    } else if (strategy.test_max_dd && strategy.real_max_dd > strategy.test_max_dd * 1.5) {
+    } else if (normalizedTestDd > 0 && strategy.real_max_dd > normalizedTestDd * 1.5) {
       if (isOutperforming) {
-        // Outperforming + moderate DD → just flag it, don't downgrade
         flags.push('dd_above_test')
       } else {
         healthScore = Math.min(healthScore, 45)
