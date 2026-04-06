@@ -457,38 +457,41 @@ function DDBudget({ strategies, output, ddBudgetUsd }: { strategies: StrategyRow
 
   return (
     <div className="space-y-4">
-      {/* DD Waterfall */}
+      {/* DD Waterfall — using simple bars instead of Recharts to avoid ResponsiveContainer crash */}
       <div className="bg-white rounded-xl border border-slate-200 p-4">
-        <h3 className="text-sm font-semibold text-slate-700 mb-3">DD Budget Allocation (Waterfall)</h3>
-        <div className="text-xs text-slate-400 mb-2">
+        <h3 className="text-sm font-semibold text-slate-700 mb-3">Allocazione DD Budget</h3>
+        <div className="text-xs text-slate-400 mb-3">
           Budget: {fmtUsd(ddBudgetUsd)} | Usato: {fmtUsd(output.totalDdBudgetUsedUsd)} ({fmtPct(output.totalDdBudgetUsedPct)}) | Disponibile: {fmtUsd(output.ddBudgetAvailableUsd)}
         </div>
-        <ResponsiveContainer width="100%" height={300}>
-          <BarChart data={chartData} margin={{ top: 5, right: 10, left: 10, bottom: 5 }}>
-            <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
-            <XAxis dataKey="name" tick={{ fontSize: 10 }} />
-            <YAxis tick={{ fontSize: 10 }} />
-            <Tooltip
-              formatter={(value: unknown) => [`$${Number(value).toFixed(2)}`, 'DD Contribution']}
-              labelFormatter={(label: unknown) => {
-                const labelStr = String(label)
-                const item = chartData.find(d => d.name === labelStr)
-                return item?.fullName || labelStr
-              }}
-            />
-            <Bar dataKey="dd" radius={[4, 4, 0, 0]}>
-              {chartData.map((entry, idx) => {
-                const colorMap: Record<string, string> = {
-                  SP500: '#6366f1', INDICI_US: '#3b82f6', BTC: '#f97316',
-                  DAX: '#10b981', OIL: '#f59e0b', FX: '#06b6d4',
-                }
-                return <Cell key={idx} fill={colorMap[entry.group || ''] || '#94a3b8'} />
-              })}
-            </Bar>
-          </BarChart>
-        </ResponsiveContainer>
-        {/* Budget bar */}
-        <div className="mt-3">
+
+        {/* Bar chart as pure HTML (no Recharts crash risk) */}
+        <div className="space-y-1.5">
+          {chartData.map(item => {
+            const pct = ddBudgetUsd > 0 ? (item.dd / ddBudgetUsd) * 100 : 0
+            const colorMap: Record<string, string> = {
+              SP500: 'bg-indigo-500', INDICI_US: 'bg-blue-500', BTC: 'bg-orange-500',
+              DAX: 'bg-emerald-500', OIL: 'bg-amber-500', FX: 'bg-cyan-500',
+            }
+            const barColor = colorMap[item.group || ''] || 'bg-slate-400'
+            return (
+              <div key={item.name} className="flex items-center gap-2">
+                <span className="text-[10px] font-mono text-slate-500 w-8">{item.name}</span>
+                <div className="flex-1 h-5 bg-slate-50 rounded overflow-hidden">
+                  <div className={`h-full ${barColor} rounded`} style={{ width: `${Math.min(pct * 3, 100)}%` }} />
+                </div>
+                <span className="text-[10px] font-mono text-slate-600 w-12 text-right">{fmtUsd(item.dd)}</span>
+                <span className="text-[10px] text-slate-400 w-10 text-right">{fmt(pct, 1)}%</span>
+              </div>
+            )
+          })}
+        </div>
+
+        {/* Budget progress bar */}
+        <div className="mt-4">
+          <div className="flex justify-between text-[10px] text-slate-400 mb-1">
+            <span>Utilizzo DD Budget</span>
+            <span>{fmtPct(output.totalDdBudgetUsedPct)} di {fmtUsd(ddBudgetUsd)}</span>
+          </div>
           <div className="h-3 bg-slate-100 rounded-full overflow-hidden">
             <div
               className={`h-full rounded-full transition-all ${
@@ -500,36 +503,20 @@ function DDBudget({ strategies, output, ddBudgetUsd }: { strategies: StrategyRow
         </div>
       </div>
 
-      {/* Style Balance */}
+      {/* Style Balance — pure HTML bars */}
       <div className="bg-white rounded-xl border border-slate-200 p-4">
-        <h3 className="text-sm font-semibold text-slate-700 mb-3">Style Balance (target 50/50)</h3>
-        <div className="flex items-center gap-6">
-          <div className="w-40 h-40">
-            <ResponsiveContainer width="100%" height="100%">
-              <PieChart>
-                <Pie
-                  data={stylePie}
-                  cx="50%" cy="50%"
-                  innerRadius={35} outerRadius={60}
-                  paddingAngle={3}
-                  dataKey="value"
-                >
-                  {stylePie.map((entry, idx) => (
-                    <Cell key={idx} fill={COLORS[idx % COLORS.length]} />
-                  ))}
-                </Pie>
-                <Tooltip formatter={(value: unknown) => `${value}%`} />
-              </PieChart>
-            </ResponsiveContainer>
-          </div>
-          <div className="space-y-2">
-            {stylePie.map((entry, idx) => (
-              <div key={entry.name} className="flex items-center gap-2">
-                <div className="w-3 h-3 rounded-sm" style={{ backgroundColor: COLORS[idx % COLORS.length] }} />
-                <span className="text-sm text-slate-700">{entry.name}: <strong>{entry.value}%</strong></span>
+        <h3 className="text-sm font-semibold text-slate-700 mb-3">Bilanciamento Stili (target 50/50)</h3>
+        <div className="space-y-2">
+          {stylePie.map((entry, idx) => (
+            <div key={entry.name} className="flex items-center gap-3">
+              <div className="w-3 h-3 rounded-sm" style={{ backgroundColor: COLORS[idx % COLORS.length] }} />
+              <span className="text-sm text-slate-700 w-20">{entry.name}</span>
+              <div className="flex-1 h-5 bg-slate-50 rounded overflow-hidden">
+                <div className="h-full bg-indigo-400 rounded" style={{ width: `${entry.value}%`, backgroundColor: COLORS[idx % COLORS.length] }} />
               </div>
-            ))}
-          </div>
+              <span className="text-sm font-bold text-slate-700 w-12 text-right">{entry.value}%</span>
+            </div>
+          ))}
         </div>
       </div>
     </div>
