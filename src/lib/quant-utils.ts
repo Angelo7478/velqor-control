@@ -968,3 +968,170 @@ export const KELLY_MODES = ['half_kelly', 'quarter_kelly', 'full_kelly'] as cons
 export type KellyMode = typeof KELLY_MODES[number]
 
 export const MONTHS = ['Gen', 'Feb', 'Mar', 'Apr', 'Mag', 'Giu', 'Lug', 'Ago', 'Set', 'Ott', 'Nov', 'Dic']
+
+// --- Monte Carlo Simulation ---
+
+export interface MCPath {
+  equity: number[] // equity at each step (trade)
+  maxDd: number    // max drawdown in $
+  maxDdPct: number // max drawdown in %
+  finalPnl: number
+  finalPct: number
+}
+
+export interface MCResult {
+  paths: MCPath[]
+  percentiles: {
+    p5: number[]; p25: number[]; p50: number[]; p75: number[]; p95: number[]
+  }
+  stats: {
+    medianReturn: number
+    medianReturnPct: number
+    medianMaxDd: number
+    medianMaxDdPct: number
+    worstDd: number
+    worstDdPct: number
+    probRuin: number // probability of hitting max DD limit
+    probProfit: number
+  }
+}
+
+/**
+ * Monte Carlo bootstrap simulation.
+ *
+ * Takes real trade P/L data, resamples with replacement to create
+ * N simulated equity paths of M trades each.
+ * Returns percentile bands for fan chart + risk statistics.
+ *
+ * @param trades Array of net_profit values from real trades
+ * @param equityBase Starting capital
+ * @param numPaths Number of simulation paths (default 500)
+ * @param pathLength Number of trades per path (default: same as input)
+ * @param ruinPct Max DD % that triggers "ruin" (default: 10 for FTMO)
+ * @param lotMultiplier Scale factor for trade P/L (for scenario comparison)
+ */
+export function runMonteCarlo(
+  trades: number[],
+  equityBase: number,
+  numPaths = 500,
+  pathLength?: number,
+  ruinPct = 10,
+  lotMultiplier = 1.0,
+): MCResult {
+  const len = pathLength || trades.length
+  if (trades.length === 0) {
+    return emptyMCResult(len)
+  }
+
+  const ruinUsd = equityBase * ruinPct / 100
+  const paths: MCPath[] = []
+
+  for (let p = 0; p < numPaths; p++) {
+    const equity: number[] = [equityBase]
+    let peak = equityBase
+    let maxDd = 0
+
+    for (let t = 0; t < len; t++) {
+      // Bootstrap: random trade from historical data
+      const idx = Math.floor(Math.random() * trades.length)
+      const pnl = trades[idx] * lotMultiplier
+      const newEquity = equity[equity.length - 1] + pnl
+      equity.push(newEquity)
+
+      if (newEquity > peak) peak = newEquity
+      const dd = peak - newEquity
+      if (dd > maxDd) maxDd = dd
+    }
+
+    const finalPnl = equity[equity.length - 1] - equityBase
+    paths.push({
+      equity,
+      maxDd,
+      maxDdPct: equityBase > 0 ? (maxDd / equityBase) * 100 : 0,
+      finalPnl,
+      finalPct: equityBase > 0 ? (finalPnl / equityBase) * 100 : 0,
+    })
+  }
+
+  // Calculate percentile bands at each step
+  const p5: number[] = [], p25: number[] = [], p50: number[] = [], p75: number[] = [], p95: number[] = []
+  for (let t = 0; t <= len; t++) {
+    const values = paths.map(p => p.equity[t]).sort((a, b) => a - b)
+    p5.push(values[Math.floor(numPaths * 0.05)])
+    p25.push(values[Math.floor(numPaths * 0.25)])
+    p50.push(values[Math.floor(numPaths * 0.50)])
+    p75.push(values[Math.floor(numPaths * 0.75)])
+    p95.push(values[Math.floor(numPaths * 0.95)])
+  }
+
+  // Stats
+  const finalPnls = paths.map(p => p.finalPnl).sort((a, b) => a - b)
+  const maxDds = paths.map(p => p.maxDd).sort((a, b) => a - b)
+  const maxDdPcts = paths.map(p => p.maxDdPct).sort((a, b) => a - b)
+
+  return {
+    paths,
+    percentiles: { p5, p25, p50, p75, p95 },
+    stats: {
+      medianReturn: finalPnls[Math.floor(numPaths * 0.5)],
+      medianReturnPct: equityBase > 0 ? (finalPnls[Math.floor(numPaths * 0.5)] / equityBase) * 100 : 0,
+      medianMaxDd: maxDds[Math.floor(numPaths * 0.5)],
+      medianMaxDdPct: maxDdPcts[Math.floor(numPaths * 0.5)],
+      worstDd: maxDds[Math.floor(numPaths * 0.95)],
+      worstDdPct: maxDdPcts[Math.floor(numPaths * 0.95)],
+      probRuin: paths.filter(p => p.maxDdPct >= ruinPct).length / numPaths,
+      probProfit: paths.filter(p => p.finalPnl > 0).length / numPaths,
+    },
+  }
+}
+
+function emptyMCResult(len: number): MCResult {
+  const zeros = Array(len + 1).fill(0)
+  return {
+    paths: [],
+    percentiles: { p5: zeros, p25: zeros, p50: zeros, p75: zeros, p95: zeros },
+    stats: { medianReturn: 0, medianReturnPct: 0, medianMaxDd: 0, medianMaxDdPct: 0, worstDd: 0, worstDdPct: 0, probRuin: 0, probProfit: 0 },
+  }
+}
+
+// --- Scenario Comparison ---
+
+export interface ScenarioResult {
+  name: string
+  kellyMode: KellyMode
+  lotMultiplier: number
+  mc: MCResult
+}
+
+/**
+ * Compare 3 scenarios: Conservative (1/4 Kelly), Neutral (1/2 Kelly), Aggressive (full Kelly).
+ * Runs MC simulation for each with different lot multipliers.
+ */
+export function runScenarioComparison(
+  trades: number[],
+  equityBase: number,
+  ruinPct = 10,
+  numPaths = 500,
+  pathLength?: number,
+): ScenarioResult[] {
+  return [
+    {
+      name: 'Conservativo (1/4 Kelly)',
+      kellyMode: 'quarter_kelly' as KellyMode,
+      lotMultiplier: 0.5,
+      mc: runMonteCarlo(trades, equityBase, numPaths, pathLength, ruinPct, 0.5),
+    },
+    {
+      name: 'Neutro (1/2 Kelly)',
+      kellyMode: 'half_kelly' as KellyMode,
+      lotMultiplier: 1.0,
+      mc: runMonteCarlo(trades, equityBase, numPaths, pathLength, ruinPct, 1.0),
+    },
+    {
+      name: 'Aggressivo (Full Kelly)',
+      kellyMode: 'full_kelly' as KellyMode,
+      lotMultiplier: 2.0,
+      mc: runMonteCarlo(trades, equityBase, numPaths, pathLength, ruinPct, 2.0),
+    },
+  ]
+}

@@ -78,7 +78,13 @@ export default function QuantPage() {
             href="/divisioni/quant/health"
             className="px-4 py-2 bg-white border border-slate-200 text-slate-700 text-sm font-medium rounded-lg hover:bg-slate-50 transition"
           >
-            Health Monitor
+            Health
+          </a>
+          <a
+            href="/divisioni/quant/scenarios"
+            className="px-4 py-2 bg-white border border-slate-200 text-slate-700 text-sm font-medium rounded-lg hover:bg-slate-50 transition"
+          >
+            Scenari
           </a>
         </div>
       </div>
