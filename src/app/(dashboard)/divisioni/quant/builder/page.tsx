@@ -427,6 +427,40 @@ export default function BuilderPage() {
     const fmtM = (n: number) => { const p = n >= 0 ? '' : '-'; return `${p}$${Math.abs(n).toLocaleString('it-IT', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}` }
     const plC = (n: number) => n > 0 ? '#16a34a' : n < 0 ? '#dc2626' : '#475569'
 
+    // --- Temporal analysis ---
+    const allDates = curveData.combined.map(p => p.closeTime).sort()
+    const firstDate = allDates[0] || ''
+    const lastDate = allDates[allDates.length - 1] || ''
+    const firstD = new Date(firstDate)
+    const lastD = new Date(lastDate)
+    const durationDays = Math.max(1, Math.round((lastD.getTime() - firstD.getTime()) / 86400000))
+    const durationMonths = Math.max(0.1, durationDays / 30.44)
+
+    const pnlPerMonth = ps.totalPnl / durationMonths
+    const pnlPerMonthPct = returnPct / durationMonths
+    const tradesPerMonth = ps.totalTrades / durationMonths
+    const annualizedReturn = pnlPerMonthPct * 12
+    const annualizedPnl = pnlPerMonth * 12
+
+    // Monthly breakdown
+    const monthlyPnl = new Map<string, number>()
+    for (const p of curveData.combined) {
+      const key = p.closeTime.slice(0, 7) // YYYY-MM
+      monthlyPnl.set(key, (monthlyPnl.get(key) || 0) + (p.pnl || 0))
+    }
+    const monthlyEntries = [...monthlyPnl.entries()].sort((a, b) => a[0].localeCompare(b[0]))
+    const bestMonth = monthlyEntries.length > 0 ? monthlyEntries.reduce((best, e) => e[1] > best[1] ? e : best) : null
+    const worstMonth = monthlyEntries.length > 0 ? monthlyEntries.reduce((worst, e) => e[1] < worst[1] ? e : worst) : null
+    const profitableMonths = monthlyEntries.filter(e => e[1] > 0).length
+    const totalMonths = monthlyEntries.length
+
+    const fmtDate = (d: string) => d ? new Date(d).toLocaleDateString('it-IT', { day: '2-digit', month: 'short', year: 'numeric' }) : '—'
+    const fmtMonthLabel = (ym: string) => {
+      const [y, m] = ym.split('-')
+      const mNames = ['Gen','Feb','Mar','Apr','Mag','Giu','Lug','Ago','Set','Ott','Nov','Dic']
+      return `${mNames[parseInt(m) - 1]} ${y}`
+    }
+
     const html = `<!DOCTYPE html>
 <html lang="it">
 <head>
@@ -554,6 +588,109 @@ export default function BuilderPage() {
     <strong>NOTA:</strong> Il Max Drawdown simulato (${fmtR(ps.maxDdPct, 1)}%) utilizza oltre il 50% del budget DD FTMO.
     Monitorare attentamente durante operatività live.
   </div>` : ''}
+
+  <!-- Analisi temporale -->
+  <h2>Analisi Temporale</h2>
+  <div class="grid-2">
+    <div>
+      <h3>Periodo</h3>
+      <table>
+        <tr><td>Primo trade</td><td class="text-right bold">${fmtDate(firstDate)}</td></tr>
+        <tr><td>Ultimo trade</td><td class="text-right bold">${fmtDate(lastDate)}</td></tr>
+        <tr><td>Durata</td><td class="text-right">${Math.round(durationMonths * 10) / 10} mesi (${durationDays} giorni)</td></tr>
+        <tr><td>Trade/mese</td><td class="text-right">${fmtR(tradesPerMonth, 1)}</td></tr>
+      </table>
+    </div>
+    <div>
+      <h3>Proiezione</h3>
+      <table>
+        <tr><td>P/L medio mensile</td><td class="text-right bold" style="color:${plC(pnlPerMonth)}">${fmtM(pnlPerMonth)}</td></tr>
+        <tr><td>Rendimento mensile</td><td class="text-right" style="color:${plC(pnlPerMonthPct)}">${fmtR(pnlPerMonthPct, 2)}%</td></tr>
+        <tr><td style="color:#6366f1;font-weight:600">Proiezione annua</td><td class="text-right bold" style="color:${plC(annualizedPnl)}">${fmtM(annualizedPnl)} (${fmtR(annualizedReturn, 1)}%)</td></tr>
+        <tr><td>Mesi profittevoli</td><td class="text-right">${profitableMonths}/${totalMonths} (${fmtR(totalMonths > 0 ? (profitableMonths/totalMonths)*100 : 0, 0)}%)</td></tr>
+      </table>
+    </div>
+  </div>
+
+  <h3>Breakdown Mensile</h3>
+  <table>
+    <thead>
+      <tr><th>Mese</th><th class="text-right">P/L</th><th class="text-right">Cumulativo</th><th style="width:50%">Barra</th></tr>
+    </thead>
+    <tbody>
+    ${(() => {
+      let cumPnl = 0
+      const maxAbsMonth = Math.max(...monthlyEntries.map(e => Math.abs(e[1])), 1)
+      return monthlyEntries.map(([ym, pnl]) => {
+        cumPnl += pnl
+        const barPct = (Math.abs(pnl) / maxAbsMonth) * 100
+        return `<tr>
+          <td style="font-family:sans-serif">${fmtMonthLabel(ym)}</td>
+          <td class="text-right bold" style="color:${plC(pnl)}">${fmtM(pnl)}</td>
+          <td class="text-right" style="color:${plC(cumPnl)}">${fmtM(cumPnl)}</td>
+          <td><div style="display:flex;align-items:center;gap:4px"><div style="width:${barPct}%;height:12px;background:${pnl >= 0 ? '#22c55e' : '#ef4444'};border-radius:3px;min-width:2px"></div></div></td>
+        </tr>`
+      }).join('')
+    })()}
+    </tbody>
+    ${bestMonth ? `<tfoot><tr style="border-top:2px solid #e2e8f0;font-size:10px;color:#64748b">
+      <td colspan="4">Miglior mese: <strong style="color:#16a34a">${fmtMonthLabel(bestMonth[0])} ${fmtM(bestMonth[1])}</strong> | Peggior mese: <strong style="color:#dc2626">${worstMonth ? `${fmtMonthLabel(worstMonth[0])} ${fmtM(worstMonth[1])}` : '—'}</strong></td>
+    </tr></tfoot>` : ''}
+  </table>
+
+  <!-- Equity Curve (SVG) -->
+  <h2>Equity Curve</h2>
+  ${(() => {
+    const pts = curveData.combined
+    if (pts.length < 2) return '<p>Dati insufficienti per il grafico</p>'
+    const w = 750, h = 200, pad = 40
+    const equities = pts.map(p => p.equity)
+    const minEq = Math.min(...equities, equityBase) * 0.998
+    const maxEq = Math.max(...equities, equityBase) * 1.002
+    const rangeEq = maxEq - minEq || 1
+    const xScale = (i: number) => pad + (i / (pts.length - 1)) * (w - pad * 2)
+    const yScale = (v: number) => h - pad - ((v - minEq) / rangeEq) * (h - pad * 2)
+    // Build SVG path for portfolio equity
+    const pathPts = pts.map((p, i) => `${i === 0 ? 'M' : 'L'}${xScale(i).toFixed(1)},${yScale(p.equity).toFixed(1)}`).join(' ')
+    // Area fill
+    const areaPath = pathPts + ` L${xScale(pts.length - 1).toFixed(1)},${yScale(minEq).toFixed(1)} L${xScale(0).toFixed(1)},${yScale(minEq).toFixed(1)} Z`
+    // Baseline
+    const baseY = yScale(equityBase)
+    // Y axis labels
+    const yTicks = 5
+    const yLabels = Array.from({length: yTicks}, (_, i) => minEq + (rangeEq * i / (yTicks - 1)))
+    // X axis labels (pick ~6 dates)
+    const xTicks = Math.min(6, pts.length)
+    const xLabels = Array.from({length: xTicks}, (_, i) => {
+      const idx = Math.round(i * (pts.length - 1) / (xTicks - 1))
+      return { x: xScale(idx), label: pts[idx]?.date?.slice(5) || '' }
+    })
+    // Peak and DD point
+    let peak = equityBase, maxDdIdx = 0, maxDdVal = 0
+    pts.forEach((p, i) => { if (p.equity > peak) peak = p.equity; const dd = peak - p.equity; if (dd > maxDdVal) { maxDdVal = dd; maxDdIdx = i } })
+
+    return `<svg width="100%" viewBox="0 0 ${w} ${h}" style="background:#fafbfc;border:1px solid #e2e8f0;border-radius:8px">
+      <!-- Grid -->
+      ${yLabels.map(v => `<line x1="${pad}" y1="${yScale(v).toFixed(1)}" x2="${w-pad}" y2="${yScale(v).toFixed(1)}" stroke="#f1f5f9" stroke-width="1"/>`).join('')}
+      <!-- Baseline -->
+      <line x1="${pad}" y1="${baseY.toFixed(1)}" x2="${w-pad}" y2="${baseY.toFixed(1)}" stroke="#94a3b8" stroke-width="1" stroke-dasharray="4,4"/>
+      <!-- Area fill -->
+      <path d="${areaPath}" fill="url(#eqGrad)" opacity="0.3"/>
+      <!-- Equity line -->
+      <path d="${pathPts}" fill="none" stroke="#6366f1" stroke-width="2"/>
+      <!-- Max DD marker -->
+      <circle cx="${xScale(maxDdIdx).toFixed(1)}" cy="${yScale(pts[maxDdIdx]?.equity || equityBase).toFixed(1)}" r="3" fill="#ef4444"/>
+      <text x="${xScale(maxDdIdx) + 6}" y="${yScale(pts[maxDdIdx]?.equity || equityBase) - 4}" font-size="8" fill="#ef4444">Max DD</text>
+      <!-- Y labels -->
+      ${yLabels.map(v => `<text x="${pad - 4}" y="${yScale(v).toFixed(1)}" text-anchor="end" font-size="8" fill="#94a3b8" dominant-baseline="middle">$${(v/1000).toFixed(1)}k</text>`).join('')}
+      <!-- X labels -->
+      ${xLabels.map(t => `<text x="${t.x.toFixed(1)}" y="${h - 8}" text-anchor="middle" font-size="8" fill="#94a3b8">${t.label}</text>`).join('')}
+      <!-- Start/End labels -->
+      <text x="${pad + 4}" y="${yScale(equityBase) - 6}" font-size="8" fill="#94a3b8">Base ${fmtM(equityBase)}</text>
+      <text x="${xScale(pts.length - 1) - 4}" y="${yScale(pts[pts.length-1]?.equity || equityBase) - 6}" text-anchor="end" font-size="9" font-weight="600" fill="${plC(ps.totalPnl)}">${fmtM(pts[pts.length-1]?.equity || equityBase)}</text>
+      <defs><linearGradient id="eqGrad" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#6366f1"/><stop offset="100%" stop-color="#6366f1" stop-opacity="0"/></linearGradient></defs>
+    </svg>`
+  })()}
 
   <!-- Tabella strategie -->
   <h2>Composizione Portfolio</h2>
