@@ -12,7 +12,9 @@ import {
 interface StrategyWithCosts extends QelStrategy {
   avgCost: number
   avgGrossProfit: number
-  netExpectancy: number
+  netExpectancy: number  // test - costs (theoretical)
+  realAvgTrade: number   // actual avg from 10K account
+  realPnl10k: number     // total real P/L on 10K
   trades10k: number
   selected: boolean
 }
@@ -51,15 +53,16 @@ export default function BuilderPage() {
       .eq('is_open', false)
       .not('strategy_id', 'is', null)
 
-    // Aggregate costs per strategy
-    const costMap = new Map<string, { totalCost: number; totalGross: number; count: number }>()
+    // Aggregate costs + real performance per strategy
+    const costMap = new Map<string, { totalCost: number; totalGross: number; totalNet: number; count: number }>()
     if (costData) {
       for (const t of costData) {
         if (!t.strategy_id) continue
-        if (!costMap.has(t.strategy_id)) costMap.set(t.strategy_id, { totalCost: 0, totalGross: 0, count: 0 })
+        if (!costMap.has(t.strategy_id)) costMap.set(t.strategy_id, { totalCost: 0, totalGross: 0, totalNet: 0, count: 0 })
         const c = costMap.get(t.strategy_id)!
         c.totalCost += Math.abs(Number(t.swap ?? 0)) + Math.abs(Number(t.commission ?? 0))
         c.totalGross += Number(t.profit ?? 0)
+        c.totalNet += Number(t.net_profit ?? 0)
         c.count++
       }
     }
@@ -69,12 +72,16 @@ export default function BuilderPage() {
         const costs = costMap.get(s.id)
         const avgCost = costs && costs.count > 0 ? costs.totalCost / costs.count : 0
         const avgGross = costs && costs.count > 0 ? costs.totalGross / costs.count : 0
+        const realAvg = costs && costs.count > 0 ? costs.totalNet / costs.count : 0
+        const realPnl = costs?.totalNet ?? 0
         const testExp = s.test_expectancy ?? 0
         return {
           ...s,
           avgCost,
           avgGrossProfit: avgGross,
           netExpectancy: testExp - avgCost,
+          realAvgTrade: realAvg,
+          realPnl10k: realPnl,
           trades10k: costs?.count ?? 0,
           selected: s.include_in_portfolio && s.status === 'active',
         }
@@ -99,7 +106,13 @@ export default function BuilderPage() {
   }
 
   function selectProfitable() {
-    setStrategies(prev => prev.map(s => ({ ...s, selected: s.netExpectancy > 0 && s.status === 'active' })))
+    // Use REAL P/L data, not theoretical. If no real data, use net expectancy
+    setStrategies(prev => prev.map(s => ({
+      ...s,
+      selected: s.status === 'active' && (
+        s.trades10k >= 10 ? s.realPnl10k > 0 : s.netExpectancy > 0
+      ),
+    })))
     setOutput(null)
   }
 
@@ -241,15 +254,13 @@ export default function BuilderPage() {
               <th className="px-3 py-2 text-[10px] uppercase text-slate-400">Famiglia</th>
               <th className="px-3 py-2 text-[10px] uppercase text-slate-400 text-right">Exp. Test</th>
               <th className="px-3 py-2 text-[10px] uppercase text-slate-400 text-right">Costo/trade</th>
-              <th className="px-3 py-2 text-[10px] uppercase text-slate-400 text-right">Exp. Netta</th>
-              <th className="px-3 py-2 text-[10px] uppercase text-slate-400 text-right">Trade 10K</th>
-              <th className="px-3 py-2 text-[10px] uppercase text-slate-400 text-right">Kelly f*</th>
+              <th className="px-3 py-2 text-[10px] uppercase text-slate-400 text-right">Media reale</th>
+              <th className="px-3 py-2 text-[10px] uppercase text-slate-400 text-right">P/L 10K</th>
+              <th className="px-3 py-2 text-[10px] uppercase text-slate-400 text-right">Trade</th>
             </tr>
           </thead>
           <tbody>
             {strategies.filter(s => s.status === 'active').map(s => {
-              const kellyF = calcKelly(s.test_win_pct ?? 0, s.test_payoff ?? 0)
-              const costEatsEdge = s.netExpectancy < 0 && (s.test_expectancy ?? 0) > 0
               return (
                 <tr key={s.id} className={`border-b border-slate-50 ${s.selected ? 'bg-indigo-50/30' : 'opacity-60'} hover:bg-slate-50 cursor-pointer`}
                   onClick={() => toggleStrategy(s.id)}>
@@ -263,14 +274,15 @@ export default function BuilderPage() {
                     <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${groupColor(s.asset_group)}`}>{s.asset_group}</span>
                   </td>
                   <td className="px-3 py-2 text-xs text-slate-500">{s.strategy_family || '—'}</td>
-                  <td className="px-3 py-2 text-right font-mono text-slate-700">{fmtUsd(s.test_expectancy, 2)}</td>
-                  <td className="px-3 py-2 text-right font-mono text-red-500">{s.avgCost > 0 ? `-${fmtUsd(s.avgCost, 2).replace('$', '')}` : '—'}</td>
-                  <td className={`px-3 py-2 text-right font-mono font-bold ${costEatsEdge ? 'text-red-600' : plColor(s.netExpectancy)}`}>
-                    {fmtUsd(s.netExpectancy, 2)}
-                    {costEatsEdge && <span className="text-[9px] ml-1">⚠️</span>}
+                  <td className="px-3 py-2 text-right font-mono text-slate-500">{fmtUsd(s.test_expectancy, 2)}</td>
+                  <td className="px-3 py-2 text-right font-mono text-red-400">{s.avgCost > 0 ? `-${fmt(s.avgCost, 2)}` : '—'}</td>
+                  <td className={`px-3 py-2 text-right font-mono font-bold ${plColor(s.realAvgTrade)}`}>
+                    {s.trades10k > 0 ? fmtUsd(s.realAvgTrade, 2) : '—'}
+                  </td>
+                  <td className={`px-3 py-2 text-right font-mono font-bold ${plColor(s.realPnl10k)}`}>
+                    {s.trades10k > 0 ? fmtUsd(s.realPnl10k, 0) : '—'}
                   </td>
                   <td className="px-3 py-2 text-right font-mono text-slate-500">{s.trades10k || '—'}</td>
-                  <td className="px-3 py-2 text-right font-mono text-slate-700">{kellyF !== null ? fmt(kellyF, 4) : '—'}</td>
                 </tr>
               )
             })}
@@ -278,11 +290,67 @@ export default function BuilderPage() {
         </table>
       </div>
 
-      {/* Legenda costi */}
-      <div className="bg-amber-50 rounded-xl border border-amber-100 p-3 text-xs text-amber-800">
-        <strong>Exp. Netta</strong> = Expectancy del test − costo medio per trade (swap + commissioni).
-        Se negativa con ⚠️, i costi CFD mangiano l&apos;edge. Queste strategie funzionerebbero meglio sui future (costi inferiori).
-      </div>
+      {/* Proiezione selezionate */}
+      {selected.length > 0 && (
+        <div className="bg-white rounded-xl border border-slate-200 p-4">
+          <h3 className="text-sm font-semibold text-slate-700 mb-3">Riepilogo selezione</h3>
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-4">
+            <div>
+              <div className="text-[10px] uppercase text-slate-400">Strategie</div>
+              <div className="text-xl font-bold text-slate-800">{selected.length}</div>
+              <div className="text-[10px] text-slate-400">{families.size} famiglie</div>
+            </div>
+            <div>
+              <div className="text-[10px] uppercase text-slate-400">P/L reale combinato (10K)</div>
+              <div className={`text-xl font-bold ${plColor(selected.reduce((s, x) => s + x.realPnl10k, 0))}`}>
+                {fmtUsd(selected.reduce((s, x) => s + x.realPnl10k, 0))}
+              </div>
+              <div className="text-[10px] text-slate-400">{selected.reduce((s, x) => s + x.trades10k, 0)} trade totali</div>
+            </div>
+            <div>
+              <div className="text-[10px] uppercase text-slate-400">Media reale per trade</div>
+              {(() => {
+                const totalTrades = selected.reduce((s, x) => s + x.trades10k, 0)
+                const totalPnl = selected.reduce((s, x) => s + x.realPnl10k, 0)
+                const avg = totalTrades > 0 ? totalPnl / totalTrades : 0
+                return <div className={`text-xl font-bold ${plColor(avg)}`}>{fmtUsd(avg, 2)}</div>
+              })()}
+            </div>
+            <div>
+              <div className="text-[10px] uppercase text-slate-400">In perdita (reale)</div>
+              <div className="text-xl font-bold text-red-600">
+                {selected.filter(s => s.trades10k >= 10 && s.realPnl10k < 0).length}
+              </div>
+              <div className="text-[10px] text-slate-400">con &ge;10 trade</div>
+            </div>
+          </div>
+
+          {/* Mini bar per strategia */}
+          <div className="space-y-1">
+            {selected
+              .filter(s => s.trades10k > 0)
+              .sort((a, b) => b.realPnl10k - a.realPnl10k)
+              .map(s => {
+                const maxAbs = Math.max(...selected.filter(x => x.trades10k > 0).map(x => Math.abs(x.realPnl10k)), 1)
+                const pct = (s.realPnl10k / maxAbs) * 50
+                return (
+                  <div key={s.id} className="flex items-center gap-2">
+                    <span className="text-[10px] font-mono text-slate-500 w-6">M{s.magic}</span>
+                    <div className="flex-1 h-4 relative">
+                      <div className="absolute inset-y-0 left-1/2 w-px bg-slate-200" />
+                      {s.realPnl10k >= 0 ? (
+                        <div className="absolute top-0 h-full bg-green-400 rounded-r" style={{ left: '50%', width: `${Math.abs(pct)}%` }} />
+                      ) : (
+                        <div className="absolute top-0 h-full bg-red-400 rounded-l" style={{ right: '50%', width: `${Math.abs(pct)}%` }} />
+                      )}
+                    </div>
+                    <span className={`text-[10px] font-mono w-14 text-right ${plColor(s.realPnl10k)}`}>{fmtUsd(s.realPnl10k, 0)}</span>
+                  </div>
+                )
+              })}
+          </div>
+        </div>
+      )}
 
       {/* Bottone ottimizza */}
       <div className="flex items-center gap-3">
