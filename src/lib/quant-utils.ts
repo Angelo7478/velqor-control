@@ -1135,3 +1135,262 @@ export function runScenarioComparison(
     },
   ]
 }
+
+// ============================================
+// BUILDER V2 — Equity Curves & Portfolio Builder
+// ============================================
+
+/** 18 distinguishable chart colors */
+export const CHART_COLORS = [
+  '#6366f1', // indigo
+  '#22c55e', // green
+  '#f59e0b', // amber
+  '#ef4444', // red
+  '#06b6d4', // cyan
+  '#8b5cf6', // violet
+  '#ec4899', // pink
+  '#14b8a6', // teal
+  '#f97316', // orange
+  '#3b82f6', // blue
+  '#84cc16', // lime
+  '#e11d48', // rose
+  '#0ea5e9', // sky
+  '#a855f7', // purple
+  '#10b981', // emerald
+  '#d946ef', // fuchsia
+  '#eab308', // yellow
+  '#64748b', // slate
+]
+
+/** Combined portfolio line color */
+export const PORTFOLIO_COLOR = '#1e293b' // slate-800
+
+export interface TradeForCurve {
+  strategy_id: string
+  net_profit: number
+  lots: number
+  close_time: string
+  symbol: string
+}
+
+export interface EquityCurvePoint {
+  date: string           // YYYY-MM-DD
+  tradeIndex: number     // sequential trade #
+  closeTime: string      // full ISO timestamp
+  pnl: number            // scaled P/L for this trade
+  cumPnl: number         // cumulative P/L
+  equity: number         // equityBase + cumPnl
+}
+
+export interface StrategyEquityCurve {
+  strategyId: string
+  magic: number
+  name: string
+  color: string
+  userLots: number       // user-chosen lot size
+  originalAvgLots: number
+  points: EquityCurvePoint[]
+  stats: CurveStats
+}
+
+export interface CurveStats {
+  totalPnl: number
+  totalTrades: number
+  winRate: number
+  avgTrade: number
+  maxDd: number
+  maxDdPct: number
+  profitFactor: number
+  sharpe: number         // annualized (approx: avg/std * sqrt(252))
+  bestTrade: number
+  worstTrade: number
+  avgWin: number
+  avgLoss: number
+  maxConsecLoss: number
+  recoveryFactor: number // totalPnl / maxDd
+}
+
+export interface CombinedCurvePoint {
+  date: string
+  closeTime: string
+  equity: number
+  pnl: number
+  // Per-strategy values for tooltip
+  [key: string]: number | string
+}
+
+export interface PortfolioStats extends CurveStats {
+  strategyCount: number
+  correlationAvg: number | null
+}
+
+/**
+ * Build equity curves for multiple strategies with custom lot sizing.
+ *
+ * Scales each trade's P/L by (userLots / originalLots) to simulate
+ * what would have happened at the user's chosen lot size.
+ *
+ * @param trades All closed trades sorted by close_time
+ * @param strategies Map of strategy_id -> { magic, name, userLots }
+ * @param equityBase Starting capital (for equity line)
+ */
+export function buildEquityCurves(
+  trades: TradeForCurve[],
+  strategies: Map<string, { magic: number; name: string; userLots: number; color: string }>,
+  equityBase: number,
+): { curves: StrategyEquityCurve[]; combined: CombinedCurvePoint[]; portfolioStats: PortfolioStats } {
+  // Group trades by strategy
+  const tradesByStrategy = new Map<string, TradeForCurve[]>()
+  for (const t of trades) {
+    if (!strategies.has(t.strategy_id)) continue
+    if (!tradesByStrategy.has(t.strategy_id)) tradesByStrategy.set(t.strategy_id, [])
+    tradesByStrategy.get(t.strategy_id)!.push(t)
+  }
+
+  const curves: StrategyEquityCurve[] = []
+
+  for (const [stratId, config] of strategies) {
+    const stratTrades = tradesByStrategy.get(stratId) || []
+    if (stratTrades.length === 0) continue
+
+    // Calculate average lot size for this strategy
+    const avgLots = stratTrades.reduce((s, t) => s + t.lots, 0) / stratTrades.length
+    const lotScale = avgLots > 0 ? config.userLots / avgLots : 1
+
+    const points: EquityCurvePoint[] = []
+    let cumPnl = 0
+
+    for (let i = 0; i < stratTrades.length; i++) {
+      const t = stratTrades[i]
+      const scaledPnl = t.net_profit * lotScale
+      cumPnl += scaledPnl
+      points.push({
+        date: t.close_time.slice(0, 10),
+        tradeIndex: i + 1,
+        closeTime: t.close_time,
+        pnl: Math.round(scaledPnl * 100) / 100,
+        cumPnl: Math.round(cumPnl * 100) / 100,
+        equity: Math.round((equityBase + cumPnl) * 100) / 100,
+      })
+    }
+
+    const stats = calcCurveStats(points.map(p => p.pnl), equityBase)
+
+    curves.push({
+      strategyId: stratId,
+      magic: config.magic,
+      name: config.name,
+      color: config.color,
+      userLots: config.userLots,
+      originalAvgLots: Math.round(avgLots * 1000) / 1000,
+      points,
+      stats,
+    })
+  }
+
+  // Build combined equity curve — merge all trades chronologically
+  const allScaledTrades: { closeTime: string; date: string; pnl: number; stratId: string }[] = []
+  for (const curve of curves) {
+    for (const p of curve.points) {
+      allScaledTrades.push({ closeTime: p.closeTime, date: p.date, pnl: p.pnl, stratId: curve.strategyId })
+    }
+  }
+  allScaledTrades.sort((a, b) => a.closeTime.localeCompare(b.closeTime))
+
+  // Track per-strategy cumulative for combined chart
+  const stratCum = new Map<string, number>()
+  for (const c of curves) stratCum.set(c.strategyId, 0)
+
+  const combined: CombinedCurvePoint[] = []
+  let portfolioCum = 0
+
+  for (const t of allScaledTrades) {
+    portfolioCum += t.pnl
+    stratCum.set(t.stratId, (stratCum.get(t.stratId) || 0) + t.pnl)
+
+    const point: CombinedCurvePoint = {
+      date: t.date,
+      closeTime: t.closeTime,
+      equity: Math.round((equityBase + portfolioCum) * 100) / 100,
+      pnl: Math.round(t.pnl * 100) / 100,
+    }
+    // Add per-strategy cumulative equity for multi-line chart
+    for (const c of curves) {
+      point[`eq_${c.strategyId}`] = Math.round((equityBase + (stratCum.get(c.strategyId) || 0)) * 100) / 100
+    }
+    combined.push(point)
+  }
+
+  const portfolioStats: PortfolioStats = {
+    ...calcCurveStats(allScaledTrades.map(t => t.pnl), equityBase),
+    strategyCount: curves.length,
+    correlationAvg: null, // can be computed separately
+  }
+
+  return { curves, combined, portfolioStats }
+}
+
+/**
+ * Calculate statistics for an equity curve from a series of P/L values.
+ */
+export function calcCurveStats(pnls: number[], equityBase: number): CurveStats {
+  if (pnls.length === 0) {
+    return { totalPnl: 0, totalTrades: 0, winRate: 0, avgTrade: 0, maxDd: 0, maxDdPct: 0, profitFactor: 0, sharpe: 0, bestTrade: 0, worstTrade: 0, avgWin: 0, avgLoss: 0, maxConsecLoss: 0, recoveryFactor: 0 }
+  }
+
+  const totalPnl = pnls.reduce((s, v) => s + v, 0)
+  const wins = pnls.filter(p => p > 0)
+  const losses = pnls.filter(p => p < 0)
+  const winRate = (wins.length / pnls.length) * 100
+  const avgTrade = totalPnl / pnls.length
+
+  // Max DD
+  let peak = equityBase
+  let maxDd = 0
+  let equity = equityBase
+  for (const pnl of pnls) {
+    equity += pnl
+    if (equity > peak) peak = equity
+    const dd = peak - equity
+    if (dd > maxDd) maxDd = dd
+  }
+  const maxDdPct = equityBase > 0 ? (maxDd / equityBase) * 100 : 0
+
+  // Profit factor
+  const grossProfit = wins.reduce((s, v) => s + v, 0)
+  const grossLoss = Math.abs(losses.reduce((s, v) => s + v, 0))
+  const profitFactor = grossLoss > 0 ? grossProfit / grossLoss : grossProfit > 0 ? 999 : 0
+
+  // Sharpe (annualized approx)
+  const mean = avgTrade
+  const variance = pnls.reduce((s, v) => s + Math.pow(v - mean, 2), 0) / pnls.length
+  const std = Math.sqrt(variance)
+  const sharpe = std > 0 ? (mean / std) * Math.sqrt(252) : 0
+
+  // Max consecutive losses
+  let maxConsec = 0, currentConsec = 0
+  for (const pnl of pnls) {
+    if (pnl < 0) { currentConsec++; maxConsec = Math.max(maxConsec, currentConsec) }
+    else { currentConsec = 0 }
+  }
+
+  const avgWin = wins.length > 0 ? wins.reduce((s, v) => s + v, 0) / wins.length : 0
+  const avgLoss = losses.length > 0 ? losses.reduce((s, v) => s + v, 0) / losses.length : 0
+
+  return {
+    totalPnl: Math.round(totalPnl * 100) / 100,
+    totalTrades: pnls.length,
+    winRate: Math.round(winRate * 10) / 10,
+    avgTrade: Math.round(avgTrade * 100) / 100,
+    maxDd: Math.round(maxDd * 100) / 100,
+    maxDdPct: Math.round(maxDdPct * 100) / 100,
+    profitFactor: Math.round(profitFactor * 100) / 100,
+    sharpe: Math.round(sharpe * 100) / 100,
+    bestTrade: Math.round(Math.max(...pnls, 0) * 100) / 100,
+    worstTrade: Math.round(Math.min(...pnls, 0) * 100) / 100,
+    avgWin: Math.round(avgWin * 100) / 100,
+    avgLoss: Math.round(avgLoss * 100) / 100,
+    maxConsecLoss: maxConsec,
+    recoveryFactor: maxDd > 0 ? Math.round((totalPnl / maxDd) * 100) / 100 : 0,
+  }
+}
