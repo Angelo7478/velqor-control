@@ -52,14 +52,18 @@ export default function HealthPage() {
       : { data: [] }
 
     // Group equity curve by strategy to find peak
-    const peakMap = new Map<string, { peak: number; last: number }>()
+    // Calculate per-account equity peaks AND max DD from equity curve
+    const peakMap = new Map<string, { peak: number; last: number; maxDd: number }>()
     if (equityCurve) {
       for (const row of equityCurve) {
         const sid = row.strategy_id
         const pnl = Number(row.cumulative_pnl)
-        if (!peakMap.has(sid)) peakMap.set(sid, { peak: pnl, last: pnl })
+        if (!peakMap.has(sid)) peakMap.set(sid, { peak: pnl, last: pnl, maxDd: 0 })
         const entry = peakMap.get(sid)!
         if (pnl > entry.peak) entry.peak = pnl
+        // DD = peak - current (positive number = how much we dropped)
+        const currentDd = entry.peak - pnl
+        if (currentDd > entry.maxDd) entry.maxDd = currentDd
         entry.last = pnl
       }
     }
@@ -81,7 +85,11 @@ export default function HealthPage() {
       const healthReports = stratRes.data.map(s => {
         const perf = perfMap.get(s.id)
         const peaks = peakMap.get(s.id)
-        return calcHealthReport(s, {
+        // Override real_max_dd with per-account DD (not aggregate across all accounts)
+        const stratWithAccountDd = peaks?.maxDd !== undefined
+          ? { ...s, real_max_dd: peaks.maxDd }
+          : s
+        return calcHealthReport(stratWithAccountDd, {
           consecLosses: perf?.consecLosses ?? 0,
           cumulativePnl: peaks?.last ?? 0,
           equityPeak: peaks?.peak ?? 0,

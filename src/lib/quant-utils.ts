@@ -288,20 +288,25 @@ export function calcFitnessScore(strategy: {
 }
 
 /**
- * Pendulum state: detect drawdown phase and compute size multiplier.
+ * Pendulum state: context-aware size multiplier.
  *
- * Based on the Pendulum Effect from institutional sizing:
- * - At equity highs: REDUCE size (next DD is statistically imminent)
- * - During drawdown: INCREASE size (mean reversion probability rises)
- * - Recovery: neutral size
+ * The pure Pendulum Effect says: reduce at highs, increase in DD.
+ * But that's too defensive for strategies that are outperforming.
  *
- * The multiplier range is 0.7x (at highs) to 1.3x (deep DD).
- * This is conservative — never exceeds 30% increase.
+ * Context-aware approach:
+ * - At peak + outperforming → 1.0x (KEEP full size, edge is strong)
+ * - At peak + underperforming → 0.8x (defensive, DD likely)
+ * - In drawdown + validated edge → 1.2-1.3x (mean reversion bet)
+ * - In drawdown + unvalidated → 1.0x (don't increase on broken strategy)
+ *
+ * The `isOutperforming` flag comes from the health report:
+ * true if real expectancy > 0 AND real P/L > 0
  */
 export function detectPendulumState(
   consecLosses: number,
   cumulativePnl: number,
   equityPeak: number,
+  isOutperforming: boolean = false,
 ): { state: 'base' | 'drawdown' | 'recovery'; ddFromPeak: number; multiplier: number } {
   const ddFromPeak = equityPeak > 0 ? ((equityPeak - cumulativePnl) / equityPeak) * 100 : 0
 
@@ -309,17 +314,26 @@ export function detectPendulumState(
   let multiplier = 1.0
 
   if (ddFromPeak < 1 && consecLosses === 0) {
-    // At or near equity high → reduce to base
+    // At or near equity high
     state = 'base'
-    multiplier = 0.7 + (ddFromPeak / 1) * 0.3 // 0.7 at peak, 1.0 at 1% DD
+    if (isOutperforming) {
+      multiplier = 1.0 // Edge is working → keep full size
+    } else {
+      multiplier = 0.85 // Underperforming at peak → slight reduction
+    }
   } else if (consecLosses >= 3 || ddFromPeak > 5) {
-    // In significant drawdown → increase (pendulum effect)
+    // In significant drawdown
     state = 'drawdown'
-    multiplier = 1.0 + Math.min(consecLosses * 0.1, 0.3) // max 1.3x
+    if (isOutperforming) {
+      // Edge is validated but in temporary DD → increase (pendulum)
+      multiplier = 1.0 + Math.min(consecLosses * 0.1, 0.3) // max 1.3x
+    } else {
+      // Edge not validated → don't increase on potentially broken strategy
+      multiplier = 1.0
+    }
   } else if (ddFromPeak > 1) {
-    // Moderate DD or recent losses → recovery
     state = 'recovery'
-    multiplier = 1.0 + Math.min(ddFromPeak / 10, 0.15) // up to 1.15x
+    multiplier = 1.0 + Math.min(ddFromPeak / 15, 0.1) // gentle increase, max 1.1x
   } else {
     state = 'base'
     multiplier = 1.0
@@ -402,14 +416,23 @@ export function calcHealthReport(strategy: {
     real_trades: strategy.real_trades,
   })
 
-  // 2. Pendulum
+  // 2. Determine if strategy is outperforming (for pendulum context)
+  const isOutperforming = (
+    strategy.real_pl > 0 &&
+    (strategy.real_expectancy === null || strategy.real_expectancy >= 0) &&
+    (strategy.real_win_pct === null || strategy.test_win_pct === null ||
+     strategy.real_win_pct >= strategy.test_win_pct * 0.85) // within 15% of test
+  )
+
+  // 3. Pendulum (context-aware)
   const pendulum = detectPendulumState(
     liveData.consecLosses,
     liveData.cumulativePnl,
     liveData.equityPeak,
+    isOutperforming,
   )
 
-  // 3. Decommissioning checks
+  // 4. Health assessment with outperformance bonus
   let healthScore = fitness.score
   let healthStatus: HealthReport['healthStatus'] = 'healthy'
   let recommendation = 'Operativa normale'
@@ -420,38 +443,67 @@ export function calcHealthReport(strategy: {
     recommendation = 'Dati insufficienti — monitorare'
     flags.push('early_stage')
   } else {
-    // DD breach check
-    if (strategy.test_max_dd && strategy.real_max_dd > strategy.test_max_dd * 2 && fitness.confidence > 60) {
-      healthScore = Math.min(healthScore, 25)
-      healthStatus = 'critical'
-      flags.push('dd_breach_2x')
-      recommendation = 'DD reale > 2x test. Candidata alla sospensione.'
-    } else if (strategy.test_max_dd && strategy.real_max_dd > strategy.test_max_dd * 1.5) {
-      healthScore = Math.min(healthScore, 45)
-      healthStatus = 'warning'
-      flags.push('dd_breach_1.5x')
+    // Check outperformance first — this can OVERRIDE DD concerns
+    const wrBetter = strategy.test_win_pct && strategy.real_win_pct !== null
+      ? strategy.real_win_pct > strategy.test_win_pct
+      : false
+    const expBetter = strategy.test_expectancy && strategy.real_expectancy !== null
+      ? strategy.real_expectancy > strategy.test_expectancy
+      : false
+    const plPositive = strategy.real_pl > 0
+
+    if (wrBetter && plPositive) {
+      flags.push('outperforming')
+      healthScore = Math.max(healthScore, 65) // minimum 65 if outperforming
     }
 
-    // Win rate collapse
-    if (strategy.test_win_pct && strategy.real_win_pct !== null) {
-      const wrDev = ((strategy.real_win_pct - strategy.test_win_pct) / strategy.test_win_pct) * 100
-      if (wrDev < -30 && fitness.confidence > 50) {
-        flags.push('win_rate_collapse')
-        if (healthStatus === 'healthy') healthStatus = 'warning'
+    // DD breach check — but contextualized
+    if (strategy.test_max_dd && strategy.real_max_dd > strategy.test_max_dd * 2 && fitness.confidence > 60) {
+      if (isOutperforming) {
+        // Outperforming but DD high → warning, not critical (DD may be from sizing, not broken edge)
+        healthScore = Math.min(healthScore, 50)
+        healthStatus = 'warning'
+        flags.push('dd_elevated')
+        recommendation = 'DD elevato ma P/L positivo. Verificare se il DD è da sizing diversa.'
+      } else {
+        healthScore = Math.min(healthScore, 25)
+        healthStatus = 'critical'
+        flags.push('dd_breach_2x')
+        recommendation = 'DD reale > 2x test con P/L negativo. Candidata alla sospensione.'
+      }
+    } else if (strategy.test_max_dd && strategy.real_max_dd > strategy.test_max_dd * 1.5) {
+      if (isOutperforming) {
+        // Outperforming + moderate DD → just flag it, don't downgrade
+        flags.push('dd_above_test')
+      } else {
+        healthScore = Math.min(healthScore, 45)
+        healthStatus = 'warning'
+        flags.push('dd_breach_1.5x')
       }
     }
 
-    // Expectancy turned negative
+    // Win rate change (not "collapse" — could be improvement)
+    if (strategy.test_win_pct && strategy.real_win_pct !== null) {
+      const wrDev = ((strategy.real_win_pct - strategy.test_win_pct) / strategy.test_win_pct) * 100
+      if (wrDev < -30 && fitness.confidence > 50 && !isOutperforming) {
+        flags.push('win_rate_drop')
+        if (healthStatus === 'healthy') healthStatus = 'warning'
+      } else if (wrDev > 15) {
+        flags.push('win_rate_improved')
+      }
+    }
+
+    // Expectancy negative
     if (strategy.real_expectancy !== null && strategy.real_expectancy < 0 && strategy.real_trades >= 15) {
       flags.push('negative_expectancy')
       if (healthStatus === 'healthy') healthStatus = 'warning'
       recommendation = 'Expectancy negativa. Monitorare.'
     }
 
-    // Regime mismatch detection (trend strategies in range market)
+    // Regime mismatch (trend strategies with negative expectancy)
     if (strategy.strategy_style === 'trend_following' && strategy.real_expectancy !== null && strategy.real_expectancy < 0) {
       healthStatus = 'regime_mismatch'
-      recommendation = 'Possibile regime mismatch — strategia trend in mercato laterale. Mantenere attiva per validazione.'
+      recommendation = 'Regime mismatch — strategia trend in mercato laterale. Mantenere attiva per validazione.'
       flags.push('regime_mismatch')
     }
 
@@ -461,8 +513,10 @@ export function calcHealthReport(strategy: {
       if (healthStatus === 'healthy') healthStatus = 'warning'
     }
 
-    // Healthy with strong performance
-    if (healthStatus === 'healthy' && fitness.score >= 70) {
+    // Strong performance summary
+    if (healthStatus === 'healthy' && isOutperforming) {
+      recommendation = 'Edge attivo e confermato. Performance superiori ai test.'
+    } else if (healthStatus === 'healthy') {
       recommendation = 'Performance in linea con i test. Continuare.'
     }
   }
