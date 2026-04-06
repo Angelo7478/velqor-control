@@ -638,58 +638,63 @@ export default function BuilderPage() {
     </tr></tfoot>` : ''}
   </table>
 
-  <!-- Equity Curve (SVG) -->
+  <!-- Equity Curve Chart -->
   <h2>Equity Curve</h2>
   ${(() => {
-    const pts = curveData.combined
-    if (pts.length < 2) return '<p>Dati insufficienti per il grafico</p>'
-    const w = 750, h = 200, pad = 40
-    const equities = pts.map(p => p.equity)
-    const minEq = Math.min(...equities, equityBase) * 0.998
-    const maxEq = Math.max(...equities, equityBase) * 1.002
-    const rangeEq = maxEq - minEq || 1
-    const xScale = (i: number) => pad + (i / (pts.length - 1)) * (w - pad * 2)
-    const yScale = (v: number) => h - pad - ((v - minEq) / rangeEq) * (h - pad * 2)
-    // Build SVG path for portfolio equity
-    const pathPts = pts.map((p, i) => `${i === 0 ? 'M' : 'L'}${xScale(i).toFixed(1)},${yScale(p.equity).toFixed(1)}`).join(' ')
-    // Area fill
-    const areaPath = pathPts + ` L${xScale(pts.length - 1).toFixed(1)},${yScale(minEq).toFixed(1)} L${xScale(0).toFixed(1)},${yScale(minEq).toFixed(1)} Z`
-    // Baseline
-    const baseY = yScale(equityBase)
-    // Y axis labels
-    const yTicks = 5
-    const yLabels = Array.from({length: yTicks}, (_, i) => minEq + (rangeEq * i / (yTicks - 1)))
-    // X axis labels (pick ~6 dates)
-    const xTicks = Math.min(6, pts.length)
-    const xLabels = Array.from({length: xTicks}, (_, i) => {
-      const idx = Math.round(i * (pts.length - 1) / (xTicks - 1))
-      return { x: xScale(idx), label: pts[idx]?.date?.slice(5) || '' }
-    })
-    // Peak and DD point
-    let peak = equityBase, maxDdIdx = 0, maxDdVal = 0
-    pts.forEach((p, i) => { if (p.equity > peak) peak = p.equity; const dd = peak - p.equity; if (dd > maxDdVal) { maxDdVal = dd; maxDdIdx = i } })
+    try {
+      const pts = curveData.combined
+      if (!pts || pts.length < 2) return '<p style="color:#94a3b8;font-style:italic">Dati insufficienti per il grafico</p>'
+      const w = 750, h = 220, pad = 50
+      const equities = pts.map(p => p.equity)
+      // Safe min/max (no spread to avoid stack overflow on large arrays)
+      let minEq = equityBase, maxEq = equityBase
+      for (const eq of equities) { if (eq < minEq) minEq = eq; if (eq > maxEq) maxEq = eq }
+      minEq *= 0.998; maxEq *= 1.002
+      const rangeEq = maxEq - minEq || 1
+      const xScale = (i: number) => pad + (i / (pts.length - 1)) * (w - pad * 2)
+      const yScale = (v: number) => h - pad - ((v - minEq) / rangeEq) * (h - pad * 2)
+      // Build SVG path for portfolio equity
+      const pathD = pts.map((p, i) => `${i === 0 ? 'M' : 'L'}${xScale(i).toFixed(1)},${yScale(p.equity).toFixed(1)}`).join(' ')
+      // Area fill path
+      const areaD = pathD + ` L${xScale(pts.length - 1).toFixed(1)},${yScale(minEq).toFixed(1)} L${xScale(0).toFixed(1)},${yScale(minEq).toFixed(1)} Z`
+      // Baseline
+      const baseY = yScale(equityBase)
+      // Y axis ticks
+      const yTicks = 5
+      const yLabelsArr = Array.from({length: yTicks}, (_, i) => minEq + (rangeEq * i / (yTicks - 1)))
+      // X axis labels (pick ~6 dates)
+      const xTicks = Math.min(6, pts.length)
+      const xLabelsArr = Array.from({length: xTicks}, (_, i) => {
+        const idx = Math.round(i * (pts.length - 1) / (xTicks - 1))
+        return { x: xScale(idx), label: pts[idx]?.date?.slice(5) || '' }
+      })
+      // Peak and max DD point
+      let peak = equityBase, maxDdIdx = 0, maxDdVal = 0
+      pts.forEach((p, i) => { if (p.equity > peak) peak = p.equity; const dd = peak - p.equity; if (dd > maxDdVal) { maxDdVal = dd; maxDdIdx = i } })
+      const ddPtEquity = pts[maxDdIdx]?.equity ?? equityBase
+      const endEquity = pts[pts.length - 1]?.equity ?? equityBase
 
-    return `<svg width="100%" viewBox="0 0 ${w} ${h}" style="background:#fafbfc;border:1px solid #e2e8f0;border-radius:8px">
-      <!-- Grid -->
-      ${yLabels.map(v => `<line x1="${pad}" y1="${yScale(v).toFixed(1)}" x2="${w-pad}" y2="${yScale(v).toFixed(1)}" stroke="#f1f5f9" stroke-width="1"/>`).join('')}
-      <!-- Baseline -->
-      <line x1="${pad}" y1="${baseY.toFixed(1)}" x2="${w-pad}" y2="${baseY.toFixed(1)}" stroke="#94a3b8" stroke-width="1" stroke-dasharray="4,4"/>
-      <!-- Area fill -->
-      <path d="${areaPath}" fill="url(#eqGrad)" opacity="0.3"/>
-      <!-- Equity line -->
-      <path d="${pathPts}" fill="none" stroke="#6366f1" stroke-width="2"/>
-      <!-- Max DD marker -->
-      <circle cx="${xScale(maxDdIdx).toFixed(1)}" cy="${yScale(pts[maxDdIdx]?.equity || equityBase).toFixed(1)}" r="3" fill="#ef4444"/>
-      <text x="${xScale(maxDdIdx) + 6}" y="${yScale(pts[maxDdIdx]?.equity || equityBase) - 4}" font-size="8" fill="#ef4444">Max DD</text>
-      <!-- Y labels -->
-      ${yLabels.map(v => `<text x="${pad - 4}" y="${yScale(v).toFixed(1)}" text-anchor="end" font-size="8" fill="#94a3b8" dominant-baseline="middle">$${(v/1000).toFixed(1)}k</text>`).join('')}
-      <!-- X labels -->
-      ${xLabels.map(t => `<text x="${t.x.toFixed(1)}" y="${h - 8}" text-anchor="middle" font-size="8" fill="#94a3b8">${t.label}</text>`).join('')}
-      <!-- Start/End labels -->
-      <text x="${pad + 4}" y="${yScale(equityBase) - 6}" font-size="8" fill="#94a3b8">Base ${fmtM(equityBase)}</text>
-      <text x="${xScale(pts.length - 1) - 4}" y="${yScale(pts[pts.length-1]?.equity || equityBase) - 6}" text-anchor="end" font-size="9" font-weight="600" fill="${plC(ps.totalPnl)}">${fmtM(pts[pts.length-1]?.equity || equityBase)}</text>
-      <defs><linearGradient id="eqGrad" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#6366f1"/><stop offset="100%" stop-color="#6366f1" stop-opacity="0"/></linearGradient></defs>
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="750" height="220" viewBox="0 0 ${w} ${h}" style="max-width:100%;background:#fafbfc;border:1px solid #e2e8f0;border-radius:8px;display:block;margin:8px 0">
+      <defs>
+        <linearGradient id="eqGrad" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stop-color="#6366f1" stop-opacity="0.4"/>
+          <stop offset="100%" stop-color="#6366f1" stop-opacity="0.02"/>
+        </linearGradient>
+      </defs>
+      ${yLabelsArr.map(v => `<line x1="${pad}" y1="${yScale(v).toFixed(1)}" x2="${w - pad}" y2="${yScale(v).toFixed(1)}" stroke="#f1f5f9" stroke-width="1"/>`).join('\n      ')}
+      <line x1="${pad}" y1="${baseY.toFixed(1)}" x2="${w - pad}" y2="${baseY.toFixed(1)}" stroke="#94a3b8" stroke-width="1" stroke-dasharray="4,4"/>
+      <path d="${areaD}" fill="url(#eqGrad)"/>
+      <path d="${pathD}" fill="none" stroke="#6366f1" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
+      <circle cx="${xScale(maxDdIdx).toFixed(1)}" cy="${yScale(ddPtEquity).toFixed(1)}" r="4" fill="#ef4444" stroke="#fff" stroke-width="1"/>
+      <text x="${(xScale(maxDdIdx) + 8).toFixed(1)}" y="${(yScale(ddPtEquity) - 6).toFixed(1)}" font-size="9" fill="#ef4444" font-weight="600">Max DD ${fmtM(-maxDdVal)}</text>
+      ${yLabelsArr.map(v => `<text x="${pad - 6}" y="${yScale(v).toFixed(1)}" text-anchor="end" font-size="8" fill="#94a3b8" dominant-baseline="middle">${v >= 1000 ? '$' + (v/1000).toFixed(1) + 'k' : '$' + Math.round(v)}</text>`).join('\n      ')}
+      ${xLabelsArr.map(t => `<text x="${t.x.toFixed(1)}" y="${h - 10}" text-anchor="middle" font-size="8" fill="#94a3b8">${t.label}</text>`).join('\n      ')}
+      <text x="${(pad + 4).toFixed(1)}" y="${(yScale(equityBase) - 8).toFixed(1)}" font-size="8" fill="#94a3b8">Base ${fmtM(equityBase)}</text>
+      <text x="${(xScale(pts.length - 1) - 4).toFixed(1)}" y="${(yScale(endEquity) - 8).toFixed(1)}" text-anchor="end" font-size="10" font-weight="700" fill="${plC(ps.totalPnl)}">${fmtM(endEquity)}</text>
     </svg>`
+    } catch (e) {
+      return '<p style="color:#ef4444;font-size:10px">Errore nella generazione del grafico equity curve.</p>'
+    }
   })()}
 
   <!-- Tabella strategie -->
