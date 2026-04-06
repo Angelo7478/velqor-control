@@ -159,29 +159,51 @@ mt5-bridge/
 6. Verifica: somma DD ≤ budget → se over, scala proporzionalmente
 7. Salva run in `qel_sizing_engine_runs`
 
-### Struttura Phase 2
+### Sprint 5 — Portfolio Builder v2
+- [x] `/divisioni/quant/builder` — Builder completo (1425 righe)
+- [x] Selettore conto sorgente + equity base personalizzabile
+- [x] Auto-scaling lotti: `userLots = baseLots × (equityBase / sourceAccountSize)`
+- [x] Due modalità: Proportional (scaling lineare) vs Optimized (Kelly+HRP dal sizing engine)
+- [x] Equity curve interattive per strategia (Recharts) + portfolio combinato
+- [x] Save/Load PTF su qel_portfolios + Export JSON
+- [x] Report HTML completo stampabile:
+  - KPI, metriche dettagliate, alert FTMO
+  - Analisi temporale + proiezione annua
+  - Breakdown mensile con barre
+  - Grafico SVG equity curve inline
+  - Composizione portfolio + diversificazione stile/asset
+  - Configurazione lotti copiabile
+
+### Struttura Phase 2 (aggiornata)
 ```
 src/
-  lib/quant-utils.ts              ← Utility condivise + Sizing + MC + Health (~1000 righe)
+  lib/quant-utils.ts              ← Utility condivise + Sizing + MC + Health + Builder (~1400 righe)
   app/(dashboard)/divisioni/quant/
+    page.tsx                      ← Overview: KPI, ranking, conti, distribuzione
+    account-dashboard.tsx         ← Dashboard conto: equity, DD, strategie, costi, trade
+    quant-nav.tsx                 ← Navigazione unificata tutte le pagine
+    conti/page.tsx                ← Gestione conti FTMO (CRUD)
+    import/page.tsx               ← Import CSV/HTML trade
     sizing/page.tsx               ← Sizing Engine (4 tab: Grid, DD Budget, Correlazioni, Fitness)
     health/page.tsx               ← Health Monitor (traffic-light, pendulum, regime)
     scenarios/page.tsx            ← Monte Carlo + 3 scenari + fan chart
+    builder/page.tsx              ← Portfolio Builder v2 (equity curves, report, PTF)
 ```
 
-### Cosa resta (Sprint 5+)
-- [ ] Portfolio Builder: seleziona strategie + capitale + limiti → genera config nuovi conti
+### Cosa resta (Sprint 6+)
+- [ ] ~108 trade senza magic → bridge enrich da VPS
+- [ ] Import secondo CSV 360 trade per 100K
+- [ ] Benchmark: confronto strategia vs buy-and-hold sottostante (alpha via Yahoo Finance)
+- [ ] Tooltip didattici (?) su metriche tecniche — componente InfoTooltip
+- [ ] Margine utilizzato nel builder
 - [ ] Import dati WFM/MC da SQX → popolare qel_strategy_tests
-- [ ] Benchmark: confronto strategia vs buy-and-hold sottostante (alpha)
 - [ ] Costi per trade: spread + commissioni + swap → expectancy netta
-- [ ] Tooltip didattici (?) su metriche tecniche
+- [ ] Grafica report: logo Velqor + "Velqor Intelligent Quant System"
 - [ ] AI Sizing Advisor
 - [ ] N8N: weekly optimization + sync monitor + alert Telegram
-- [ ] ~108 trade senza magic → bridge enrich da VPS
-
-### Cosa resta da Phase 1
-- [ ] Aggiornare bridge sulla VPS (nuova versione con DD storico)
-- [ ] Import secondo CSV 360 trade per 100K
+- [ ] Aggiornare bridge VPS (nuova versione con DD storico)
+- [ ] Rolling correlations (target fine 2026 con dati sufficienti)
+- [ ] Portfolio Builder multi-contesto: config per future/capitale proprio
 
 ## File di riferimento
 - `/Users/angelopasian/Downloads/QEL_MASTER.xlsx` — Registry strategie con metriche test
