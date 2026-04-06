@@ -7,6 +7,7 @@ import {
   fmt, fmtUsd, fmtPct, plColor, groupColor, styleColor, styleLabel,
   CHART_COLORS, PORTFOLIO_COLOR,
   buildEquityCurves, TradeForCurve, StrategyEquityCurve, CombinedCurvePoint, PortfolioStats, CurveStats,
+  runSizingEngine, SizingInput, PortfolioSizingOutput, KellyMode,
 } from '@/lib/quant-utils'
 import QuantNav from '../quant-nav'
 import {
@@ -52,6 +53,13 @@ export default function BuilderPage() {
   const [showCombined, setShowCombined] = useState(true)
   const [chartMode, setChartMode] = useState<'portfolio' | 'individual'>('portfolio')
   const [selectedStratForDetail, setSelectedStratForDetail] = useState<string | null>(null)
+
+  // Sizing engine
+  const [sizingMode, setSizingMode] = useState<'proportional' | 'optimized'>('proportional')
+  const [kellyMode, setKellyMode] = useState<KellyMode>('half_kelly')
+  const [maxDdPct, setMaxDdPct] = useState(10)
+  const [safetyFactor, setSafetyFactor] = useState(0.5)
+  const [sizingOutput, setSizingOutput] = useState<PortfolioSizingOutput | null>(null)
 
   // PTF state
   const [savedPortfolios, setSavedPortfolios] = useState<SavedPortfolio[]>([])
@@ -241,6 +249,52 @@ export default function BuilderPage() {
       userLots: Math.max(0.01, Math.round(s.baseLots * scale * 1000) / 1000),
       manualOverride: false,
     })))
+    setSizingMode('proportional')
+    setSizingOutput(null)
+  }
+
+  /** Run sizing engine: Kelly + HRP + DD budget → optimal lots */
+  function optimizeLots() {
+    const selected = strategies.filter(s => s.selected)
+    if (selected.length === 0) return
+
+    const inputs: SizingInput[] = selected.map(s => ({
+      strategyId: s.id,
+      magic: s.magic,
+      name: s.name || `M${s.magic}`,
+      asset: s.asset,
+      assetGroup: s.asset_group,
+      style: s.strategy_style,
+      family: s.strategy_family,
+      testWinPct: s.test_win_pct,
+      testPayoff: s.test_payoff,
+      testMc95Dd: s.test_mc95_dd,
+      mc95DdScaled: s.mc95_dd_scaled,
+      testExpectancy: s.test_expectancy,
+      testMaxDd: s.test_max_dd,
+      realTrades: s.real_trades,
+      realWinPct: s.real_win_pct,
+      realPayoff: s.real_payoff,
+      realMaxDd: s.real_max_dd,
+      realExpectancy: s.real_expectancy,
+      realPl: s.real_pl,
+      lotNeutral: s.lot_neutral,
+      overlapMed: s.test_overlap_med,
+    }))
+
+    const result = runSizingEngine(inputs, equityBase, maxDdPct, safetyFactor, kellyMode)
+    setSizingOutput(result)
+    setSizingMode('optimized')
+
+    // Apply optimized lots to strategies
+    const lotsMap = new Map(result.results.map(r => [r.strategyId, r.recommendedLots]))
+    setStrategies(prev => prev.map(s => {
+      const optLots = lotsMap.get(s.id)
+      if (optLots !== undefined && s.selected) {
+        return { ...s, userLots: optLots, manualOverride: true }
+      }
+      return s
+    }))
   }
 
   // ---- Save PTF ----
@@ -434,8 +488,9 @@ export default function BuilderPage() {
     </div>
     <div class="meta">
       <div>Equity Base: <strong>${fmtM(equityBase)}</strong></div>
-      <div>Strategie: <strong>${curveData.curves.length}</strong></div>
-      <div>Trade analizzati: <strong>${ps.totalTrades}</strong></div>
+      <div>Sizing: <strong>${sizingMode === 'optimized' ? `${kellyMode === 'half_kelly' ? '½ Kelly' : kellyMode === 'quarter_kelly' ? '¼ Kelly' : 'Full Kelly'} + HRP` : `Proporzionale (${fmtR(equityBase / sourceAccountSize, 0)}x)`}</strong></div>
+      ${sizingMode === 'optimized' ? `<div>DD Budget: <strong>${fmtM(equityBase * maxDdPct / 100 * safetyFactor)}</strong> (${fmtR(maxDdPct * safetyFactor, 0)}%)</div>` : ''}
+      <div>Strategie: <strong>${curveData.curves.length}</strong> | Trade: <strong>${ps.totalTrades}</strong></div>
       <div style="margin-top:4px"><button class="no-print" onclick="window.print()" style="padding:4px 12px;border:1px solid #e2e8f0;border-radius:6px;cursor:pointer;font-size:11px">Stampa / PDF</button></div>
     </div>
   </div>
@@ -654,22 +709,64 @@ ${curveData.curves.sort((a, b) => a.magic - b.magic).map(c => `Magic ${String(c.
               className="w-28 text-sm border border-slate-200 rounded px-2 py-1.5" />
           </div>
 
-          {/* Lot fine-tuning */}
+          {/* Sizing mode */}
           <div>
-            <label className="text-[10px] uppercase text-slate-400 block mb-1">
-              Lotti ({sourceAccountSize > 0 ? `${fmt(equityBase / sourceAccountSize, 1)}x da ${fmtUsd(sourceAccountSize)}` : 'auto'})
-            </label>
+            <label className="text-[10px] uppercase text-slate-400 block mb-1">Sizing</label>
             <div className="flex gap-1 items-center">
+              <button
+                onClick={resetLotsToDefault}
+                className={`px-2.5 py-1.5 text-xs rounded-lg border transition ${sizingMode === 'proportional' ? 'bg-slate-100 border-slate-300 text-slate-700' : 'border-slate-200 text-slate-500 hover:bg-slate-50'}`}
+              >
+                Proporzionale {sourceAccountSize > 0 ? `(${fmt(equityBase / sourceAccountSize, 0)}x)` : ''}
+              </button>
+              <button
+                onClick={optimizeLots}
+                disabled={strategies.filter(s => s.selected).length === 0}
+                className={`px-2.5 py-1.5 text-xs rounded-lg border transition ${sizingMode === 'optimized' ? 'bg-indigo-600 border-indigo-600 text-white' : 'border-indigo-300 text-indigo-600 hover:bg-indigo-50'} disabled:opacity-50`}
+              >
+                Ottimizza (Kelly+HRP)
+              </button>
+            </div>
+          </div>
+
+          {/* Sizing params (show when optimized) */}
+          {sizingMode === 'optimized' && (
+            <>
+              <div>
+                <label className="text-[10px] uppercase text-slate-400 block mb-1">Kelly</label>
+                <select value={kellyMode} onChange={e => { setKellyMode(e.target.value as KellyMode); setTimeout(optimizeLots, 50) }}
+                  className="text-xs border border-slate-200 rounded px-2 py-1.5">
+                  <option value="half_kelly">1/2 Kelly</option>
+                  <option value="quarter_kelly">1/4 Kelly</option>
+                  <option value="full_kelly">Full Kelly</option>
+                </select>
+              </div>
+              <div>
+                <label className="text-[10px] uppercase text-slate-400 block mb-1">Max DD %</label>
+                <input type="number" value={maxDdPct} onChange={e => { setMaxDdPct(Number(e.target.value)) }}
+                  className="w-16 text-xs border border-slate-200 rounded px-2 py-1.5" />
+              </div>
+              <div>
+                <label className="text-[10px] uppercase text-slate-400 block mb-1">Safety</label>
+                <div className="flex items-center gap-1">
+                  <input type="range" min="0.3" max="1.0" step="0.1" value={safetyFactor}
+                    onChange={e => setSafetyFactor(parseFloat(e.target.value))} className="w-16" />
+                  <span className="text-xs font-mono">{fmt(safetyFactor, 1)}</span>
+                </div>
+              </div>
+            </>
+          )}
+
+          {/* Quick lot adjust */}
+          <div>
+            <label className="text-[10px] uppercase text-slate-400 block mb-1">Regola</label>
+            <div className="flex gap-1">
               {[2, 0.5].map(m => (
                 <button key={m} onClick={() => applyMultiplier(m)}
                   className="px-2 py-1.5 text-xs border border-slate-200 rounded-lg hover:bg-indigo-50 hover:border-indigo-300 transition font-mono">
                   {m > 1 ? `${m}x` : `/${Math.round(1/m)}`}
                 </button>
               ))}
-              <button onClick={resetLotsToDefault}
-                className="px-2 py-1.5 text-xs text-slate-400 hover:text-slate-600 transition" title="Reset auto-scala">
-                Reset
-              </button>
             </div>
           </div>
 
@@ -838,6 +935,44 @@ ${curveData.curves.sort((a, b) => a.magic - b.magic).map(c => `Magic ${String(c.
               />
             )}
           </div>
+
+          {/* Sizing summary (when optimized) */}
+          {sizingOutput && sizingMode === 'optimized' && (
+            <div className="bg-indigo-50 rounded-xl border border-indigo-200 p-4">
+              <div className="flex items-center gap-2 mb-3">
+                <h3 className="text-sm font-semibold text-indigo-800">Sizing Engine — {kellyMode === 'half_kelly' ? '½ Kelly' : kellyMode === 'quarter_kelly' ? '¼ Kelly' : 'Full Kelly'}</h3>
+                <span className="text-[10px] bg-indigo-100 text-indigo-600 px-2 py-0.5 rounded-full">
+                  DD Budget: {fmtUsd(equityBase * maxDdPct / 100 * safetyFactor)} ({fmtPct(maxDdPct * safetyFactor)})
+                </span>
+              </div>
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
+                <div>
+                  <div className="text-[10px] uppercase text-indigo-400">DD Budget usato</div>
+                  <div className={`text-sm font-bold font-mono ${sizingOutput.totalDdBudgetUsedPct > 90 ? 'text-red-600' : sizingOutput.totalDdBudgetUsedPct > 70 ? 'text-amber-600' : 'text-indigo-700'}`}>
+                    {fmtPct(sizingOutput.totalDdBudgetUsedPct)}
+                  </div>
+                  <div className="text-[10px] text-indigo-400">{fmtUsd(sizingOutput.totalDdBudgetUsedUsd)} / {fmtUsd(equityBase * maxDdPct / 100 * safetyFactor)}</div>
+                </div>
+                <div>
+                  <div className="text-[10px] uppercase text-indigo-400">Strategie</div>
+                  <div className="text-sm font-bold font-mono text-indigo-700">{sizingOutput.strategyCount}</div>
+                  <div className="text-[10px] text-indigo-400">{sizingOutput.familyCount} famiglie</div>
+                </div>
+                <div>
+                  <div className="text-[10px] uppercase text-indigo-400">RoR medio</div>
+                  <div className="text-sm font-bold font-mono text-indigo-700">{sizingOutput.avgRor !== null ? fmtPct(sizingOutput.avgRor * 100, 3) : '—'}</div>
+                </div>
+                <div>
+                  <div className="text-[10px] uppercase text-indigo-400">Stile</div>
+                  <div className="flex gap-1 flex-wrap mt-0.5">
+                    {Object.entries(sizingOutput.styleBalance).map(([s, pct]) => (
+                      <span key={s} className={`text-[10px] px-1.5 py-0.5 rounded-full ${styleColor(s)}`}>{styleLabel(s)} {pct}%</span>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
 
           {/* Stats panels */}
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
