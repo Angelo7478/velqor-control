@@ -50,6 +50,9 @@ export default function BuilderPage() {
   const [chartMode, setChartMode] = useState<'portfolio' | 'individual'>('portfolio')
   const [selectedStratForDetail, setSelectedStratForDetail] = useState<string | null>(null)
 
+  // Lot scaling
+  const [lotMultiplier, setLotMultiplier] = useState(1)
+
   // PTF state
   const [savedPortfolios, setSavedPortfolios] = useState<SavedPortfolio[]>([])
   const [ptfName, setPtfName] = useState('')
@@ -201,6 +204,31 @@ export default function BuilderPage() {
     setSelectedAccountId(accId)
     const acc = accounts.find(a => a.id === accId)
     if (acc) setEquityBase(acc.account_size)
+  }
+
+  function applyMultiplier(mult: number) {
+    setStrategies(prev => prev.map(s => s.selected
+      ? { ...s, userLots: Math.max(0.01, Math.round(s.userLots * mult * 1000) / 1000) }
+      : s
+    ))
+    setLotMultiplier(1)
+  }
+
+  function resetLotsToDefault() {
+    setStrategies(prev => prev.map(s => ({
+      ...s,
+      userLots: s.lot_neutral ?? s.lot_static ?? 0.01,
+    })))
+    setLotMultiplier(1)
+  }
+
+  /** Auto-scale lots proportional to equity base vs source account */
+  function autoScaleForEquity() {
+    const sourceAcc = accounts.find(a => a.id === selectedAccountId)
+    if (!sourceAcc || sourceAcc.account_size === 0) return
+    const ratio = equityBase / sourceAcc.account_size
+    if (Math.abs(ratio - 1) < 0.01) return // already 1:1
+    applyMultiplier(ratio)
   }
 
   // ---- Save PTF ----
@@ -611,6 +639,37 @@ ${curveData.curves.sort((a, b) => a.magic - b.magic).map(c => `Magic ${String(c.
             <label className="text-[10px] uppercase text-slate-400 block mb-1">Equity base ($)</label>
             <input type="number" value={equityBase} onChange={e => setEquityBase(Number(e.target.value))}
               className="w-28 text-sm border border-slate-200 rounded px-2 py-1.5" />
+          </div>
+
+          {/* Lot scaling */}
+          <div>
+            <label className="text-[10px] uppercase text-slate-400 block mb-1">Scala lotti</label>
+            <div className="flex gap-1 items-center">
+              {[2, 3, 5, 10].map(m => (
+                <button key={m} onClick={() => applyMultiplier(m)}
+                  className="px-2 py-1.5 text-xs border border-slate-200 rounded-lg hover:bg-indigo-50 hover:border-indigo-300 transition font-mono">
+                  {m}x
+                </button>
+              ))}
+              <button onClick={() => applyMultiplier(0.5)}
+                className="px-2 py-1.5 text-xs border border-slate-200 rounded-lg hover:bg-amber-50 hover:border-amber-300 transition font-mono">
+                /2
+              </button>
+              {(() => {
+                const sourceAcc = accounts.find(a => a.id === selectedAccountId)
+                const ratio = sourceAcc && sourceAcc.account_size > 0 ? equityBase / sourceAcc.account_size : 1
+                return ratio > 1.5 || ratio < 0.7 ? (
+                  <button onClick={autoScaleForEquity}
+                    className="px-2.5 py-1.5 text-xs bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition font-medium">
+                    Auto {fmt(ratio, 0)}x
+                  </button>
+                ) : null
+              })()}
+              <button onClick={resetLotsToDefault}
+                className="px-2 py-1.5 text-xs text-slate-400 hover:text-slate-600 transition" title="Reset ai lotti originali">
+                Reset
+              </button>
+            </div>
           </div>
 
           {/* Load PTF */}
