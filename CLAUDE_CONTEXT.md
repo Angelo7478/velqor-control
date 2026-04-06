@@ -27,12 +27,17 @@ src/
       conti/page.tsx          ← Gestione conti FTMO (CRUD)
       import/page.tsx         ← Import CSV/HTML trade da FTMO
     divisioni/real-estate/    ← Overview RE (placeholder)
+    divisioni/quant/
+      sizing/page.tsx         ← Sizing Engine (Kelly, HRP, DD Budget, Correlazioni, Fitness)
+      health/page.tsx         ← Health Monitor (salute strategie, pendulum, regime detection)
+      scenarios/page.tsx      ← Monte Carlo + confronto 3 scenari
     divisioni/ai/             ← Overview AI (placeholder)
     memorandum/               ← Sistema stima/valuta/esegui
     progetti/                 ← Progetti + task
     calendario/               ← Calendario eventi
   types/database.ts           ← TypeScript interfaces per tutte le tabelle
   lib/supabase-browser.ts     ← Client Supabase
+  lib/quant-utils.ts          ← Utility condivise + Sizing Engine + Monte Carlo
 mt5-bridge/
   bridge.py                   ← Bridge Python MT5→Supabase (gira su VPS Windows)
   config.py                   ← Config base
