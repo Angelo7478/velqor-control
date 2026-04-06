@@ -8,6 +8,7 @@ import {
   runMonteCarlo, runScenarioComparison, MCResult, ScenarioResult,
 } from '@/lib/quant-utils'
 import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts'
+import QuantNav from '../quant-nav'
 
 export default function ScenariosPage() {
   const [portfolio, setPortfolio] = useState<QelPortfolio | null>(null)
@@ -80,13 +81,7 @@ export default function ScenariosPage() {
     <div className="p-4 sm:p-6 space-y-4">
       {/* Intestazione */}
       <div>
-        <div className="flex items-center gap-2">
-          <a href="/divisioni/quant" className="text-slate-400 hover:text-slate-600 text-sm">&larr; Quant</a>
-          <span className="text-slate-300">|</span>
-          <a href="/divisioni/quant/sizing" className="text-slate-400 hover:text-slate-600 text-sm">Sizing</a>
-          <span className="text-slate-300">|</span>
-          <a href="/divisioni/quant/health" className="text-slate-400 hover:text-slate-600 text-sm">Health</a>
-        </div>
+        <QuantNav />
         <h1 className="text-2xl font-bold text-slate-900 mt-1">Simulazione Scenari</h1>
         <p className="text-sm text-slate-500 mt-0.5">
           Monte Carlo bootstrap — {trades.length} trade reali come base — {portfolio?.name}

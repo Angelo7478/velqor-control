@@ -3,11 +3,14 @@
   "configurations": [
     {
       "name": "velqor-control",
-      "runtimeExecutable": "/opt/homebrew/Cellar/node/25.8.1_1/bin/node",
-      "runtimeArgs": ["/Users/angelopasian/Desktop/VELQOR/velqor-control/node_modules/next/dist/bin/next", "dev"],
+      "runtimeExecutable": "npx",
+      "runtimeArgs": ["next", "dev"],
       "cwd": "/Users/angelopasian/Desktop/VELQOR/velqor-control",
       "port": 3000,
-      "autoPort": true
+      "autoPort": true,
+      "env": {
+        "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+      }
     }
   ]
 }

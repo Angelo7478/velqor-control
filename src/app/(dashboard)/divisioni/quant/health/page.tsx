@@ -7,6 +7,7 @@ import {
   fmt, fmtUsd, fmtPct, plColor, groupColor, styleColor, styleLabel,
   fitnessColor, calcHealthReport, HealthReport,
 } from '@/lib/quant-utils'
+import QuantNav from '../quant-nav'
 
 // --- Italian labels ---
 
@@ -181,11 +182,7 @@ export default function HealthPage() {
     <div className="p-4 sm:p-6 space-y-4">
       {/* Intestazione */}
       <div>
-        <div className="flex items-center gap-2">
-          <a href="/divisioni/quant" className="text-slate-400 hover:text-slate-600 text-sm">&larr; Quant</a>
-          <span className="text-slate-300">|</span>
-          <a href="/divisioni/quant/sizing" className="text-slate-400 hover:text-slate-600 text-sm">Sizing</a>
-        </div>
+        <QuantNav />
         <h1 className="text-2xl font-bold text-slate-900 mt-1">Monitor Salute Strategie</h1>
         <p className="text-sm text-slate-500 mt-0.5">
           Confronto test/reale per conto, pendulum, segnali di allarme — {portfolio?.name}

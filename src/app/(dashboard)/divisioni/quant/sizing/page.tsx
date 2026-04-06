@@ -12,6 +12,7 @@ import {
   FTMO_DAILY_DD_LIMIT, FTMO_TOTAL_DD_LIMIT,
 } from '@/lib/quant-utils'
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell, PieChart, Pie } from 'recharts'
+import QuantNav from '../quant-nav'
 
 type Tab = 'grid' | 'dd_budget' | 'fitness' | 'correlations'
 
@@ -234,9 +235,7 @@ export default function SizingPage() {
       {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
         <div>
-          <div className="flex items-center gap-2">
-            <a href="/divisioni/quant" className="text-slate-400 hover:text-slate-600 text-sm">&larr; Quant</a>
-          </div>
+          <QuantNav />
           <h1 className="text-2xl font-bold text-slate-900 mt-1">Sizing Engine</h1>
           <p className="text-sm text-slate-500 mt-0.5">Position sizing istituzionale — Kelly / Half-Kelly / Risk of Ruin</p>
         </div>
