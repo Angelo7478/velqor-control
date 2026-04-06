@@ -190,7 +190,13 @@ src/
     builder/page.tsx              ← Portfolio Builder v2 (equity curves, report, PTF)
 ```
 
-### Cosa resta (Sprint 6+)
+### Sprint 6 — Bridge Reliability (completato 2026-04-06)
+- [x] bridge.py v2.2: auto-reconnect MT5 con backoff esponenziale, heartbeat file, consecutive failure exit
+- [x] launcher.py v2.0: heartbeat health check, force restart zombie bridges, Telegram alerts con throttling
+- [x] Supabase: pg_cron + pg_net, bridge-watchdog v2 con dedup + recovery notifications
+- [x] Deploy su tutte e 3 le VPS (10K, 80K, 100K) — verificato funzionante
+
+### Cosa resta (Sprint 7+)
 - [ ] ~108 trade senza magic → bridge enrich da VPS
 - [ ] Import secondo CSV 360 trade per 100K
 - [ ] Benchmark: confronto strategia vs buy-and-hold sottostante (alpha via Yahoo Finance)
@@ -201,7 +207,6 @@ src/
 - [ ] Grafica report: logo Velqor + "Velqor Intelligent Quant System"
 - [ ] AI Sizing Advisor
 - [ ] N8N: weekly optimization + sync monitor + alert Telegram
-- [ ] Aggiornare bridge VPS (nuova versione con DD storico)
 - [ ] Rolling correlations (target fine 2026 con dati sufficienti)
 - [ ] Portfolio Builder multi-contesto: config per future/capitale proprio
 
