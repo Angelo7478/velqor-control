@@ -1,7 +1,9 @@
 """
-VELQOR MT5 BRIDGE v2.1
+VELQOR MT5 BRIDGE v2.2
 Un processo per terminale MT5. Non fa login — legge il conto già loggato.
 Lanciato dal launcher.py o manualmente con --mt5-path.
+
+v2.2: Auto-reconnect MT5, heartbeat file, consecutive failure self-exit
 
 Uso:
   python bridge.py --mt5-path "C:\\MT5_10K\\terminal64.exe"
@@ -39,6 +41,15 @@ SYNC_INTERVAL = 300
 HISTORY_DAYS = 1095
 FORCE_FULL_IMPORT = False
 LOG_LEVEL = "INFO"
+
+# Reconnection
+MT5_RECONNECT_MAX_ATTEMPTS = 5
+MT5_RECONNECT_INITIAL_DELAY = 5   # seconds
+MT5_RECONNECT_MAX_DELAY = 60      # seconds
+MAX_CONSECUTIVE_FAILURES = 3      # exit after N failed sync cycles
+
+# Heartbeat
+HEARTBEAT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "heartbeats")
 
 try:
     from config_local import *
@@ -121,8 +132,13 @@ def sb_insert(table, data):
 
 
 # ============================================
-# MT5 — NO LOGIN, SOLO READ
+# MT5 — NO LOGIN, SOLO READ + AUTO-RECONNECT
 # ============================================
+
+# Module-level state
+_consecutive_failures = 0
+_account_login = None  # set once after first successful connection
+
 
 def init_mt5():
     if not mt5.initialize(path=MT5_PATH):
@@ -134,7 +150,65 @@ def init_mt5():
         mt5.shutdown()
         return False
     log.info(f"MT5 OK → {info.login}@{info.server} Balance=${info.balance:.2f}")
+    global _account_login
+    _account_login = str(info.login)
     return True
+
+
+def ensure_mt5_connection():
+    """Test MT5 connection; reconnect with exponential backoff if dead.
+    Returns True if MT5 is usable, False if all retries failed.
+    NEVER calls mt5.login() — terminal is already logged in via investor password."""
+    info = mt5.account_info()
+    if info is not None:
+        return True  # connection alive
+
+    log.warning("MT5 disconnesso — tentativo di riconnessione...")
+    delay = MT5_RECONNECT_INITIAL_DELAY
+
+    for attempt in range(1, MT5_RECONNECT_MAX_ATTEMPTS + 1):
+        log.info(f"  Reconnect {attempt}/{MT5_RECONNECT_MAX_ATTEMPTS} (attesa {delay}s)...")
+        try:
+            mt5.shutdown()
+        except Exception:
+            pass
+        time.sleep(delay)
+
+        if mt5.initialize(path=MT5_PATH):
+            info = mt5.account_info()
+            if info is not None:
+                log.info(f"  Riconnesso! → {info.login}@{info.server}")
+                return True
+            else:
+                log.warning(f"  MT5 inizializzato ma nessun conto loggato")
+        else:
+            log.warning(f"  mt5.initialize() fallito: {mt5.last_error()}")
+
+        delay = min(delay * 2, MT5_RECONNECT_MAX_DELAY)
+
+    log.error(f"MT5 riconnessione fallita dopo {MT5_RECONNECT_MAX_ATTEMPTS} tentativi")
+    return False
+
+
+def write_heartbeat(status, extra=None):
+    """Write heartbeat file for launcher health monitoring."""
+    try:
+        os.makedirs(HEARTBEAT_DIR, exist_ok=True)
+        login = _account_login or "unknown"
+        data = {
+            "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+            "status": status,
+            "pid": os.getpid(),
+            "mt5_path": MT5_PATH,
+            "consecutive_failures": _consecutive_failures,
+        }
+        if extra:
+            data.update(extra)
+        path = os.path.join(HEARTBEAT_DIR, f"{login}.json")
+        with open(path, "w") as f:
+            json.dump(data, f)
+    except Exception as e:
+        log.error(f"Heartbeat write failed: {e}")
 
 
 def get_mt5_login():
@@ -529,16 +603,17 @@ def run_enrich():
 # ============================================
 
 def run_sync():
+    """Single sync cycle. Returns True if successful, False otherwise."""
     log.info("=" * 40)
     if not init_mt5():
-        return
+        return False
 
     try:
         login = get_mt5_login()
         account = find_account_by_login(login)
         if not account:
             log.error(f"Login {login} non trovato in Supabase")
-            return
+            return False
 
         log.info(f"SYNC: {account['name']} ({login})")
         strategy_map = load_strategy_map()
@@ -549,8 +624,10 @@ def run_sync():
             except Exception as e:
                 log.error(f"Errore metriche: {e}")
             log.info("SYNC OK")
+            return True
         else:
             log.error("SYNC FALLITO")
+            return False
     finally:
         mt5.shutdown()
 
@@ -565,7 +642,7 @@ if args.mode == "status":
     print(f"  Login:     {login}")
     print(f"  Balance:   ${info['balance']:.2f}" if info else "  No info")
     print(f"  Equity:    ${info['equity']:.2f}" if info else "")
-    print(f"  Supabase:  {account['name']}" if account else "  ⚠️ NON TROVATO in Supabase!")
+    print(f"  Supabase:  {account['name']}" if account else "  NON TROVATO in Supabase!")
     print()
     mt5.shutdown()
 elif args.mode == "once":
@@ -574,9 +651,60 @@ elif args.mode == "enrich":
     run_enrich()
 elif args.mode == "loop":
     log.info(f"Loop: ogni {SYNC_INTERVAL}s | MT5: {MT5_PATH}")
+    # Initial connection to set _account_login for heartbeat
+    if init_mt5():
+        mt5.shutdown()
+
     while True:
         try:
-            run_sync()
+            # Step 1: Ensure MT5 is connected (reconnect if needed)
+            if not ensure_mt5_connection():
+                _consecutive_failures += 1
+                log.error(f"MT5 offline ({_consecutive_failures}/{MAX_CONSECUTIVE_FAILURES})")
+                write_heartbeat("mt5_disconnected")
+
+                if _consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+                    log.critical(f"Troppe failure consecutive ({_consecutive_failures}). Exit per restart dal launcher.")
+                    write_heartbeat("exit_max_failures")
+                    try:
+                        mt5.shutdown()
+                    except Exception:
+                        pass
+                    sys.exit(1)
+
+                time.sleep(SYNC_INTERVAL)
+                continue
+
+            # Step 2: MT5 is alive, shutdown before run_sync (which does its own init)
+            try:
+                mt5.shutdown()
+            except Exception:
+                pass
+
+            # Step 3: Run the sync
+            success = run_sync()
+
+            if success:
+                _consecutive_failures = 0
+                write_heartbeat("ok")
+            else:
+                _consecutive_failures += 1
+                log.warning(f"Sync fallito ({_consecutive_failures}/{MAX_CONSECUTIVE_FAILURES})")
+                write_heartbeat("sync_error")
+
+                if _consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+                    log.critical(f"Troppe failure consecutive ({_consecutive_failures}). Exit per restart dal launcher.")
+                    write_heartbeat("exit_max_failures")
+                    sys.exit(1)
+
         except Exception as e:
-            log.error(f"Errore: {e}")
+            _consecutive_failures += 1
+            log.error(f"Errore loop: {e} ({_consecutive_failures}/{MAX_CONSECUTIVE_FAILURES})")
+            write_heartbeat("error", {"error": str(e)})
+
+            if _consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+                log.critical(f"Troppe failure consecutive ({_consecutive_failures}). Exit per restart dal launcher.")
+                write_heartbeat("exit_max_failures")
+                sys.exit(1)
+
         time.sleep(SYNC_INTERVAL)

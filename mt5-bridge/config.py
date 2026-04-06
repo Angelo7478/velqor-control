@@ -26,3 +26,26 @@ FORCE_FULL_IMPORT = False
 # Logging
 LOG_FILE = "mt5_bridge.log"
 LOG_LEVEL = "INFO"  # DEBUG per piu' dettagli
+
+# ============================================
+# RECONNECTION & HEARTBEAT (v2.2)
+# ============================================
+
+# MT5 reconnect: tentativi con backoff esponenziale
+MT5_RECONNECT_MAX_ATTEMPTS = 5
+MT5_RECONNECT_INITIAL_DELAY = 5   # secondi
+MT5_RECONNECT_MAX_DELAY = 60      # cap backoff a 60s
+
+# Consecutive failures: dopo N sync falliti il bridge esce (launcher lo rilancia)
+MAX_CONSECUTIVE_FAILURES = 3      # 3 * 300s = 15 min di failure -> exit
+
+# Heartbeat: file scritto dopo ogni ciclo, letto dal launcher
+# Directory: mt5-bridge/heartbeats/{login}.json
+HEARTBEAT_STALE_SECONDS = 720     # 12 min (2 cicli + buffer) — usato dal launcher
+
+# ============================================
+# TELEGRAM ALERTS (usato dal launcher)
+# ============================================
+TELEGRAM_TOKEN = ""               # Compilare in config_local.py
+TELEGRAM_CHAT_ID = "503784582"
+TELEGRAM_ALERT_COOLDOWN = 600     # 10 min tra alert per stesso account
