@@ -86,6 +86,12 @@ export default function QuantPage() {
           >
             Scenari
           </a>
+          <a
+            href="/divisioni/quant/builder"
+            className="px-4 py-2 bg-white border border-slate-200 text-slate-700 text-sm font-medium rounded-lg hover:bg-slate-50 transition"
+          >
+            Builder
+          </a>
         </div>
       </div>
 
