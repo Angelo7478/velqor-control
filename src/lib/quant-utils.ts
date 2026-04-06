@@ -478,7 +478,7 @@ export function calcHealthReport(strategy: {
       } else {
         healthScore = Math.min(healthScore, 45)
         healthStatus = 'warning'
-        flags.push('dd_breach_1.5x')
+        flags.push('dd_breach_1_5x')
       }
     }
 

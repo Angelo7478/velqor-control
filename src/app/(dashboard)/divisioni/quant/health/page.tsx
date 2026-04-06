@@ -5,26 +5,50 @@ import { createClient } from '@/lib/supabase-browser'
 import { QelStrategy, QelPortfolio } from '@/types/database'
 import {
   fmt, fmtUsd, fmtPct, plColor, groupColor, styleColor, styleLabel,
-  fitnessColor, fitnessLabel, calcHealthReport, HealthReport,
+  fitnessColor, calcHealthReport, HealthReport,
 } from '@/lib/quant-utils'
 
-const STATUS_CONFIG: Record<string, { color: string; border: string; bg: string; label: string }> = {
-  healthy: { color: 'text-green-700', border: 'border-green-200', bg: 'bg-green-50', label: 'Healthy' },
-  warning: { color: 'text-amber-700', border: 'border-amber-200', bg: 'bg-amber-50', label: 'Warning' },
-  critical: { color: 'text-red-700', border: 'border-red-200', bg: 'bg-red-50', label: 'Critical' },
-  regime_mismatch: { color: 'text-violet-700', border: 'border-violet-200', bg: 'bg-violet-50', label: 'Regime' },
-  insufficient_data: { color: 'text-slate-500', border: 'border-slate-200', bg: 'bg-slate-50', label: 'Early' },
+// --- Italian labels ---
+
+const STATUS_IT: Record<string, { label: string; emoji: string; color: string; border: string; bg: string; desc: string }> = {
+  healthy:           { label: 'In forma',       emoji: '🟢', color: 'text-green-700',  border: 'border-green-200',  bg: 'bg-green-50',  desc: 'La strategia funziona come previsto dai test' },
+  warning:           { label: 'Attenzione',     emoji: '🟡', color: 'text-amber-700',  border: 'border-amber-200',  bg: 'bg-amber-50',  desc: 'Qualche parametro devia dai test. Da monitorare' },
+  critical:          { label: 'Critica',        emoji: '🔴', color: 'text-red-700',    border: 'border-red-200',    bg: 'bg-red-50',    desc: 'Forte deviazione. Valutare se sospendere' },
+  regime_mismatch:   { label: 'Fase sbagliata', emoji: '🟣', color: 'text-violet-700', border: 'border-violet-200', bg: 'bg-violet-50', desc: 'Strategia non rotta — il mercato è in una fase avversa' },
+  insufficient_data: { label: 'Pochi dati',     emoji: '⚪', color: 'text-slate-500',  border: 'border-slate-200',  bg: 'bg-slate-50',  desc: 'Troppo presto per valutare. Servono più trade' },
 }
 
-const PENDULUM_CONFIG: Record<string, { color: string; icon: string; label: string }> = {
-  base: { color: 'text-slate-500', icon: '=', label: 'Base (ridotto)' },
-  recovery: { color: 'text-blue-600', icon: '↗', label: 'Recovery' },
-  drawdown: { color: 'text-green-600', icon: '↑', label: 'DD → Size Up' },
+const PENDULUM_IT: Record<string, { label: string; emoji: string; color: string; desc: string }> = {
+  base:     { label: 'Stabile',     emoji: '⚖️', color: 'text-slate-600',  desc: 'Size normale — la strategia è in equilibrio' },
+  recovery: { label: 'Recupero',    emoji: '↗️', color: 'text-blue-600',   desc: 'Leggero aumento size — sta uscendo dal drawdown' },
+  drawdown: { label: 'In discesa',  emoji: '📈', color: 'text-green-600',  desc: 'Size aumentata — il rimbalzo statistico è probabile' },
+}
+
+const FLAG_IT: Record<string, { label: string; color: string }> = {
+  outperforming:       { label: '✅ Meglio dei test',               color: 'bg-green-50 text-green-700' },
+  win_rate_improved:   { label: '📈 Win rate migliorato',           color: 'bg-green-50 text-green-700' },
+  dd_above_test:       { label: '📊 DD sopra test (ma in profitto)', color: 'bg-blue-50 text-blue-600' },
+  dd_elevated:         { label: '⚠️ DD elevato — verificare sizing', color: 'bg-amber-50 text-amber-600' },
+  dd_breach_2x:        { label: '🔴 DD doppio rispetto al test',    color: 'bg-red-50 text-red-600' },
+  dd_breach_1_5x:      { label: '🟡 DD 50% sopra test',             color: 'bg-amber-50 text-amber-600' },
+  win_rate_drop:       { label: '📉 Win rate calato',               color: 'bg-amber-50 text-amber-600' },
+  negative_expectancy: { label: '⚠️ Guadagno medio negativo',       color: 'bg-amber-50 text-amber-600' },
+  regime_mismatch:     { label: '🟣 Mercato in fase avversa',       color: 'bg-violet-50 text-violet-600' },
+  high_consec_losses:  { label: '🔻 Molte perdite consecutive',     color: 'bg-red-50 text-red-600' },
+  early_stage:         { label: '🕐 Fase iniziale',                 color: 'bg-slate-50 text-slate-500' },
+}
+
+// Extended report with per-account performance
+interface HealthCardData extends HealthReport {
+  recentWinPct: number | null
+  avgTrade: number | null
+  totalTrades: number
+  totalPnl: number
 }
 
 export default function HealthPage() {
   const [portfolio, setPortfolio] = useState<QelPortfolio | null>(null)
-  const [reports, setReports] = useState<HealthReport[]>([])
+  const [cards, setCards] = useState<HealthCardData[]>([])
   const [loading, setLoading] = useState(true)
 
   useEffect(() => { loadData() }, [])
@@ -46,13 +70,11 @@ export default function HealthPage() {
         : Promise.resolve({ data: [] }),
     ])
 
-    // Build equity peaks from equity curve
     const { data: equityCurve } = ptf.account_id
       ? await supabase.from('v_strategy_equity_curve').select('strategy_id, cumulative_pnl').eq('account_id', ptf.account_id)
       : { data: [] }
 
-    // Group equity curve by strategy to find peak
-    // Calculate per-account equity peaks AND max DD from equity curve
+    // Per-account equity peaks + max DD
     const peakMap = new Map<string, { peak: number; last: number; maxDd: number }>()
     if (equityCurve) {
       for (const row of equityCurve) {
@@ -61,13 +83,13 @@ export default function HealthPage() {
         if (!peakMap.has(sid)) peakMap.set(sid, { peak: pnl, last: pnl, maxDd: 0 })
         const entry = peakMap.get(sid)!
         if (pnl > entry.peak) entry.peak = pnl
-        // DD = peak - current (positive number = how much we dropped)
         const currentDd = entry.peak - pnl
         if (currentDd > entry.maxDd) entry.maxDd = currentDd
         entry.last = pnl
       }
     }
 
+    // Per-account performance
     const perfMap = new Map<string, { consecLosses: number; totalPnl: number; recentWinPct: number | null; avgTrade: number | null; totalTrades: number }>()
     if (perfRes.data) {
       for (const p of perfRes.data) {
@@ -82,14 +104,20 @@ export default function HealthPage() {
     }
 
     if (stratRes.data) {
-      const healthReports = stratRes.data.map(s => {
+      const result: HealthCardData[] = stratRes.data.map(s => {
         const perf = perfMap.get(s.id)
         const peaks = peakMap.get(s.id)
-        // Override real_max_dd with per-account DD (not aggregate across all accounts)
-        const stratWithAccountDd = peaks?.maxDd !== undefined
-          ? { ...s, real_max_dd: peaks.maxDd }
-          : s
-        return calcHealthReport(stratWithAccountDd, {
+
+        // Use PER-ACCOUNT data instead of global aggregates
+        const stratOverride = {
+          ...s,
+          real_max_dd: peaks?.maxDd ?? 0,
+          real_win_pct: perf?.recentWinPct ?? s.real_win_pct,
+          real_expectancy: perf?.avgTrade ?? s.real_expectancy,
+          real_pl: perf?.totalPnl ?? s.real_pl,
+        }
+
+        const report = calcHealthReport(stratOverride, {
           consecLosses: perf?.consecLosses ?? 0,
           cumulativePnl: peaks?.last ?? 0,
           equityPeak: peaks?.peak ?? 0,
@@ -97,8 +125,17 @@ export default function HealthPage() {
           avgTrade: perf?.avgTrade ?? null,
           totalTrades: perf?.totalTrades ?? 0,
         })
+
+        return {
+          ...report,
+          recentWinPct: perf?.recentWinPct ?? null,
+          avgTrade: perf?.avgTrade ?? null,
+          totalTrades: perf?.totalTrades ?? 0,
+          totalPnl: perf?.totalPnl ?? 0,
+        }
       })
-      setReports(healthReports)
+
+      setCards(result)
     }
 
     setLoading(false)
@@ -106,141 +143,176 @@ export default function HealthPage() {
 
   if (loading) return <div className="p-8 text-slate-500">Caricamento...</div>
 
-  // Summary stats
-  const healthy = reports.filter(r => r.healthStatus === 'healthy').length
-  const warning = reports.filter(r => r.healthStatus === 'warning').length
-  const critical = reports.filter(r => r.healthStatus === 'critical').length
-  const regime = reports.filter(r => r.healthStatus === 'regime_mismatch').length
-  const inDD = reports.filter(r => r.pendulumState === 'drawdown').length
+  const healthy = cards.filter(r => r.healthStatus === 'healthy').length
+  const warning = cards.filter(r => r.healthStatus === 'warning').length
+  const critical = cards.filter(r => r.healthStatus === 'critical').length
+  const regime = cards.filter(r => r.healthStatus === 'regime_mismatch').length
+  const early = cards.filter(r => r.healthStatus === 'insufficient_data').length
 
-  // Sort: critical first, then warning, regime, healthy, insufficient
   const sortOrder: Record<string, number> = { critical: 0, warning: 1, regime_mismatch: 2, healthy: 3, insufficient_data: 4 }
-  const sorted = [...reports].sort((a, b) => (sortOrder[a.healthStatus] ?? 5) - (sortOrder[b.healthStatus] ?? 5))
+  const sorted = [...cards].sort((a, b) => (sortOrder[a.healthStatus] ?? 5) - (sortOrder[b.healthStatus] ?? 5))
 
   return (
     <div className="p-4 sm:p-6 space-y-4">
-      {/* Header */}
+      {/* Intestazione */}
       <div>
         <div className="flex items-center gap-2">
           <a href="/divisioni/quant" className="text-slate-400 hover:text-slate-600 text-sm">&larr; Quant</a>
           <span className="text-slate-300">|</span>
           <a href="/divisioni/quant/sizing" className="text-slate-400 hover:text-slate-600 text-sm">Sizing</a>
         </div>
-        <h1 className="text-2xl font-bold text-slate-900 mt-1">Strategy Health Monitor</h1>
+        <h1 className="text-2xl font-bold text-slate-900 mt-1">Monitor Salute Strategie</h1>
         <p className="text-sm text-slate-500 mt-0.5">
-          Coerenza test/real, pendulum sizing, alert decommissioning — {portfolio?.name}
+          Confronto test/reale per conto, pendulum, segnali di allarme — {portfolio?.name}
         </p>
       </div>
 
-      {/* Summary KPIs */}
+      {/* Riepilogo */}
       <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
-        <div className="bg-white rounded-xl border border-green-200 p-3">
-          <div className="text-2xl font-bold text-green-600">{healthy}</div>
-          <div className="text-[10px] uppercase text-slate-400">Healthy</div>
-        </div>
-        <div className="bg-white rounded-xl border border-amber-200 p-3">
-          <div className="text-2xl font-bold text-amber-600">{warning}</div>
-          <div className="text-[10px] uppercase text-slate-400">Warning</div>
-        </div>
-        <div className="bg-white rounded-xl border border-red-200 p-3">
-          <div className="text-2xl font-bold text-red-600">{critical}</div>
-          <div className="text-[10px] uppercase text-slate-400">Critical</div>
-        </div>
-        <div className="bg-white rounded-xl border border-violet-200 p-3">
-          <div className="text-2xl font-bold text-violet-600">{regime}</div>
-          <div className="text-[10px] uppercase text-slate-400">Regime Mismatch</div>
-        </div>
-        <div className="bg-white rounded-xl border border-blue-200 p-3">
-          <div className="text-2xl font-bold text-blue-600">{inDD}</div>
-          <div className="text-[10px] uppercase text-slate-400">In Drawdown (Pendulum ↑)</div>
-        </div>
+        <SummaryBox emoji="🟢" count={healthy} label="In forma" border="border-green-200" color="text-green-600" />
+        <SummaryBox emoji="🟡" count={warning} label="Attenzione" border="border-amber-200" color="text-amber-600" />
+        <SummaryBox emoji="🔴" count={critical} label="Critiche" border="border-red-200" color="text-red-600" />
+        <SummaryBox emoji="🟣" count={regime} label="Fase sbagliata" border="border-violet-200" color="text-violet-600" />
+        <SummaryBox emoji="⚪" count={early} label="Pochi dati" border="border-slate-200" color="text-slate-500" />
       </div>
 
-      {/* Strategy Cards */}
+      {/* Card strategie */}
       <div className="space-y-3">
-        {sorted.map(r => {
-          const cfg = STATUS_CONFIG[r.healthStatus] || STATUS_CONFIG.healthy
-          const pdl = PENDULUM_CONFIG[r.pendulumState] || PENDULUM_CONFIG.base
-          return (
-            <div key={r.strategyId} className={`bg-white rounded-xl border ${cfg.border} p-4`}>
-              {/* Header row */}
-              <div className="flex items-start justify-between">
-                <div className="flex items-center gap-3">
-                  <div className={`w-10 h-10 rounded-lg ${cfg.bg} flex items-center justify-center`}>
-                    <span className={`text-lg font-bold ${cfg.color}`}>{r.healthScore}</span>
-                  </div>
-                  <div>
-                    <div className="font-medium text-slate-800">M{r.magic} — {r.name}</div>
-                    <div className="flex gap-2 mt-0.5">
-                      {r.family && <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-slate-100 text-slate-600">{r.family}</span>}
-                      <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${cfg.bg} ${cfg.color}`}>{cfg.label}</span>
-                    </div>
-                  </div>
-                </div>
-
-                {/* Pendulum indicator */}
-                <div className="text-right">
-                  <div className={`flex items-center gap-1 ${pdl.color}`}>
-                    <span className="text-lg font-mono">{pdl.icon}</span>
-                    <span className="text-sm font-bold">{r.pendulumMultiplier}x</span>
-                  </div>
-                  <div className="text-[10px] text-slate-400">{pdl.label}</div>
-                </div>
-              </div>
-
-              {/* Metrics row */}
-              <div className="grid grid-cols-3 sm:grid-cols-6 gap-3 mt-3 text-xs">
-                <div>
-                  <span className="text-slate-400">Fitness</span>
-                  <div className={`font-mono font-bold ${fitnessColor(r.fitnessScore)}`}>{r.fitnessScore}%</div>
-                  <div className="text-[10px] text-slate-400">conf {r.fitnessConfidence}%</div>
-                </div>
-                <div>
-                  <span className="text-slate-400">P/L cumulato</span>
-                  <div className={`font-mono font-bold ${plColor(r.cumulativePnl)}`}>{fmtUsd(r.cumulativePnl, 2)}</div>
-                </div>
-                <div>
-                  <span className="text-slate-400">DD da peak</span>
-                  <div className="font-mono font-bold text-slate-700">{fmtPct(r.ddFromPeak)}</div>
-                </div>
-                <div>
-                  <span className="text-slate-400">Consec. Loss</span>
-                  <div className={`font-mono font-bold ${r.consecLosses >= 3 ? 'text-red-600' : 'text-slate-700'}`}>{r.consecLosses}</div>
-                </div>
-                <div>
-                  <span className="text-slate-400">Equity Peak</span>
-                  <div className="font-mono font-bold text-slate-700">{fmtUsd(r.equityPeak, 2)}</div>
-                </div>
-                <div>
-                  <span className="text-slate-400">Pendulum</span>
-                  <div className={`font-mono font-bold ${pdl.color}`}>{r.pendulumMultiplier}x</div>
-                </div>
-              </div>
-
-              {/* Flags */}
-              {r.flags.length > 0 && (
-                <div className="flex flex-wrap gap-1 mt-2">
-                  {r.flags.map(f => (
-                    <span key={f} className={`text-[10px] px-2 py-0.5 rounded-full ${
-                      f.includes('breach') || f.includes('collapse') ? 'bg-red-50 text-red-600' :
-                      f.includes('regime') ? 'bg-violet-50 text-violet-600' :
-                      f.includes('negative') || f.includes('consec') ? 'bg-amber-50 text-amber-600' :
-                      'bg-slate-50 text-slate-500'
-                    }`}>
-                      {f.replace(/_/g, ' ')}
-                    </span>
-                  ))}
-                </div>
-              )}
-
-              {/* Recommendation */}
-              <div className={`mt-2 px-3 py-1.5 ${cfg.bg} rounded-lg text-xs ${cfg.color}`}>
-                {r.recommendation}
-              </div>
-            </div>
-          )
-        })}
+        {sorted.map(card => <StrategyCard key={card.strategyId} card={card} />)}
       </div>
+    </div>
+  )
+}
+
+// --- Componenti ---
+
+function SummaryBox({ emoji, count, label, border, color }: { emoji: string; count: number; label: string; border: string; color: string }) {
+  return (
+    <div className={`bg-white rounded-xl border ${border} p-3`}>
+      <div className="flex items-center gap-2">
+        <span className="text-lg">{emoji}</span>
+        <span className={`text-2xl font-bold ${color}`}>{count}</span>
+      </div>
+      <div className="text-[10px] uppercase text-slate-400 mt-0.5">{label}</div>
+    </div>
+  )
+}
+
+function StrategyCard({ card }: { card: HealthCardData }) {
+  const cfg = STATUS_IT[card.healthStatus] || STATUS_IT.healthy
+  const pdl = PENDULUM_IT[card.pendulumState] || PENDULUM_IT.base
+
+  return (
+    <div className={`bg-white rounded-xl border ${cfg.border} p-4`}>
+      {/* Riga superiore: nome + stato + pendulum */}
+      <div className="flex items-start justify-between">
+        <div className="flex items-center gap-3">
+          {/* Score circolare */}
+          <div className="relative w-12 h-12">
+            <svg className="w-12 h-12 -rotate-90" viewBox="0 0 36 36">
+              <path className="text-slate-100" stroke="currentColor" strokeWidth="3" fill="none"
+                d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831" />
+              <path
+                className={card.healthScore >= 70 ? 'text-green-500' : card.healthScore >= 40 ? 'text-amber-500' : 'text-red-500'}
+                stroke="currentColor" strokeWidth="3" fill="none" strokeLinecap="round"
+                strokeDasharray={`${card.healthScore}, 100`}
+                d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831" />
+            </svg>
+            <span className={`absolute inset-0 flex items-center justify-center text-xs font-bold ${fitnessColor(card.healthScore)}`}>
+              {card.healthScore}%
+            </span>
+          </div>
+          <div>
+            <div className="font-semibold text-slate-800">M{card.magic} — {card.name}</div>
+            <div className="flex items-center gap-2 mt-0.5">
+              <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${styleColor(card.family?.includes('RSI2') ? 'mean_reversion' : card.family?.includes('TREND') ? 'trend_following' : 'seasonal')}`}>
+                {card.family || '—'}
+              </span>
+              <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-medium ${cfg.bg} ${cfg.color}`}>
+                {cfg.emoji} {cfg.label}
+              </span>
+            </div>
+          </div>
+        </div>
+
+        {/* Pendulum */}
+        <div className="text-right bg-slate-50 rounded-lg px-3 py-1.5">
+          <div className={`flex items-center gap-1 justify-end ${pdl.color}`}>
+            <span>{pdl.emoji}</span>
+            <span className="text-lg font-bold">{card.pendulumMultiplier}x</span>
+          </div>
+          <div className="text-[10px] text-slate-400">{pdl.label}</div>
+        </div>
+      </div>
+
+      {/* Performance reale su questo conto */}
+      <div className="grid grid-cols-3 sm:grid-cols-6 gap-3 mt-3">
+        <MetricBox
+          label="P/L totale"
+          value={fmtUsd(card.totalPnl, 2)}
+          valueColor={plColor(card.totalPnl)}
+          sub={`${card.totalTrades} trade`}
+        />
+        <MetricBox
+          label="Win rate"
+          value={card.recentWinPct !== null ? `${fmt(card.recentWinPct, 1)}%` : '—'}
+          valueColor={card.recentWinPct !== null && card.recentWinPct >= 55 ? 'text-green-600' : 'text-slate-700'}
+        />
+        <MetricBox
+          label="Media per trade"
+          value={card.avgTrade !== null ? fmtUsd(card.avgTrade, 2) : '—'}
+          valueColor={card.avgTrade !== null ? plColor(card.avgTrade) : 'text-slate-500'}
+        />
+        <MetricBox
+          label="Perdite consecutive"
+          value={String(card.consecLosses)}
+          valueColor={card.consecLosses >= 3 ? 'text-red-600' : 'text-slate-700'}
+        />
+        <MetricBox
+          label="Distanza dal massimo"
+          value={fmtPct(card.ddFromPeak)}
+          valueColor={card.ddFromPeak > 5 ? 'text-red-600' : card.ddFromPeak > 2 ? 'text-amber-600' : 'text-slate-700'}
+        />
+        <MetricBox
+          label="Coerenza test"
+          value={`${card.fitnessScore}%`}
+          valueColor={fitnessColor(card.fitnessScore)}
+          sub={`affidabilità ${card.fitnessConfidence}%`}
+        />
+      </div>
+
+      {/* Segnali (flags) */}
+      {card.flags.length > 0 && (
+        <div className="flex flex-wrap gap-1.5 mt-3">
+          {card.flags.map(f => {
+            const flagCfg = FLAG_IT[f] || { label: f.replace(/_/g, ' '), color: 'bg-slate-50 text-slate-500' }
+            return (
+              <span key={f} className={`text-[11px] px-2 py-0.5 rounded-full ${flagCfg.color}`}>
+                {flagCfg.label}
+              </span>
+            )
+          })}
+        </div>
+      )}
+
+      {/* Raccomandazione */}
+      <div className={`mt-3 px-3 py-2 ${cfg.bg} rounded-lg text-sm ${cfg.color} flex items-start gap-2`}>
+        <span className="text-base mt-0.5">{cfg.emoji}</span>
+        <div>
+          <div className="font-medium">{card.recommendation}</div>
+          <div className="text-[11px] opacity-75 mt-0.5">{cfg.desc}</div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function MetricBox({ label, value, valueColor, sub }: { label: string; value: string; valueColor: string; sub?: string }) {
+  return (
+    <div>
+      <div className="text-[10px] text-slate-400 uppercase">{label}</div>
+      <div className={`font-mono font-bold text-sm mt-0.5 ${valueColor}`}>{value}</div>
+      {sub && <div className="text-[10px] text-slate-400">{sub}</div>}
     </div>
   )
 }
