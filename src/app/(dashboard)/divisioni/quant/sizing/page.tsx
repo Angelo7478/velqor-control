@@ -17,6 +17,11 @@ type Tab = 'grid' | 'dd_budget' | 'fitness' | 'correlations'
 
 interface StrategyRow extends QelStrategy {
   ps?: QelPortfolioStrategy
+  _accountWinPct?: number | null
+  _accountAvgTrade?: number | null
+  _accountPnl?: number
+  _accountTrades?: number
+  _avgRealLot?: number | null
 }
 
 export default function SizingPage() {
@@ -74,6 +79,42 @@ export default function SizingPage() {
 
     if (accRes.data) setAccount(accRes.data)
 
+    // Fetch per-account performance + avg lot for DD normalization
+    const [perfRes, lotRes] = await Promise.all([
+      portfolio.account_id
+        ? supabase.from('v_strategy_recent_performance').select('*').eq('account_id', portfolio.account_id)
+        : Promise.resolve({ data: [] }),
+      portfolio.account_id
+        ? supabase.from('qel_trades').select('strategy_id, lots').eq('account_id', portfolio.account_id).eq('is_open', false).not('strategy_id', 'is', null)
+        : Promise.resolve({ data: [] }),
+    ])
+
+    // Build per-account maps
+    const perfMap = new Map<string, { winPct: number | null; avgTrade: number | null; totalPnl: number; trades: number }>()
+    if (perfRes.data) {
+      for (const p of perfRes.data) {
+        perfMap.set(p.strategy_id, {
+          winPct: p.win_pct ? Number(p.win_pct) : null,
+          avgTrade: p.avg_trade ? Number(p.avg_trade) : null,
+          totalPnl: Number(p.total_pnl ?? 0),
+          trades: Number(p.total_trades ?? 0),
+        })
+      }
+    }
+
+    const avgLotMap = new Map<string, number>()
+    if (lotRes.data) {
+      const sums = new Map<string, { total: number; count: number }>()
+      for (const row of lotRes.data) {
+        if (!row.strategy_id) continue
+        if (!sums.has(row.strategy_id)) sums.set(row.strategy_id, { total: 0, count: 0 })
+        const s = sums.get(row.strategy_id)!
+        s.total += Number(row.lots)
+        s.count++
+      }
+      for (const [sid, s] of sums) avgLotMap.set(sid, s.total / s.count)
+    }
+
     const psMap = new Map<string, QelPortfolioStrategy>()
     if (psRes.data) {
       for (const ps of psRes.data) psMap.set(ps.strategy_id, ps)
@@ -82,7 +123,19 @@ export default function SizingPage() {
     if (stratRes.data) {
       const linked = stratRes.data
         .filter(s => psMap.has(s.id))
-        .map(s => ({ ...s, ps: psMap.get(s.id) }))
+        .map(s => {
+          const perf = perfMap.get(s.id)
+          return {
+            ...s,
+            ps: psMap.get(s.id),
+            // Override with per-account data
+            _accountWinPct: perf?.winPct ?? null,
+            _accountAvgTrade: perf?.avgTrade ?? null,
+            _accountPnl: perf?.totalPnl ?? 0,
+            _accountTrades: perf?.trades ?? 0,
+            _avgRealLot: avgLotMap.get(s.id) ?? null,
+          }
+        })
       setStrategies(linked)
     }
 
@@ -379,9 +432,10 @@ function DDBudget({ strategies, output, ddBudgetUsd }: { strategies: StrategyRow
     return <div className="bg-white rounded-xl border border-slate-200 p-8 text-center text-slate-400">Clicca &quot;Ottimizza&quot; per calcolare il DD Budget</div>
   }
 
-  // Waterfall chart data
-  const chartData = strategies.map((s, i) => {
-    const r = output.results[i]
+  // Waterfall chart data — use Map to match by strategyId (not array index)
+  const resultMap = new Map(output.results.map(r => [r.strategyId, r]))
+  const chartData = strategies.map(s => {
+    const r = resultMap.get(s.id)
     const mc95 = s.mc95_dd_scaled ?? s.test_mc95_dd ?? 0
     const ddContrib = r ? r.recommendedLots * mc95 : 0
     return {
@@ -485,22 +539,25 @@ function DDBudget({ strategies, output, ddBudgetUsd }: { strategies: StrategyRow
 // --- Fitness Report Tab ---
 
 function FitnessReport({ strategies, output }: { strategies: StrategyRow[]; output: PortfolioSizingOutput | null }) {
-  const fitnessData = strategies.map((s, i) => {
-    const r = output?.results[i]
-    const fitness = r
-      ? { score: r.fitnessScore, details: r.fitnessDetails, confidence: r.fitnessDetails.confidence ?? 0 }
-      : calcFitnessScore({
-          test_win_pct: s.test_win_pct,
-          test_payoff: s.test_payoff,
-          test_max_dd: s.test_max_dd,
-          test_expectancy: s.test_expectancy,
-          real_win_pct: s.real_win_pct,
-          real_payoff: s.real_payoff,
-          real_max_dd: s.real_max_dd,
-          real_expectancy: s.real_expectancy,
-          real_trades: s.real_trades,
-        })
-    return { strategy: s, ...fitness }
+  const resultMap = new Map(output?.results.map(r => [r.strategyId, r]) ?? [])
+
+  const fitnessData = strategies.map(s => {
+    const r = resultMap.get(s.id)
+    // Use per-account data for fitness calculation
+    const fitness = calcFitnessScore({
+      test_win_pct: s.test_win_pct,
+      test_payoff: s.test_payoff,
+      test_max_dd: s.test_max_dd,
+      test_expectancy: s.test_expectancy,
+      real_win_pct: s._accountWinPct ?? s.real_win_pct,
+      real_payoff: s.real_payoff,
+      real_max_dd: s.real_max_dd,
+      real_expectancy: s._accountAvgTrade ?? s.real_expectancy,
+      real_trades: s._accountTrades ?? s.real_trades,
+      test_lot: s.lot_static,
+      avg_real_lot: s._avgRealLot,
+    })
+    return { strategy: s, ...fitness, fitnessScore: r?.fitnessScore ?? fitness.score }
   }).sort((a, b) => a.score - b.score)
 
   return (
