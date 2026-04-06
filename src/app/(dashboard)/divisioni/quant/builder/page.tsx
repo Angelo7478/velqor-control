@@ -20,9 +20,11 @@ import {
 
 interface StrategyRow extends QelStrategy {
   selected: boolean
-  userLots: number
+  baseLots: number     // original lots from DB (calibrated for source account)
+  userLots: number     // auto-scaled lots based on equity
+  manualOverride: boolean // true if user manually changed lots
   chartColor: string
-  visible: boolean // visible on chart
+  visible: boolean
   tradeCount: number
   realPnlOnAccount: number
 }
@@ -46,12 +48,10 @@ export default function BuilderPage() {
   const [selectedAccountId, setSelectedAccountId] = useState<string>('')
   const [loading, setLoading] = useState(true)
   const [equityBase, setEquityBase] = useState(10000)
+  const [sourceAccountSize, setSourceAccountSize] = useState(10000) // equity of the account trades come from
   const [showCombined, setShowCombined] = useState(true)
   const [chartMode, setChartMode] = useState<'portfolio' | 'individual'>('portfolio')
   const [selectedStratForDetail, setSelectedStratForDetail] = useState<string | null>(null)
-
-  // Lot scaling
-  const [lotMultiplier, setLotMultiplier] = useState(1)
 
   // PTF state
   const [savedPortfolios, setSavedPortfolios] = useState<SavedPortfolio[]>([])
@@ -133,13 +133,24 @@ export default function BuilderPage() {
       }
     }
 
+    // Remember source account size for auto-scaling
+    const srcAcc = accounts.find(a => a.id === selectedAccountId)
+    const srcSize = srcAcc?.account_size || 10000
+    setSourceAccountSize(srcSize)
+
+    // Scale ratio: if equity target differs from source, scale lots
+    const scale = equityBase / srcSize
+
     if (strats) {
       setStrategies(strats.map((s, i) => {
         const stats = pnlMap.get(s.id)
+        const base = s.lot_neutral ?? s.lot_static ?? 0.01
         return {
           ...s,
           selected: s.include_in_portfolio && s.status === 'active',
-          userLots: s.lot_neutral ?? s.lot_static ?? 0.01,
+          baseLots: base,
+          userLots: Math.max(0.01, Math.round(base * scale * 1000) / 1000),
+          manualOverride: false,
           chartColor: CHART_COLORS[i % CHART_COLORS.length],
           visible: true,
           tradeCount: stats?.count ?? 0,
@@ -160,6 +171,16 @@ export default function BuilderPage() {
 
     setLoading(false)
   }
+
+  // ---- Auto-scale lots when equityBase changes ----
+  useEffect(() => {
+    if (sourceAccountSize === 0 || strategies.length === 0) return
+    const scale = equityBase / sourceAccountSize
+    setStrategies(prev => prev.map(s => {
+      if (s.manualOverride) return s // don't touch manually overridden lots
+      return { ...s, userLots: Math.max(0.01, Math.round(s.baseLots * scale * 1000) / 1000) }
+    }))
+  }, [equityBase, sourceAccountSize])
 
   // ---- Equity curves (memoized) ----
   const curveData = useMemo(() => {
@@ -184,7 +205,7 @@ export default function BuilderPage() {
   }
 
   function setLots(id: string, lots: number) {
-    setStrategies(prev => prev.map(s => s.id === id ? { ...s, userLots: Math.max(0.01, lots) } : s))
+    setStrategies(prev => prev.map(s => s.id === id ? { ...s, userLots: Math.max(0.01, lots), manualOverride: true } : s))
   }
 
   function selectAll() {
@@ -208,27 +229,18 @@ export default function BuilderPage() {
 
   function applyMultiplier(mult: number) {
     setStrategies(prev => prev.map(s => s.selected
-      ? { ...s, userLots: Math.max(0.01, Math.round(s.userLots * mult * 1000) / 1000) }
+      ? { ...s, userLots: Math.max(0.01, Math.round(s.userLots * mult * 1000) / 1000), manualOverride: true }
       : s
     ))
-    setLotMultiplier(1)
   }
 
   function resetLotsToDefault() {
+    const scale = sourceAccountSize > 0 ? equityBase / sourceAccountSize : 1
     setStrategies(prev => prev.map(s => ({
       ...s,
-      userLots: s.lot_neutral ?? s.lot_static ?? 0.01,
+      userLots: Math.max(0.01, Math.round(s.baseLots * scale * 1000) / 1000),
+      manualOverride: false,
     })))
-    setLotMultiplier(1)
-  }
-
-  /** Auto-scale lots proportional to equity base vs source account */
-  function autoScaleForEquity() {
-    const sourceAcc = accounts.find(a => a.id === selectedAccountId)
-    if (!sourceAcc || sourceAcc.account_size === 0) return
-    const ratio = equityBase / sourceAcc.account_size
-    if (Math.abs(ratio - 1) < 0.01) return // already 1:1
-    applyMultiplier(ratio)
   }
 
   // ---- Save PTF ----
@@ -283,11 +295,12 @@ export default function BuilderPage() {
   async function loadPTF(ptf: SavedPortfolio) {
     setLoadingPtf(true)
 
-    // Select strategies and set lots from PTF
+    // Select strategies and set lots from PTF (these are manual overrides)
     setStrategies(prev => prev.map(s => {
       const ps = ptf.strategies.find(p => p.strategy_id === s.id)
       if (ps) {
-        return { ...s, selected: true, userLots: ps.lot_override ?? ps.final_lots ?? s.userLots, visible: true }
+        const lots = ps.lot_override ?? ps.final_lots ?? s.userLots
+        return { ...s, selected: true, userLots: lots, manualOverride: true, visible: true }
       }
       return { ...s, selected: false }
     }))
@@ -641,32 +654,20 @@ ${curveData.curves.sort((a, b) => a.magic - b.magic).map(c => `Magic ${String(c.
               className="w-28 text-sm border border-slate-200 rounded px-2 py-1.5" />
           </div>
 
-          {/* Lot scaling */}
+          {/* Lot fine-tuning */}
           <div>
-            <label className="text-[10px] uppercase text-slate-400 block mb-1">Scala lotti</label>
+            <label className="text-[10px] uppercase text-slate-400 block mb-1">
+              Lotti ({sourceAccountSize > 0 ? `${fmt(equityBase / sourceAccountSize, 1)}x da ${fmtUsd(sourceAccountSize)}` : 'auto'})
+            </label>
             <div className="flex gap-1 items-center">
-              {[2, 3, 5, 10].map(m => (
+              {[2, 0.5].map(m => (
                 <button key={m} onClick={() => applyMultiplier(m)}
                   className="px-2 py-1.5 text-xs border border-slate-200 rounded-lg hover:bg-indigo-50 hover:border-indigo-300 transition font-mono">
-                  {m}x
+                  {m > 1 ? `${m}x` : `/${Math.round(1/m)}`}
                 </button>
               ))}
-              <button onClick={() => applyMultiplier(0.5)}
-                className="px-2 py-1.5 text-xs border border-slate-200 rounded-lg hover:bg-amber-50 hover:border-amber-300 transition font-mono">
-                /2
-              </button>
-              {(() => {
-                const sourceAcc = accounts.find(a => a.id === selectedAccountId)
-                const ratio = sourceAcc && sourceAcc.account_size > 0 ? equityBase / sourceAcc.account_size : 1
-                return ratio > 1.5 || ratio < 0.7 ? (
-                  <button onClick={autoScaleForEquity}
-                    className="px-2.5 py-1.5 text-xs bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition font-medium">
-                    Auto {fmt(ratio, 0)}x
-                  </button>
-                ) : null
-              })()}
               <button onClick={resetLotsToDefault}
-                className="px-2 py-1.5 text-xs text-slate-400 hover:text-slate-600 transition" title="Reset ai lotti originali">
+                className="px-2 py-1.5 text-xs text-slate-400 hover:text-slate-600 transition" title="Reset auto-scala">
                 Reset
               </button>
             </div>
