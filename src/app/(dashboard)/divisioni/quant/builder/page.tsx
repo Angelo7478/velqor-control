@@ -254,34 +254,67 @@ export default function BuilderPage() {
     setSizingOutput(null)
   }
 
+  /**
+   * Compute per-account strategy stats from the loaded trades.
+   * CRITICAL: never mix dollar metrics across different account sizes.
+   */
+  function calcPerAccountStats(stratId: string) {
+    const stratTrades = trades.filter(t => t.strategy_id === stratId)
+    if (stratTrades.length === 0) return null
+    const wins = stratTrades.filter(t => t.net_profit > 0)
+    const losses = stratTrades.filter(t => t.net_profit <= 0)
+    const winPct = (wins.length / stratTrades.length) * 100
+    const avgWin = wins.length > 0 ? wins.reduce((s, t) => s + t.net_profit, 0) / wins.length : 0
+    const avgLoss = losses.length > 0 ? Math.abs(losses.reduce((s, t) => s + t.net_profit, 0) / losses.length) : 0
+    const payoff = avgLoss > 0 ? avgWin / avgLoss : 0
+    const expectancy = stratTrades.reduce((s, t) => s + t.net_profit, 0) / stratTrades.length
+    const totalPl = stratTrades.reduce((s, t) => s + t.net_profit, 0)
+
+    // Max DD from trade sequence
+    let peak = 0, maxDd = 0, cumPl = 0
+    for (const t of stratTrades) {
+      cumPl += t.net_profit
+      if (cumPl > peak) peak = cumPl
+      const dd = peak - cumPl
+      if (dd > maxDd) maxDd = dd
+    }
+
+    return { trades: stratTrades.length, winPct, payoff, expectancy, maxDd, totalPl }
+  }
+
   /** Run sizing engine: Kelly + HRP + DD budget → optimal lots */
   function optimizeLots() {
     const selected = strategies.filter(s => s.selected)
     if (selected.length === 0) return
 
-    const inputs: SizingInput[] = selected.map(s => ({
-      strategyId: s.id,
-      magic: s.magic,
-      name: s.name || `M${s.magic}`,
-      asset: s.asset,
-      assetGroup: s.asset_group,
-      style: s.strategy_style,
-      family: s.strategy_family,
-      testWinPct: s.test_win_pct,
-      testPayoff: s.test_payoff,
-      testMc95Dd: s.test_mc95_dd,
-      mc95DdScaled: s.mc95_dd_scaled,
-      testExpectancy: s.test_expectancy,
-      testMaxDd: s.test_max_dd,
-      realTrades: s.real_trades,
-      realWinPct: s.real_win_pct,
-      realPayoff: s.real_payoff,
-      realMaxDd: s.real_max_dd,
-      realExpectancy: s.real_expectancy,
-      realPl: s.real_pl,
-      lotNeutral: s.lot_neutral,
-      overlapMed: s.test_overlap_med,
-    }))
+    // Use per-account stats (from loaded trades) instead of aggregated real_* fields
+    const inputs: SizingInput[] = selected.map(s => {
+      const acctStats = calcPerAccountStats(s.id)
+      return {
+        strategyId: s.id,
+        magic: s.magic,
+        name: s.name || `M${s.magic}`,
+        asset: s.asset,
+        assetGroup: s.asset_group,
+        style: s.strategy_style,
+        family: s.strategy_family,
+        testWinPct: s.test_win_pct,
+        testPayoff: s.test_payoff,
+        testMc95Dd: s.test_mc95_dd,
+        mc95DdScaled: s.mc95_dd_scaled,
+        testExpectancy: s.test_expectancy,
+        testMaxDd: s.test_max_dd,
+        // Per-account stats override aggregated values
+        realTrades: acctStats?.trades ?? 0,
+        realWinPct: acctStats?.winPct ?? null,
+        realPayoff: acctStats?.payoff ?? null,
+        realMaxDd: acctStats?.maxDd ?? 0,
+        realExpectancy: acctStats?.expectancy ?? null,
+        realPl: acctStats?.totalPl ?? 0,
+        lotNeutral: s.lot_neutral,
+        overlapMed: s.test_overlap_med,
+      }
+    })
 
     const result = runSizingEngine(inputs, equityBase, maxDdPct, safetyFactor, kellyMode)
     setSizingOutput(result)

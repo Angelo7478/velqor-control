@@ -151,29 +151,34 @@ export default function SizingPage() {
     if (!selectedPortfolio || strategies.length === 0) return
     setOptimizing(true)
 
-    const inputs: SizingInput[] = strategies.map(s => ({
-      strategyId: s.id,
-      magic: s.magic,
-      name: s.name || `Magic ${s.magic}`,
-      asset: s.asset,
-      assetGroup: s.asset_group,
-      style: s.strategy_style,
-      family: s.strategy_family,
-      testWinPct: s.test_win_pct,
-      testPayoff: s.test_payoff,
-      testMc95Dd: s.test_mc95_dd,
-      mc95DdScaled: s.mc95_dd_scaled,
-      testExpectancy: s.test_expectancy,
-      testMaxDd: s.test_max_dd,
-      realTrades: s.real_trades,
-      realWinPct: s.real_win_pct,
-      realPayoff: s.real_payoff,
-      realMaxDd: s.real_max_dd,
-      realExpectancy: s.real_expectancy,
-      realPl: s.real_pl,
-      lotNeutral: s.lot_neutral,
-      overlapMed: s.test_overlap_med,
-    }))
+    // Use per-account stats when available (never aggregate dollar metrics across accounts)
+    const inputs: SizingInput[] = strategies.map((s: StrategyRow) => {
+      const hasAccountData = (s as any)._accountTrades > 0
+      return {
+        strategyId: s.id,
+        magic: s.magic,
+        name: s.name || `Magic ${s.magic}`,
+        asset: s.asset,
+        assetGroup: s.asset_group,
+        style: s.strategy_style,
+        family: s.strategy_family,
+        testWinPct: s.test_win_pct,
+        testPayoff: s.test_payoff,
+        testMc95Dd: s.test_mc95_dd,
+        mc95DdScaled: s.mc95_dd_scaled,
+        testExpectancy: s.test_expectancy,
+        testMaxDd: s.test_max_dd,
+        // Per-account stats override aggregated values
+        realTrades: hasAccountData ? (s as any)._accountTrades : s.real_trades,
+        realWinPct: hasAccountData ? (s as any)._accountWinPct : s.real_win_pct,
+        realPayoff: s.real_payoff, // payoff not computed per-account yet, keep aggregated
+        realMaxDd: s.real_max_dd,
+        realExpectancy: hasAccountData ? (s as any)._accountAvgTrade : s.real_expectancy,
+        realPl: hasAccountData ? (s as any)._accountPnl : s.real_pl,
+        lotNeutral: s.lot_neutral,
+        overlapMed: s.test_overlap_med,
+      }
+    })
 
     // Build correlation matrix
     const corrMatrix = buildCorrelationMatrix(

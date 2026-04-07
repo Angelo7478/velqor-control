@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react'
 import { createClient } from '@/lib/supabase-browser'
-import { QelStrategy, QelPortfolio } from '@/types/database'
+import { QelStrategy, QelPortfolio, QelAccount } from '@/types/database'
 import {
   fmt, fmtUsd, fmtPct, plColor, groupColor, styleColor, styleLabel,
   fitnessColor, calcHealthReport, HealthReport,
@@ -49,32 +49,38 @@ interface HealthCardData extends HealthReport {
 }
 
 export default function HealthPage() {
-  const [portfolio, setPortfolio] = useState<QelPortfolio | null>(null)
+  const [accounts, setAccounts] = useState<QelAccount[]>([])
+  const [selectedAccountId, setSelectedAccountId] = useState<string>('')
   const [cards, setCards] = useState<HealthCardData[]>([])
   const [loading, setLoading] = useState(true)
 
-  useEffect(() => { loadData() }, [])
+  useEffect(() => { loadAccounts() }, [])
+  useEffect(() => { if (selectedAccountId) loadData() }, [selectedAccountId])
+
+  async function loadAccounts() {
+    const supabase = createClient()
+    const { data } = await supabase.from('qel_accounts').select('*').order('name')
+    if (data && data.length > 0) {
+      setAccounts(data)
+      setSelectedAccountId(data[0].id)
+    }
+    setLoading(false)
+  }
 
   async function loadData() {
+    setLoading(true)
     const supabase = createClient()
-
-    const { data: portfolios } = await supabase
-      .from('qel_portfolios').select('*').eq('is_active', true).order('name').limit(1)
-
-    if (!portfolios || portfolios.length === 0) { setLoading(false); return }
-    const ptf = portfolios[0]
-    setPortfolio(ptf)
+    const accountId = selectedAccountId
 
     const [stratRes, perfRes] = await Promise.all([
-      supabase.from('qel_strategies').select('*').eq('include_in_portfolio', true).eq('status', 'active').order('magic'),
-      ptf.account_id
-        ? supabase.from('v_strategy_recent_performance').select('*').eq('account_id', ptf.account_id)
-        : Promise.resolve({ data: [] }),
+      supabase.from('qel_strategies').select('*').in('status', ['active', 'paused']).order('magic'),
+      supabase.from('v_strategy_recent_performance').select('*').eq('account_id', accountId),
     ])
 
-    const { data: equityCurve } = ptf.account_id
-      ? await supabase.from('v_strategy_equity_curve').select('strategy_id, cumulative_pnl').eq('account_id', ptf.account_id)
-      : { data: [] }
+    const { data: equityCurve } = await supabase
+      .from('v_strategy_equity_curve')
+      .select('strategy_id, cumulative_pnl')
+      .eq('account_id', accountId)
 
     // Per-account equity peaks + max DD
     const peakMap = new Map<string, { peak: number; last: number; maxDd: number }>()
@@ -107,11 +113,11 @@ export default function HealthPage() {
 
     // Calculate average lot per strategy on this account (for DD normalization)
     const avgLotMap = new Map<string, number>()
-    if (ptf.account_id) {
+    {
       const { data: lotAvgs } = await supabase
         .from('qel_trades')
         .select('strategy_id, lots')
-        .eq('account_id', ptf.account_id)
+        .eq('account_id', accountId)
         .eq('is_open', false)
         .not('strategy_id', 'is', null)
       if (lotAvgs) {
@@ -130,7 +136,9 @@ export default function HealthPage() {
     }
 
     if (stratRes.data) {
-      const result: HealthCardData[] = stratRes.data.map(s => {
+      // Only show strategies that have trades on this account
+      const activeStrats = stratRes.data.filter(s => perfMap.has(s.id))
+      const result: HealthCardData[] = activeStrats.map(s => {
         const perf = perfMap.get(s.id)
         const peaks = peakMap.get(s.id)
 
@@ -182,12 +190,23 @@ export default function HealthPage() {
   return (
     <div className="p-4 sm:p-6 space-y-4">
       {/* Intestazione */}
-      <div>
-        <QuantNav />
-        <h1 className="text-2xl font-bold text-slate-900 mt-1">Monitor Salute Strategie</h1>
-        <p className="text-sm text-slate-500 mt-0.5">
-          Confronto test/reale per conto, pendulum, segnali di allarme — {portfolio?.name}
-        </p>
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+        <div>
+          <QuantNav />
+          <h1 className="text-2xl font-bold text-slate-900 mt-1">Monitor Salute Strategie</h1>
+          <p className="text-sm text-slate-500 mt-0.5">
+            Confronto test/reale per conto, pendulum, segnali di allarme
+          </p>
+        </div>
+        <select
+          className="text-sm border border-slate-200 rounded-lg px-3 py-2 bg-white"
+          value={selectedAccountId}
+          onChange={e => setSelectedAccountId(e.target.value)}
+        >
+          {accounts.map(a => (
+            <option key={a.id} value={a.id}>{a.name} (${Number(a.account_size).toLocaleString()})</option>
+          ))}
+        </select>
       </div>
 
       {/* Riepilogo */}
