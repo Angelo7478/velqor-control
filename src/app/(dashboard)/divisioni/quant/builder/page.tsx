@@ -337,19 +337,24 @@ export default function BuilderPage() {
     const monthsOfData = monthlyReturns.length
     const tradesPerMonth = monthsOfData > 0 ? totalTradeCount / monthsOfData : 0
 
-    // Sizing efficiency: compare current lots to optimized lots (from sizing engine)
+    // Sizing efficiency: compare REAL avg lots from trades vs optimized lots
     const effInputs = selected.map(s => {
       const stratTrades = trades.filter(t => t.strategy_id === s.id)
       const totalPl = stratTrades.reduce((sum, t) => sum + t.net_profit, 0)
-      const avgTrade = stratTrades.length > 0 ? totalPl / stratTrades.length : 0
-      // Compare baseLots (proportional/original) vs optimized (Kelly/HRP)
-      // Use baseLots as "current" to avoid 100% efficiency when optimized is already applied
+      // Real average lots from actual trade data
+      const realAvgLots = stratTrades.length > 0
+        ? stratTrades.reduce((sum, t) => sum + t.lots, 0) / stratTrades.length
+        : s.baseLots
+      // Optimized lots from Kelly/HRP engine
       const optLots = sizingOutput?.results.find(r => r.strategyId === s.id)?.recommendedLots ?? s.userLots
       return {
         strategyId: s.id,
-        currentLots: s.baseLots,      // original proportional lots (pre-optimization)
-        optimizedLots: optLots,        // Kelly/HRP recommended lots
-        avgTradeAtCurrentLots: avgTrade * stratTrades.length, // total P/L for this strategy
+        magic: s.magic,
+        name: s.name || 'M' + s.magic,
+        realAvgLots,
+        optimizedLots: optLots,
+        realPnl: totalPl,
+        trades: stratTrades.length,
       }
     })
 
@@ -1086,6 +1091,15 @@ ${curveData.curves.sort((a, b) => a.magic - b.magic).map(c => `Magic ${String(c.
       </table>
     </div>
     <div>
+      <h3>Dettaglio per Strategia</h3>
+      <table>
+        <tr><th>Strategia</th><th class="text-right">Lotti Reali</th><th class="text-right">Lotti Ottim.</th><th class="text-right">Rapporto</th><th class="text-right">P/L Reale</th><th class="text-right">P/L Stimato</th></tr>
+        ${projectionData.efficiency.perStrategy.map(s =>
+          '<tr><td>M' + s.magic + ' ' + s.name + '</td><td class="text-right">' + fmtR(s.realAvgLots, 3) + '</td><td class="text-right" style="color:#4f46e5">' + fmtR(s.optimizedLots, 3) + '</td><td class="text-right"><span style="padding:1px 4px;border-radius:4px;font-size:9px;background:' + (s.ratio >= 0.8 && s.ratio <= 1.2 ? '#dcfce7;color:#16a34a' : s.ratio < 0.8 ? '#fee2e2;color:#dc2626' : '#fef3c7;color:#b45309') + '">' + fmtR(s.ratio * 100, 0) + '%</span></td><td class="text-right" style="color:' + plC(s.realPnl) + '">' + fmtM(s.realPnl) + '</td><td class="text-right" style="color:' + plC(s.estimatedPnl) + '">' + fmtM(s.estimatedPnl) + '</td></tr>'
+        ).join('')}
+      </table>
+    </div>
+    <div>
       <h3>Proiezione Monte Carlo (${projectionData.projection.monthsOfData} mesi dati)</h3>
       <table>
         <tr><th>Scenario</th><th class="text-right">P/L 6M</th><th class="text-right">P/L 12M</th><th class="text-right">Equity 12M</th><th class="text-right">Rend.</th></tr>
@@ -1536,8 +1550,8 @@ ${curveData.curves.sort((a, b) => a.magic - b.magic).map(c => `Magic ${String(c.
         <div className="bg-white rounded-xl border border-slate-200 p-4">
           <h3 className="text-sm font-semibold text-slate-700 mb-3">Proiezione & Efficienza Sizing</h3>
 
-          {/* Sizing Efficiency row */}
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+          {/* Sizing Efficiency KPI */}
+          <div className="grid grid-cols-3 gap-3 mb-3">
             <div className="bg-slate-50 rounded-lg p-3">
               <div className="text-[10px] uppercase text-slate-400 tracking-wide">Efficienza Sizing</div>
               <div className={`text-lg font-bold font-mono ${
@@ -1546,52 +1560,73 @@ ${curveData.curves.sort((a, b) => a.magic - b.magic).map(c => `Magic ${String(c.
               }`}>
                 {fmt(projectionData.efficiency.efficiencyPct, 0)}%
               </div>
-              <div className="text-[10px] text-slate-400">P/L attuale vs ottimizzato</div>
+              <div className="text-[10px] text-slate-400">
+                {fmt(projectionData.efficiency.avgLotRatio * 100, 0)}% dei lotti ottimali
+              </div>
             </div>
             <div className="bg-slate-50 rounded-lg p-3">
-              <div className="text-[10px] uppercase text-slate-400 tracking-wide">P/L Attuale</div>
+              <div className="text-[10px] uppercase text-slate-400 tracking-wide">P/L Reale</div>
               <div className={`text-lg font-bold font-mono ${projectionData.efficiency.currentPnl >= 0 ? 'text-green-600' : 'text-red-600'}`}>
                 {fmtUsd(projectionData.efficiency.currentPnl)}
               </div>
-              <div className="text-[10px] text-slate-400">Con sizing corrente</div>
+              <div className="text-[10px] text-slate-400">Con lotti reali dai trade</div>
             </div>
             <div className="bg-slate-50 rounded-lg p-3">
-              <div className="text-[10px] uppercase text-slate-400 tracking-wide">P/L Ottimizzato</div>
+              <div className="text-[10px] uppercase text-slate-400 tracking-wide">P/L Stimato (Ottimizzato)</div>
               <div className={`text-lg font-bold font-mono ${projectionData.efficiency.optimizedPnl >= 0 ? 'text-green-600' : 'text-red-600'}`}>
                 {fmtUsd(projectionData.efficiency.optimizedPnl)}
               </div>
-              <div className="text-[10px] text-slate-400">Con Kelly/HRP</div>
-            </div>
-            <div className="bg-slate-50 rounded-lg p-3">
-              <div className="text-[10px] uppercase text-slate-400 tracking-wide">Gap</div>
-              <div className={`text-lg font-bold font-mono ${projectionData.efficiency.gapPnl > 0 ? 'text-amber-600' : 'text-green-600'}`}>
-                {projectionData.efficiency.gapPnl > 0 ? '+' : ''}{fmtUsd(projectionData.efficiency.gapPnl)}
-              </div>
               <div className="text-[10px] text-slate-400">
-                {projectionData.efficiency.underSized > 0 && `${projectionData.efficiency.underSized} sotto-dimensionate`}
-                {projectionData.efficiency.underSized > 0 && projectionData.efficiency.overSized > 0 && ' · '}
-                {projectionData.efficiency.overSized > 0 && `${projectionData.efficiency.overSized} sovra-dimensionate`}
-                {projectionData.efficiency.underSized === 0 && projectionData.efficiency.overSized === 0 && 'Sizing bilanciato'}
+                Gap: <span className="text-amber-600 font-medium">{fmtUsd(projectionData.efficiency.gapPnl)}</span>
               </div>
             </div>
           </div>
 
-          {/* Efficiency bar */}
-          <div className="mb-5">
-            <div className="flex items-center justify-between text-[10px] text-slate-500 mb-1">
-              <span>Sfruttamento capacità conto</span>
-              <span className="font-mono">{fmt(projectionData.efficiency.avgLotRatio * 100, 0)}% dei lotti ottimali</span>
+          {/* Per-strategy sizing comparison table */}
+          {projectionData.efficiency.perStrategy.length > 0 && (
+            <div className="mb-4">
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className="text-[10px] uppercase text-slate-400 border-b border-slate-100">
+                      <th className="text-left py-1.5 pr-2">Strategia</th>
+                      <th className="text-right py-1.5 px-2">Lotti Reali</th>
+                      <th className="text-right py-1.5 px-2">Lotti Ottim.</th>
+                      <th className="text-right py-1.5 px-2">Rapporto</th>
+                      <th className="text-right py-1.5 px-2">P/L Reale</th>
+                      <th className="text-right py-1.5 pl-2">P/L Stimato</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {projectionData.efficiency.perStrategy.map(s => (
+                      <tr key={s.strategyId} className="border-b border-slate-50">
+                        <td className="py-1.5 pr-2">
+                          <span className="font-mono text-slate-400 mr-1">M{s.magic}</span>
+                          <span className="text-slate-700">{s.name}</span>
+                        </td>
+                        <td className="text-right py-1.5 px-2 font-mono font-medium">{fmt(s.realAvgLots, 3)}</td>
+                        <td className="text-right py-1.5 px-2 font-mono text-indigo-600">{fmt(s.optimizedLots, 3)}</td>
+                        <td className="text-right py-1.5 px-2">
+                          <span className={`font-mono text-[10px] px-1.5 py-0.5 rounded ${
+                            s.ratio >= 0.8 && s.ratio <= 1.2 ? 'bg-green-100 text-green-700' :
+                            s.ratio < 0.8 ? 'bg-red-100 text-red-700' : 'bg-amber-100 text-amber-700'
+                          }`}>
+                            {fmt(s.ratio * 100, 0)}%
+                          </span>
+                        </td>
+                        <td className={`text-right py-1.5 px-2 font-mono ${s.realPnl >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                          {fmtUsd(s.realPnl)}
+                        </td>
+                        <td className={`text-right py-1.5 pl-2 font-mono ${s.estimatedPnl >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                          {fmtUsd(s.estimatedPnl)}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
             </div>
-            <div className="w-full h-2.5 bg-slate-100 rounded-full overflow-hidden">
-              <div
-                className={`h-full rounded-full transition-all ${
-                  projectionData.efficiency.avgLotRatio >= 0.8 ? 'bg-green-500' :
-                  projectionData.efficiency.avgLotRatio >= 0.5 ? 'bg-amber-500' : 'bg-red-500'
-                }`}
-                style={{ width: `${Math.min(100, projectionData.efficiency.avgLotRatio * 100)}%` }}
-              />
-            </div>
-          </div>
+          )}
 
           {/* Projection table */}
           <div className="border-t border-slate-100 pt-3">

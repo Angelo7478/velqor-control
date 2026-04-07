@@ -1658,15 +1658,28 @@ export function runScenarioComparison(
 // SIZING EFFICIENCY & EQUITY PROJECTION
 // ============================================
 
+export interface StrategySizingDetail {
+  strategyId: string
+  magic: number
+  name: string
+  realAvgLots: number       // average lots from actual trades
+  optimizedLots: number     // Kelly/HRP suggested lots
+  ratio: number             // realAvgLots / optimizedLots
+  realPnl: number           // actual P/L
+  estimatedPnl: number      // P/L if traded at optimized lots
+  trades: number
+}
+
 export interface SizingEfficiency {
-  currentPnl: number          // actual P/L with current lots
+  currentPnl: number          // actual P/L with real lots
   optimizedPnl: number        // estimated P/L with optimal lots
   efficiencyPct: number       // currentPnl / optimizedPnl * 100
   gapPnl: number              // optimizedPnl - currentPnl
   gapPct: number              // how much more you could earn %
-  avgLotRatio: number         // avg(currentLot / optimalLot)
+  avgLotRatio: number         // avg(realLot / optimalLot)
   underSized: number          // count of strategies using < 80% of optimal
   overSized: number           // count using > 120% of optimal
+  perStrategy: StrategySizingDetail[]  // per-strategy breakdown
 }
 
 export interface ProjectionScenario {
@@ -1694,8 +1707,15 @@ export interface EquityProjection {
  * Calculate sizing efficiency: how well current lots exploit the account capacity.
  * Compares actual P/L to what the P/L would have been with optimized (Kelly/HRP) lots.
  */
+/**
+ * Calculate sizing efficiency using REAL lots from trades vs optimized lots.
+ */
 export function calcSizingEfficiency(
-  strategies: { strategyId: string; currentLots: number; optimizedLots: number; avgTradeAtCurrentLots: number }[],
+  strategies: {
+    strategyId: string; magic: number; name: string;
+    realAvgLots: number; optimizedLots: number;
+    realPnl: number; trades: number;
+  }[],
 ): SizingEfficiency {
   let currentPnl = 0
   let optimizedPnl = 0
@@ -1703,33 +1723,48 @@ export function calcSizingEfficiency(
   let lotRatioCount = 0
   let underSized = 0
   let overSized = 0
+  const perStrategy: StrategySizingDetail[] = []
 
   for (const s of strategies) {
-    const curr = s.currentLots
+    const real = s.realAvgLots
     const opt = s.optimizedLots
-    if (opt <= 0 || curr <= 0) continue
+    if (opt <= 0 || real <= 0) continue
 
-    const ratio = curr / opt
+    const ratio = real / opt
     lotRatioSum += ratio
     lotRatioCount++
 
-    // Current P/L = actual avg trade * number implied
-    // We use avgTrade at current lots as-is
-    currentPnl += s.avgTradeAtCurrentLots
+    // Real P/L is actual
+    currentPnl += s.realPnl
 
-    // Optimized P/L = scale avg trade by lot ratio
-    optimizedPnl += s.avgTradeAtCurrentLots * (opt / curr)
+    // Estimated P/L if traded at optimized lots: scale by ratio
+    const estPnl = s.realPnl * (opt / real)
+    optimizedPnl += estPnl
 
     if (ratio < 0.8) underSized++
     else if (ratio > 1.2) overSized++
+
+    perStrategy.push({
+      strategyId: s.strategyId,
+      magic: s.magic,
+      name: s.name,
+      realAvgLots: real,
+      optimizedLots: opt,
+      ratio,
+      realPnl: s.realPnl,
+      estimatedPnl: Math.round(estPnl),
+      trades: s.trades,
+    })
   }
+
+  perStrategy.sort((a, b) => b.realPnl - a.realPnl)
 
   const avgLotRatio = lotRatioCount > 0 ? lotRatioSum / lotRatioCount : 1
   const efficiencyPct = optimizedPnl !== 0 ? (currentPnl / optimizedPnl) * 100 : 100
   const gapPnl = optimizedPnl - currentPnl
   const gapPct = currentPnl !== 0 ? (gapPnl / Math.abs(currentPnl)) * 100 : 0
 
-  return { currentPnl, optimizedPnl, efficiencyPct, gapPnl, gapPct, avgLotRatio, underSized, overSized }
+  return { currentPnl, optimizedPnl, efficiencyPct, gapPnl, gapPct, avgLotRatio, underSized, overSized, perStrategy }
 }
 
 /**
