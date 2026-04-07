@@ -1164,6 +1164,284 @@ export type KellyMode = typeof KELLY_MODES[number]
 
 export const MONTHS = ['Gen', 'Feb', 'Mar', 'Apr', 'Mag', 'Giu', 'Lug', 'Ago', 'Set', 'Ott', 'Nov', 'Dic']
 
+// --- Margin Specs (FTMO CFD) ---
+
+export interface FtmoMarginSpec {
+  symbol: string
+  assetClass: 'forex' | 'index' | 'commodity' | 'crypto'
+  leverageRatio: number   // e.g. 100 for 1:100
+  marginPct: number       // e.g. 0.01 for 1%
+  contractSize: number    // units per 1.0 lot
+  contractCurrency: 'USD' | 'EUR'
+}
+
+export const FTMO_MARGIN_SPECS: Record<string, FtmoMarginSpec> = {
+  'USDCAD':     { symbol: 'USDCAD',     assetClass: 'forex',     leverageRatio: 100, marginPct: 0.01,  contractSize: 100_000, contractCurrency: 'USD' },
+  'USDJPY':     { symbol: 'USDJPY',     assetClass: 'forex',     leverageRatio: 100, marginPct: 0.01,  contractSize: 100_000, contractCurrency: 'USD' },
+  'GER40.cash': { symbol: 'GER40.cash', assetClass: 'index',     leverageRatio: 20,  marginPct: 0.05,  contractSize: 1,       contractCurrency: 'EUR' },
+  'US500.cash': { symbol: 'US500.cash', assetClass: 'index',     leverageRatio: 20,  marginPct: 0.05,  contractSize: 1,       contractCurrency: 'USD' },
+  'US100.cash': { symbol: 'US100.cash', assetClass: 'index',     leverageRatio: 20,  marginPct: 0.05,  contractSize: 1,       contractCurrency: 'USD' },
+  'UKOIL.cash': { symbol: 'UKOIL.cash', assetClass: 'commodity', leverageRatio: 10,  marginPct: 0.10,  contractSize: 100,     contractCurrency: 'USD' },
+  'BTCUSD':     { symbol: 'BTCUSD',     assetClass: 'crypto',    leverageRatio: 2,   marginPct: 0.50,  contractSize: 1,       contractCurrency: 'USD' },
+}
+
+// Fallback prices when no trade data is available
+export const DEFAULT_REF_PRICES: Record<string, number> = {
+  'GER40.cash': 23000,
+  'US500.cash': 5800,
+  'US100.cash': 20000,
+  'BTCUSD': 85000,
+  'UKOIL.cash': 70,
+  'USDCAD': 1.38,
+  'USDJPY': 150,
+}
+
+export interface MarginCalcResult {
+  symbol: string
+  lots: number
+  refPrice: number
+  notionalValue: number
+  marginRequired: number
+  marginPct: number
+  leverageRatio: number
+}
+
+export interface PortfolioMarginResult {
+  perStrategy: MarginCalcResult[]
+  totalNotional: number
+  totalMarginRequired: number
+  marginUtilizationPct: number
+  freeMargin: number
+  freeMarginPct: number
+  leverageEffective: number
+}
+
+export function calcMarginForPosition(
+  symbol: string,
+  lots: number,
+  refPrice: number,
+  eurUsdRate = 1.08
+): MarginCalcResult | null {
+  const spec = FTMO_MARGIN_SPECS[symbol]
+  if (!spec || lots <= 0 || refPrice <= 0) return null
+
+  let notionalValue: number
+  if (spec.assetClass === 'forex') {
+    // Forex: notional = lots × contract size (in base currency)
+    notionalValue = lots * spec.contractSize
+  } else {
+    // Index / commodity / crypto: notional = lots × contractSize × price
+    notionalValue = lots * spec.contractSize * refPrice
+  }
+
+  // Convert EUR-denominated notional to USD
+  if (spec.contractCurrency === 'EUR') {
+    notionalValue *= eurUsdRate
+  }
+
+  const marginRequired = notionalValue * spec.marginPct
+
+  return {
+    symbol,
+    lots,
+    refPrice,
+    notionalValue: Math.round(notionalValue * 100) / 100,
+    marginRequired: Math.round(marginRequired * 100) / 100,
+    marginPct: spec.marginPct,
+    leverageRatio: spec.leverageRatio,
+  }
+}
+
+export function calcPortfolioMargin(
+  strategies: { symbol: string; lots: number; refPrice: number }[],
+  equityBase: number,
+  eurUsdRate = 1.08
+): PortfolioMarginResult {
+  const perStrategy: MarginCalcResult[] = []
+  for (const s of strategies) {
+    const result = calcMarginForPosition(s.symbol, s.lots, s.refPrice, eurUsdRate)
+    if (result) perStrategy.push(result)
+  }
+
+  const totalNotional = perStrategy.reduce((sum, m) => sum + m.notionalValue, 0)
+  const totalMarginRequired = perStrategy.reduce((sum, m) => sum + m.marginRequired, 0)
+  const marginUtilizationPct = equityBase > 0 ? (totalMarginRequired / equityBase) * 100 : 0
+  const freeMargin = equityBase - totalMarginRequired
+  const freeMarginPct = equityBase > 0 ? (freeMargin / equityBase) * 100 : 0
+  const leverageEffective = equityBase > 0 ? totalNotional / equityBase : 0
+
+  return {
+    perStrategy,
+    totalNotional: Math.round(totalNotional * 100) / 100,
+    totalMarginRequired: Math.round(totalMarginRequired * 100) / 100,
+    marginUtilizationPct: Math.round(marginUtilizationPct * 100) / 100,
+    freeMargin: Math.round(freeMargin * 100) / 100,
+    freeMarginPct: Math.round(freeMarginPct * 100) / 100,
+    leverageEffective: Math.round(leverageEffective * 100) / 100,
+  }
+}
+
+// --- AI Sizing Advisor ---
+
+export interface AdvisorInput {
+  strategyId: string
+  magic: number
+  name: string
+  style: string | null
+  // Fitness
+  fitnessScore: number
+  fitnessConfidence: number
+  // Health-like signals
+  realTrades: number
+  realWinPct: number | null
+  testWinPct: number | null
+  realExpectancy: number | null
+  testExpectancy: number | null
+  realPl: number
+  realMaxDd: number | null
+  testMaxDd: number | null
+  // Pendulum inputs
+  consecLosses: number
+  ddFromPeak: number
+  pendulumMultiplier: number
+  pendulumState: string
+  // Current lot
+  currentLots: number
+}
+
+export interface AdvisorRecommendation {
+  strategyId: string
+  magic: number
+  name: string
+  action: 'increase' | 'decrease' | 'hold' | 'pause' | 'monitor'
+  lotMultiplier: number
+  suggestedLots: number
+  severity: 'info' | 'warning' | 'critical'
+  reason: string
+  details: string[]
+}
+
+export interface AdvisorSummary {
+  recommendations: AdvisorRecommendation[]
+  portfolioHealth: 'good' | 'attention' | 'critical'
+  summary: string
+  totalStrategies: number
+  healthyCount: number
+  warningCount: number
+  criticalCount: number
+}
+
+export function generateSizingAdvice(inputs: AdvisorInput[]): AdvisorSummary {
+  const recommendations: AdvisorRecommendation[] = []
+  let healthyCount = 0
+  let warningCount = 0
+  let criticalCount = 0
+
+  for (const s of inputs) {
+    const rec: AdvisorRecommendation = {
+      strategyId: s.strategyId,
+      magic: s.magic,
+      name: s.name,
+      action: 'hold',
+      lotMultiplier: 1.0,
+      suggestedLots: s.currentLots,
+      severity: 'info',
+      reason: '',
+      details: [],
+    }
+
+    const isOutperforming = (s.realExpectancy ?? 0) >= 0 && s.realPl > 0
+    const testDd = s.testMaxDd ?? 0
+    const realDd = s.realMaxDd ?? 0
+    const ddRatio = testDd > 0 ? realDd / testDd : 0
+    const winDrop = (s.testWinPct && s.realWinPct != null)
+      ? s.testWinPct - s.realWinPct
+      : 0
+
+    // Priority 1: Insufficient data
+    if (s.realTrades < 5) {
+      rec.action = 'monitor'
+      rec.severity = 'info'
+      rec.reason = 'Dati insufficienti — mantenere sizing attuale e raccogliere dati'
+      rec.details.push(`Solo ${s.realTrades} trade reali`)
+      healthyCount++
+    }
+    // Priority 2: Critical — DD breach + negative edge
+    else if (ddRatio > 2 && !isOutperforming && s.fitnessConfidence > 0.6) {
+      rec.action = 'decrease'
+      rec.lotMultiplier = 0.7
+      rec.severity = 'critical'
+      rec.reason = 'DD reale > 2x test con edge negativo — ridurre del 30%'
+      rec.details.push(`DD ratio: ${fmt(ddRatio, 1)}x`, `P/L: $${fmt(s.realPl, 0)}`)
+      criticalCount++
+    }
+    // Priority 3: Regime mismatch (trend strategy underperforming)
+    else if (s.style === 'trend_following' && !isOutperforming && s.realTrades >= 10) {
+      rec.action = 'hold'
+      rec.severity = 'warning'
+      rec.reason = 'Possibile regime sfavorevole — mantenere per validazione OOS'
+      rec.details.push('Strategia trend con expectancy negativa', 'Non fermare: arricchisce il database')
+      warningCount++
+    }
+    // Priority 4: Warning — DD elevated
+    else if (ddRatio > 1.5 && s.fitnessScore < 60) {
+      rec.action = 'decrease'
+      rec.lotMultiplier = 0.85
+      rec.severity = 'warning'
+      rec.reason = 'DD sopra soglia con fitness basso — ridurre del 15%'
+      rec.details.push(`Fitness: ${fmt(s.fitnessScore, 0)}/100`, `DD ratio: ${fmt(ddRatio, 1)}x`)
+      warningCount++
+    }
+    // Priority 5: Warning — Win rate drop but still profitable
+    else if (winDrop > 15 && isOutperforming) {
+      rec.action = 'hold'
+      rec.severity = 'info'
+      rec.reason = 'Win rate in calo ma P/L positivo — monitorare'
+      rec.details.push(`Win rate: ${fmt(s.realWinPct ?? 0, 1)}% (test: ${fmt(s.testWinPct ?? 0, 1)}%)`)
+      healthyCount++
+    }
+    // Priority 6: Healthy + outperforming + pendulum recovery/drawdown
+    else if (isOutperforming && s.pendulumState === 'drawdown' && s.fitnessScore >= 50) {
+      rec.action = 'increase'
+      rec.lotMultiplier = s.pendulumMultiplier
+      rec.severity = 'info'
+      rec.reason = `Edge confermato in fase recovery — pendulum ${fmt(s.pendulumMultiplier, 2)}x`
+      rec.details.push(`Fitness: ${fmt(s.fitnessScore, 0)}/100`, `DD dal picco: ${fmt(s.ddFromPeak, 1)}%`)
+      healthyCount++
+    }
+    // Priority 7: Healthy + high fitness
+    else if (s.fitnessScore >= 80 && isOutperforming && s.realTrades >= 30) {
+      rec.action = 'increase'
+      rec.lotMultiplier = 1.1
+      rec.severity = 'info'
+      rec.reason = 'Fitness eccellente e edge confermato — margine per +10%'
+      rec.details.push(`Fitness: ${fmt(s.fitnessScore, 0)}/100`, `${s.realTrades} trade reali`)
+      healthyCount++
+    }
+    // Default: Hold
+    else {
+      rec.action = 'hold'
+      rec.severity = 'info'
+      rec.reason = 'Performance in linea — sizing ottimale'
+      if (s.fitnessScore > 0) rec.details.push(`Fitness: ${fmt(s.fitnessScore, 0)}/100`)
+      healthyCount++
+    }
+
+    rec.suggestedLots = Math.max(0.01, Math.round(s.currentLots * rec.lotMultiplier * 1000) / 1000)
+    recommendations.push(rec)
+  }
+
+  const portfolioHealth = criticalCount > 0 ? 'critical' : warningCount > 0 ? 'attention' : 'good'
+  const total = inputs.length
+  const summary = portfolioHealth === 'good'
+    ? `${total} strategie analizzate — portafoglio in buona salute`
+    : portfolioHealth === 'attention'
+    ? `${total} strategie analizzate — ${warningCount} richiedono attenzione`
+    : `${total} strategie analizzate — ${criticalCount} in stato critico`
+
+  return { recommendations, portfolioHealth, summary, totalStrategies: total, healthyCount, warningCount, criticalCount }
+}
+
 // --- Monte Carlo Simulation ---
 
 export interface MCPath {
@@ -1366,6 +1644,7 @@ export interface TradeForCurve {
   lots: number
   close_time: string
   symbol: string
+  open_price?: number
 }
 
 export interface EquityCurvePoint {

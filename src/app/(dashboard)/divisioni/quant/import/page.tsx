@@ -31,9 +31,19 @@ export default function ImportTradePage() {
   const [preview, setPreview] = useState<Record<string, string>[]>([])
   const [importing, setImporting] = useState(false)
   const [result, setResult] = useState<{ imported: number; skipped: number; errors: string[] } | null>(null)
-  const [strategies, setStrategies] = useState<{ id: string; magic: number }[]>([])
+  const [strategies, setStrategies] = useState<{ id: string; magic: number; name: string | null }[]>([])
   const [progress, setProgress] = useState('')
   const fileRef = useRef<HTMLInputElement>(null)
+
+  // --- Import mode toggle ---
+  const [importMode, setImportMode] = useState<'trades' | 'sqx_tests'>('trades')
+
+  // --- SQX Test import state ---
+  const [sqxText, setSqxText] = useState('')
+  const [sqxParsed, setSqxParsed] = useState<{ magic: number; strategyId: string; strategyName: string; trades: number; winPct: number; payoff: number; expectancy: number; maxDd: number; retDd: number; mc95Dd: number; stability: number; avgWin: number; avgLoss: number; maxConsecLoss: number; worstTrade: number; ulcerIndex: number; exposurePct: number; overlapMed: number; overlapMax: number }[]>([])
+  const [sqxImporting, setSqxImporting] = useState(false)
+  const [sqxResult, setSqxResult] = useState<{ imported: number; skipped: number; errors: string[] } | null>(null)
+  const [sqxProgress, setSqxProgress] = useState('')
 
   useEffect(() => {
     loadData()
@@ -43,7 +53,7 @@ export default function ImportTradePage() {
     const supabase = createClient()
     const [accRes, stratRes] = await Promise.all([
       supabase.from('qel_accounts').select('*').order('name'),
-      supabase.from('qel_strategies').select('id,magic'),
+      supabase.from('qel_strategies').select('id,magic,name'),
     ])
     setAccounts(accRes.data || [])
     setStrategies(stratRes.data || [])
@@ -310,15 +320,288 @@ export default function ImportTradePage() {
     setProgress('')
   }
 
+  // --- SQX Test parsing ---
+  const SQX_HEADER_MAP: Record<string, string> = {
+    'magic': 'magic', 'trades': 'trades', 'win%': 'winPct', 'win %': 'winPct',
+    'avgwin': 'avgWin', 'avg win': 'avgWin', 'avgloss': 'avgLoss', 'avg loss': 'avgLoss',
+    'payoff': 'payoff', 'expectancy': 'expectancy', 'loss consec max': 'maxConsecLoss',
+    'worsttrade': 'worstTrade', 'worst trade': 'worstTrade', 'maxdd': 'maxDd', 'max dd': 'maxDd',
+    'ret/dd': 'retDd', 'mc95%dd': 'mc95Dd', 'mc95% dd': 'mc95Dd', 'mc 95% dd': 'mc95Dd',
+    'stability': 'stability', 'ulcer index %': 'ulcerIndex', 'ulcer index': 'ulcerIndex',
+    'exposure %': 'exposurePct', 'exposure': 'exposurePct',
+    'overlapmed': 'overlapMed', 'overlap med': 'overlapMed',
+    'overlapmax': 'overlapMax', 'overlap max': 'overlapMax',
+  }
+
+  function parseSqxMetriche(text: string) {
+    const lines = text.split('\n').filter(l => l.trim())
+    if (lines.length < 2) return []
+    // Detect separator
+    const sep = lines[0].includes('\t') ? '\t' : lines[0].includes(';') ? ';' : ','
+    const rawHeaders = lines[0].split(sep).map(h => h.replace(/"/g, '').trim())
+    const headerMap: number[] = [] // index in rawHeaders for each mapped field
+    const fieldNames: string[] = []
+    rawHeaders.forEach((h, idx) => {
+      const key = cleanKey(h)
+      if (SQX_HEADER_MAP[key]) {
+        headerMap.push(idx)
+        fieldNames.push(SQX_HEADER_MAP[key])
+      }
+    })
+
+    const stratMap = new Map(strategies.map(s => [s.magic, { id: s.id, name: s.name || `M${s.magic}` }]))
+    const results: typeof sqxParsed = []
+    for (let i = 1; i < lines.length; i++) {
+      const cells = lines[i].split(sep).map(c => c.replace(/"/g, '').trim())
+      const obj: Record<string, number> = {}
+      fieldNames.forEach((field, idx) => {
+        const val = cells[headerMap[idx]] || ''
+        obj[field] = parseFloat(val.replace(',', '.').replace('%', '')) || 0
+      })
+      const magic = Math.round(obj.magic || 0)
+      if (magic === 0) continue
+      const strat = stratMap.get(magic)
+      if (!strat) continue
+      results.push({
+        magic,
+        strategyId: strat.id,
+        strategyName: strat.name,
+        trades: Math.round(obj.trades || 0),
+        winPct: obj.winPct || 0,
+        payoff: obj.payoff || 0,
+        expectancy: obj.expectancy || 0,
+        maxDd: Math.abs(obj.maxDd || 0),
+        retDd: obj.retDd || 0,
+        mc95Dd: Math.abs(obj.mc95Dd || 0),
+        stability: obj.stability || 0,
+        avgWin: Math.abs(obj.avgWin || 0),
+        avgLoss: Math.abs(obj.avgLoss || 0),
+        maxConsecLoss: Math.round(obj.maxConsecLoss || 0),
+        worstTrade: obj.worstTrade || 0,
+        ulcerIndex: obj.ulcerIndex || 0,
+        exposurePct: obj.exposurePct || 0,
+        overlapMed: obj.overlapMed || 0,
+        overlapMax: obj.overlapMax || 0,
+      })
+    }
+    return results
+  }
+
+  function handleSqxPaste(text: string) {
+    setSqxText(text)
+    setSqxResult(null)
+    const parsed = parseSqxMetriche(text)
+    setSqxParsed(parsed)
+  }
+
+  async function importSqxTests() {
+    if (sqxParsed.length === 0) return
+    setSqxImporting(true)
+    setSqxResult(null)
+    const supabase = createClient()
+    let imported = 0
+    let skipped = 0
+    const errors: string[] = []
+    const today = new Date().toISOString().slice(0, 10)
+
+    for (const row of sqxParsed) {
+      setSqxProgress(`Importando M${row.magic} ${row.strategyName}...`)
+      try {
+        // Insert into qel_strategy_tests
+        const { error: insertErr } = await supabase.from('qel_strategy_tests').insert({
+          strategy_id: row.strategyId,
+          test_type: 'wfm',
+          test_date: today,
+          trades: row.trades,
+          win_pct: row.winPct,
+          payoff: row.payoff,
+          expectancy: row.expectancy,
+          max_dd: row.maxDd,
+          ret_dd: row.retDd,
+          mc95_dd: row.mc95Dd,
+          stability: row.stability,
+          parameters: {
+            avg_win: row.avgWin,
+            avg_loss: row.avgLoss,
+            max_consec_loss: row.maxConsecLoss,
+            worst_trade: row.worstTrade,
+            ulcer_index: row.ulcerIndex,
+            exposure_pct: row.exposurePct,
+            overlap_med: row.overlapMed,
+            overlap_max: row.overlapMax,
+          },
+          notes: `Import SQX ${today}`,
+        })
+        if (insertErr) { errors.push(`M${row.magic}: ${insertErr.message}`); skipped++; continue }
+
+        // Update qel_strategies.test_* with latest values
+        const { error: updateErr } = await supabase.from('qel_strategies').update({
+          test_trades: row.trades,
+          test_win_pct: row.winPct,
+          test_payoff: row.payoff,
+          test_expectancy: row.expectancy,
+          test_max_dd: row.maxDd,
+          test_ret_dd: row.retDd,
+          test_mc95_dd: row.mc95Dd,
+          test_stability: row.stability,
+          test_avg_win: row.avgWin,
+          test_avg_loss: row.avgLoss,
+          test_max_consec_loss: row.maxConsecLoss,
+          test_worst_trade: row.worstTrade,
+          test_ulcer_index: row.ulcerIndex,
+          test_exposure_pct: row.exposurePct,
+          test_overlap_med: row.overlapMed,
+          test_overlap_max: row.overlapMax,
+        }).eq('id', row.strategyId)
+        if (updateErr) errors.push(`M${row.magic} update: ${updateErr.message}`)
+
+        imported++
+      } catch (err) {
+        errors.push(`M${row.magic}: ${err instanceof Error ? err.message : 'Errore'}`)
+        skipped++
+      }
+    }
+
+    setSqxResult({ imported, skipped, errors })
+    setSqxImporting(false)
+    setSqxProgress('')
+  }
+
   if (loading) return <p className="text-slate-500 p-4">Caricamento...</p>
 
   return (
     <div className="max-w-4xl mx-auto">
       <div className="mb-6">
         <a href="/divisioni/quant/conti" className="text-sm text-violet-600 hover:text-violet-800">&larr; Torna a Conti</a>
-        <h1 className="text-2xl font-bold text-slate-900 mt-2">Import Trade da CSV</h1>
-        <p className="text-sm text-slate-500 mt-1">Importa lo storico completo da FTMO, MT5 o qualsiasi CSV</p>
+        <h1 className="text-2xl font-bold text-slate-900 mt-2">
+          {importMode === 'trades' ? 'Import Trade da CSV' : 'Import Test SQX'}
+        </h1>
+        <p className="text-sm text-slate-500 mt-1">
+          {importMode === 'trades'
+            ? 'Importa lo storico completo da FTMO, MT5 o qualsiasi CSV'
+            : 'Importa risultati Walk Forward Matrix e Monte Carlo da SQX'}
+        </p>
       </div>
+
+      {/* Mode toggle */}
+      <div className="flex gap-1 mb-4">
+        <button onClick={() => setImportMode('trades')}
+          className={`px-4 py-2 text-sm rounded-lg border transition ${importMode === 'trades' ? 'bg-violet-50 border-violet-300 text-violet-700 font-medium' : 'border-slate-200 text-slate-500 hover:bg-slate-50'}`}>
+          Trade
+        </button>
+        <button onClick={() => setImportMode('sqx_tests')}
+          className={`px-4 py-2 text-sm rounded-lg border transition ${importMode === 'sqx_tests' ? 'bg-violet-50 border-violet-300 text-violet-700 font-medium' : 'border-slate-200 text-slate-500 hover:bg-slate-50'}`}>
+          Test SQX
+        </button>
+      </div>
+
+      {/* ===================== SQX TESTS MODE ===================== */}
+      {importMode === 'sqx_tests' ? (
+        <>
+          {/* SQX: Paste area */}
+          <div className="bg-white rounded-xl border border-slate-200 p-4 mb-4">
+            <h3 className="text-sm font-semibold text-slate-700 mb-2">1. Incolla i dati SQX (Metriche)</h3>
+            <textarea value={sqxText}
+              onChange={e => handleSqxPaste(e.target.value)}
+              placeholder={"Apri QEL_MASTER.xlsx → sheet Metriche → seleziona tutte le righe → Ctrl+C → incolla qui\n\nFormato atteso (separato da tab/virgola/punto e virgola):\nMagic\tTrades\tWin%\tPayoff\tExpectancy\tMaxDD\tMC95%DD\t..."}
+              className="w-full h-40 px-3 py-2 border border-slate-300 rounded-lg text-xs font-mono resize-y" />
+            <p className="text-xs text-slate-400 mt-1">
+              Colonne riconosciute: Magic, Trades, Win%, AvgWin, AvgLoss, Payoff, Expectancy, Loss Consec Max, WorstTrade, MaxDD, Ret/DD, MC95%DD, Stability, Ulcer Index %, Exposure %, OverlapMed, OverlapMax
+            </p>
+          </div>
+
+          {/* SQX: Preview */}
+          {sqxParsed.length > 0 && (
+            <div className="bg-white rounded-xl border border-slate-200 p-4 mb-4">
+              <h3 className="text-sm font-semibold text-slate-700 mb-2">
+                2. Anteprima ({sqxParsed.length} strategie trovate)
+              </h3>
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className="text-slate-500 border-b border-slate-200">
+                      <th className="text-left py-1.5 px-2 font-medium">Magic</th>
+                      <th className="text-left py-1.5 px-2 font-medium">Strategia</th>
+                      <th className="text-right py-1.5 px-2 font-medium">Trade</th>
+                      <th className="text-right py-1.5 px-2 font-medium">Win%</th>
+                      <th className="text-right py-1.5 px-2 font-medium">Payoff</th>
+                      <th className="text-right py-1.5 px-2 font-medium">Expectancy</th>
+                      <th className="text-right py-1.5 px-2 font-medium">MaxDD</th>
+                      <th className="text-right py-1.5 px-2 font-medium">MC95%DD</th>
+                      <th className="text-right py-1.5 px-2 font-medium">Ret/DD</th>
+                      <th className="text-right py-1.5 px-2 font-medium">Stability</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {sqxParsed.map(r => (
+                      <tr key={r.magic}>
+                        <td className="py-1.5 px-2 font-mono text-slate-600">M{r.magic}</td>
+                        <td className="py-1.5 px-2 text-slate-800 truncate max-w-[160px]">{r.strategyName}</td>
+                        <td className="py-1.5 px-2 text-right font-mono">{r.trades}</td>
+                        <td className="py-1.5 px-2 text-right font-mono">{r.winPct.toFixed(1)}%</td>
+                        <td className="py-1.5 px-2 text-right font-mono">{r.payoff.toFixed(2)}</td>
+                        <td className="py-1.5 px-2 text-right font-mono">${r.expectancy.toFixed(2)}</td>
+                        <td className="py-1.5 px-2 text-right font-mono text-red-600">${r.maxDd.toFixed(0)}</td>
+                        <td className="py-1.5 px-2 text-right font-mono text-red-600">${r.mc95Dd.toFixed(0)}</td>
+                        <td className="py-1.5 px-2 text-right font-mono">{r.retDd.toFixed(1)}</td>
+                        <td className="py-1.5 px-2 text-right font-mono">{r.stability.toFixed(2)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {/* SQX: Import button */}
+          {sqxParsed.length > 0 && (
+            <div className="bg-white rounded-xl border border-slate-200 p-4 mb-4">
+              <div className="flex items-center gap-3">
+                <button onClick={importSqxTests} disabled={sqxImporting}
+                  className="px-6 py-2.5 bg-violet-600 text-white rounded-lg text-sm font-medium hover:bg-violet-700 disabled:opacity-50">
+                  {sqxImporting ? 'Importazione...' : `Importa ${sqxParsed.length} test WFM`}
+                </button>
+                {sqxImporting && sqxProgress && <span className="text-sm text-violet-600 animate-pulse">{sqxProgress}</span>}
+              </div>
+              <p className="text-xs text-slate-400 mt-2">Inserisce in qel_strategy_tests + aggiorna qel_strategies.test_*</p>
+            </div>
+          )}
+
+          {/* SQX: Result */}
+          {sqxResult && (
+            <div className={`rounded-xl border p-4 mb-4 ${sqxResult.errors.length > 0 ? 'bg-amber-50 border-amber-200' : 'bg-green-50 border-green-200'}`}>
+              <h3 className={`text-sm font-semibold mb-2 ${sqxResult.errors.length > 0 ? 'text-amber-700' : 'text-green-700'}`}>
+                Risultato import test
+              </h3>
+              <div className="flex gap-4 text-sm">
+                <span className="text-green-700 font-medium">{sqxResult.imported} importati</span>
+                {sqxResult.skipped > 0 && <span className="text-slate-500">{sqxResult.skipped} saltati</span>}
+                {sqxResult.errors.length > 0 && <span className="text-red-600">{sqxResult.errors.length} errori</span>}
+              </div>
+              {sqxResult.errors.length > 0 && (
+                <div className="mt-2 text-xs text-red-600 space-y-1">
+                  {sqxResult.errors.map((e, i) => <p key={i}>{e}</p>)}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* SQX: Help */}
+          <div className="bg-violet-50 rounded-xl p-4">
+            <h3 className="text-sm font-semibold text-violet-700 mb-2">Come esportare da SQX</h3>
+            <ol className="text-xs text-violet-600 space-y-1 list-decimal list-inside">
+              <li>Apri <strong>QEL_MASTER.xlsx</strong> in Excel/Google Sheets</li>
+              <li>Vai al foglio <strong>Metriche</strong></li>
+              <li>Seleziona tutte le righe (header + dati) con Ctrl+A</li>
+              <li>Copia con Ctrl+C</li>
+              <li>Torna qui e incolla con Ctrl+V nel box sopra</li>
+            </ol>
+            <p className="text-xs text-violet-500 mt-2">Ogni import crea un nuovo snapshot storico nella tabella qel_strategy_tests e aggiorna i campi test_* sulle strategie.</p>
+          </div>
+        </>
+      ) : (
+      <>
+      {/* ===================== TRADES MODE (original) ===================== */}
 
       {/* Step 1: Select account */}
       <div className="bg-white rounded-xl border border-slate-200 p-4 mb-4">
@@ -448,6 +731,8 @@ export default function ImportTradePage() {
           </div>
         </div>
       </div>
+      </>
+      )}
     </div>
   )
 }

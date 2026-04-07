@@ -8,8 +8,12 @@ import {
   CHART_COLORS, PORTFOLIO_COLOR,
   buildEquityCurves, TradeForCurve, StrategyEquityCurve, CombinedCurvePoint, PortfolioStats, CurveStats,
   runSizingEngine, SizingInput, PortfolioSizingOutput, KellyMode,
+  calcPortfolioMargin, PortfolioMarginResult, DEFAULT_REF_PRICES,
+  calcFitnessScore, detectPendulumState,
+  generateSizingAdvice, AdvisorInput, AdvisorSummary,
 } from '@/lib/quant-utils'
 import QuantNav from '../quant-nav'
+import { VELQOR_LOGO_BASE64 } from '@/lib/velqor-logo'
 import InfoTooltip from '@/components/ui/InfoTooltip'
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend,
@@ -68,6 +72,9 @@ export default function BuilderPage() {
   const [saving, setSaving] = useState(false)
   const [loadingPtf, setLoadingPtf] = useState(false)
 
+  // Margin
+  const [refPrices, setRefPrices] = useState<Map<string, number>>(new Map())
+
   // ---- Load data ----
   useEffect(() => { loadAccounts() }, [])
 
@@ -105,7 +112,7 @@ export default function BuilderPage() {
     // Load closed trades for selected account
     const { data: tradeData } = await supabase
       .from('qel_trades')
-      .select('strategy_id, net_profit, lots, close_time, symbol')
+      .select('strategy_id, net_profit, lots, close_time, symbol, open_price')
       .eq('account_id', selectedAccountId)
       .eq('is_open', false)
       .not('strategy_id', 'is', null)
@@ -175,7 +182,24 @@ export default function BuilderPage() {
         lots: Number(t.lots),
         close_time: t.close_time!,
         symbol: t.symbol,
+        open_price: t.open_price != null ? Number(t.open_price) : undefined,
       })))
+
+      // Build reference prices per symbol (avg open_price from trades)
+      const priceAgg = new Map<string, { sum: number; count: number }>()
+      for (const t of tradeData) {
+        if (t.open_price == null || Number(t.open_price) <= 0) continue
+        const sym = t.symbol
+        if (!priceAgg.has(sym)) priceAgg.set(sym, { sum: 0, count: 0 })
+        const e = priceAgg.get(sym)!
+        e.sum += Number(t.open_price)
+        e.count++
+      }
+      const priceMap = new Map<string, number>()
+      for (const [sym, agg] of priceAgg) {
+        priceMap.set(sym, agg.count > 0 ? agg.sum / agg.count : (DEFAULT_REF_PRICES[sym] ?? 0))
+      }
+      setRefPrices(priceMap)
     }
 
     setLoading(false)
@@ -203,6 +227,105 @@ export default function BuilderPage() {
 
     return buildEquityCurves(trades, stratMap, equityBase)
   }, [strategies, trades, equityBase])
+
+  // ---- Margin calculation (memoized) ----
+  const marginData = useMemo<PortfolioMarginResult | null>(() => {
+    const selected = strategies.filter(s => s.selected)
+    if (selected.length === 0) return null
+
+    const inputs = selected.map(s => ({
+      symbol: s.asset,
+      lots: s.userLots,
+      refPrice: refPrices.get(s.asset) ?? DEFAULT_REF_PRICES[s.asset] ?? 0,
+    }))
+
+    return calcPortfolioMargin(inputs, equityBase)
+  }, [strategies, equityBase, refPrices])
+
+  // ---- Sizing Advisor (memoized) ----
+  const advisorData = useMemo<AdvisorSummary | null>(() => {
+    const selected = strategies.filter(s => s.selected && s.tradeCount > 0)
+    if (selected.length === 0 || trades.length === 0) return null
+
+    const inputs: AdvisorInput[] = selected.map(s => {
+      // Compute per-strategy stats from trades
+      const stratTrades = trades.filter(t => t.strategy_id === s.id)
+      const wins = stratTrades.filter(t => t.net_profit > 0)
+      const losses = stratTrades.filter(t => t.net_profit <= 0)
+      const totalPl = stratTrades.reduce((sum, t) => sum + t.net_profit, 0)
+      const realWinPct = stratTrades.length > 0 ? (wins.length / stratTrades.length) * 100 : null
+      const avgWin = wins.length > 0 ? wins.reduce((s, t) => s + t.net_profit, 0) / wins.length : 0
+      const avgLoss = losses.length > 0 ? Math.abs(losses.reduce((s, t) => s + t.net_profit, 0) / losses.length) : 0
+      const realPayoff = avgLoss > 0 ? avgWin / avgLoss : 0
+      const realExpectancy = stratTrades.length > 0 ? totalPl / stratTrades.length : null
+
+      // Max DD from equity curve
+      let peak = 0, maxDd = 0, cumPnl = 0
+      for (const t of stratTrades) {
+        cumPnl += t.net_profit
+        if (cumPnl > peak) peak = cumPnl
+        const dd = peak - cumPnl
+        if (dd > maxDd) maxDd = dd
+      }
+
+      // Consecutive losses (from end of trade series)
+      let consecLosses = 0
+      for (let i = stratTrades.length - 1; i >= 0; i--) {
+        if (stratTrades[i].net_profit <= 0) consecLosses++
+        else break
+      }
+
+      // DD from peak
+      const ddFromPeak = peak > 0 ? ((peak - cumPnl) / peak) * 100 : 0
+
+      // Fitness
+      const fitness = calcFitnessScore({
+        test_win_pct: s.test_win_pct, test_payoff: s.test_payoff,
+        test_max_dd: s.test_max_dd, test_expectancy: s.test_expectancy,
+        real_win_pct: realWinPct, real_payoff: realPayoff,
+        real_max_dd: maxDd, real_expectancy: realExpectancy,
+        real_trades: stratTrades.length,
+      })
+
+      // Pendulum
+      const isOutperforming = (realExpectancy ?? 0) >= 0 && totalPl > 0
+      const pendulum = detectPendulumState(consecLosses, cumPnl, peak, isOutperforming)
+
+      return {
+        strategyId: s.id,
+        magic: s.magic,
+        name: s.name || `M${s.magic}`,
+        style: s.strategy_style,
+        fitnessScore: fitness.score,
+        fitnessConfidence: fitness.confidence,
+        realTrades: stratTrades.length,
+        realWinPct,
+        testWinPct: s.test_win_pct,
+        realExpectancy,
+        testExpectancy: s.test_expectancy,
+        realPl: totalPl,
+        realMaxDd: maxDd,
+        testMaxDd: s.test_max_dd,
+        consecLosses,
+        ddFromPeak,
+        pendulumMultiplier: pendulum.multiplier,
+        pendulumState: pendulum.state,
+        currentLots: s.userLots,
+      }
+    })
+
+    return generateSizingAdvice(inputs)
+  }, [strategies, trades])
+
+  // ---- Apply advisor recommendations ----
+  function applyAdvisorRecommendations() {
+    if (!advisorData) return
+    setStrategies(prev => prev.map(s => {
+      const rec = advisorData.recommendations.find(r => r.strategyId === s.id)
+      if (!rec || rec.action === 'hold' || rec.action === 'monitor') return s
+      return { ...s, userLots: rec.suggestedLots, manualOverride: true }
+    }))
+  }
 
   // ---- Handlers ----
   function toggleStrategy(id: string) {
@@ -510,7 +633,10 @@ export default function BuilderPage() {
   h3 { font-size: 12px; font-weight: 600; margin: 12px 0 6px; color: #475569; }
   .subtitle { color: #64748b; font-size: 12px; margin-bottom: 15px; }
   .header-row { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 10px; }
-  .logo { font-size: 10px; font-weight: 700; color: #6366f1; letter-spacing: 2px; }
+  .logo-row { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
+  .logo-img { width: 40px; height: 40px; object-fit: contain; }
+  .logo-text { font-size: 14px; font-weight: 800; color: #0f172a; letter-spacing: 3px; }
+  .logo-sub { font-size: 9px; font-weight: 500; color: #6366f1; letter-spacing: 1.5px; text-transform: uppercase; }
   .meta { text-align: right; color: #94a3b8; font-size: 10px; }
   .kpi-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 15px; }
   .kpi { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 10px; }
@@ -550,7 +676,13 @@ export default function BuilderPage() {
   <!-- Header -->
   <div class="header-row">
     <div>
-      <div class="logo">VELQOR QUANT ENGINE</div>
+      <div class="logo-row">
+        <img src="data:image/png;base64,${VELQOR_LOGO_BASE64}" class="logo-img" />
+        <div>
+          <div class="logo-text">VELQOR</div>
+          <div class="logo-sub">Intelligent Quant System</div>
+        </div>
+      </div>
       <h1>Portfolio Simulation Report</h1>
       <div class="subtitle">${ptfName || 'Simulazione'} — ${acc?.name || 'N/A'} — ${dateNow}</div>
     </div>
@@ -622,6 +754,61 @@ export default function BuilderPage() {
     <strong>NOTA:</strong> Il Max Drawdown simulato (${fmtR(ps.maxDdPct, 1)}%) utilizza oltre il 50% del budget DD FTMO.
     Monitorare attentamente durante operatività live.
   </div>` : ''}
+
+  <!-- Utilizzo Margine -->
+  ${marginData ? `
+  <h2>Utilizzo Margine</h2>
+  <div class="kpi-grid" style="grid-template-columns: repeat(3, 1fr)">
+    <div class="kpi">
+      <div class="kpi-label">Margine Richiesto</div>
+      <div class="kpi-value">${fmtM(marginData.totalMarginRequired)}</div>
+      <div class="kpi-sub">${fmtR(marginData.marginUtilizationPct, 1)}% dell'equity</div>
+    </div>
+    <div class="kpi">
+      <div class="kpi-label">Margine Libero</div>
+      <div class="kpi-value" style="color:#16a34a">${fmtM(marginData.freeMargin)}</div>
+      <div class="kpi-sub">${fmtR(marginData.freeMarginPct, 1)}%</div>
+    </div>
+    <div class="kpi">
+      <div class="kpi-label">Leva Effettiva</div>
+      <div class="kpi-value">1:${fmtR(marginData.leverageEffective, 1)}</div>
+      <div class="kpi-sub">Nozionale ${fmtM(marginData.totalNotional)}</div>
+    </div>
+  </div>
+  <table>
+    <thead>
+      <tr>
+        <th>Strategia</th>
+        <th>Simbolo</th>
+        <th class="text-center">Lotti</th>
+        <th class="text-right">Nozionale</th>
+        <th class="text-right">Margine</th>
+        <th class="text-right">Leva</th>
+      </tr>
+    </thead>
+    <tbody>
+      ${marginData.perStrategy.map((m, i) => {
+        const st = strategies.filter(s => s.selected)[i]
+        return `<tr>
+          <td>${st ? `M${st.magic} ${st.name || ''}` : '—'}</td>
+          <td>${m.symbol}</td>
+          <td class="text-center bold">${fmtR(m.lots, 3)}</td>
+          <td class="text-right">${fmtM(m.notionalValue)}</td>
+          <td class="text-right bold">${fmtM(m.marginRequired)}</td>
+          <td class="text-right">1:${m.leverageRatio}</td>
+        </tr>`
+      }).join('')}
+    </tbody>
+    <tfoot>
+      <tr style="border-top:2px solid #e2e8f0;font-weight:700">
+        <td colspan="3">TOTALE</td>
+        <td class="text-right">${fmtM(marginData.totalNotional)}</td>
+        <td class="text-right">${fmtM(marginData.totalMarginRequired)}</td>
+        <td></td>
+      </tr>
+    </tfoot>
+  </table>
+  ` : ''}
 
   <!-- Analisi temporale -->
   <h2>Analisi Temporale</h2>
@@ -834,7 +1021,11 @@ ${curveData.curves.sort((a, b) => a.magic - b.magic).map(c => `Magic ${String(c.
 
   <!-- Disclaimer -->
   <div class="footer">
-    <p>VELQOR Quant Engine — Report generato il ${dateNow} alle ${new Date().toLocaleTimeString('it-IT')}</p>
+    <div style="display:flex;align-items:center;justify-content:center;gap:6px;margin-bottom:4px">
+      <img src="data:image/png;base64,${VELQOR_LOGO_BASE64}" style="width:16px;height:16px;object-fit:contain;opacity:0.5" />
+      <span style="font-weight:600;letter-spacing:1px;color:#64748b">VELQOR INTELLIGENT QUANT SYSTEM</span>
+    </div>
+    <p>Report generato il ${dateNow} alle ${new Date().toLocaleTimeString('it-IT')}</p>
     <p style="margin-top:4px">Simulazione basata su trade storici con scaling proporzionale ai lotti configurati. Le performance passate non garantiscono risultati futuri. I dati di drawdown si riferiscono alla serie di trade chiusi e non includono il floating P/L intraday.</p>
   </div>
 
@@ -996,6 +1187,7 @@ ${curveData.curves.sort((a, b) => a.magic - b.magic).map(c => `Magic ${String(c.
               <th className="px-2 py-2 text-[10px] uppercase text-slate-400 text-right">Trade</th>
               <th className="px-2 py-2 text-[10px] uppercase text-slate-400 text-right">P/L reale</th>
               <th className="px-2 py-2 text-[10px] uppercase text-slate-400 text-right">P/L scalato</th>
+              <th className="px-2 py-2 text-[10px] uppercase text-slate-400 text-right">Margine</th>
             </tr>
           </thead>
           <tbody>
@@ -1053,12 +1245,143 @@ ${curveData.curves.sort((a, b) => a.magic - b.magic).map(c => `Magic ${String(c.
                   <td className={`px-2 py-1.5 text-right font-mono text-xs font-bold ${scaledPnl !== null ? plColor(scaledPnl) : 'text-slate-400'}`}>
                     {scaledPnl !== null ? fmtUsd(scaledPnl) : '—'}
                   </td>
+                  <td className="px-2 py-1.5 text-right font-mono text-xs">
+                    {s.selected && marginData ? (() => {
+                      const m = marginData.perStrategy.find(x => x.symbol === s.asset && Math.abs(x.lots - s.userLots) < 0.001)
+                      return m ? (
+                        <div>
+                          <span className="text-slate-700">{fmtUsd(m.marginRequired)}</span>
+                          <div className="text-[9px] text-slate-400">1:{m.leverageRatio}</div>
+                        </div>
+                      ) : <span className="text-slate-400">—</span>
+                    })() : <span className="text-slate-400">—</span>}
+                  </td>
                 </tr>
               )
             })}
           </tbody>
         </table>
       </div>
+
+      {/* Margin utilization */}
+      {marginData && strategies.some(s => s.selected) && (
+        <div className="bg-white rounded-xl border border-slate-200 p-4">
+          <div className="flex items-center gap-2 mb-3">
+            <h3 className="text-sm font-semibold text-slate-700">Utilizzo Margine</h3>
+            <InfoTooltip metricKey="margin_utilization" />
+            <span className={`text-[10px] px-2 py-0.5 rounded-full font-medium ${
+              marginData.marginUtilizationPct > 80 ? 'bg-red-100 text-red-700' :
+              marginData.marginUtilizationPct > 50 ? 'bg-amber-100 text-amber-700' :
+              'bg-green-100 text-green-700'
+            }`}>
+              {marginData.marginUtilizationPct > 80 ? 'ALTO' :
+               marginData.marginUtilizationPct > 50 ? 'MODERATO' : 'OK'}
+            </span>
+          </div>
+          <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 text-xs">
+            <div>
+              <div className="text-[10px] uppercase text-slate-400">Margine Richiesto</div>
+              <div className="text-sm font-bold font-mono text-slate-800">{fmtUsd(marginData.totalMarginRequired)}</div>
+            </div>
+            <div>
+              <div className="text-[10px] uppercase text-slate-400">Utilizzo %</div>
+              <div className={`text-sm font-bold font-mono ${
+                marginData.marginUtilizationPct > 80 ? 'text-red-600' :
+                marginData.marginUtilizationPct > 50 ? 'text-amber-600' : 'text-green-600'
+              }`}>
+                {fmtPct(marginData.marginUtilizationPct, 1)}
+              </div>
+            </div>
+            <div>
+              <div className="text-[10px] uppercase text-slate-400">Margine Libero</div>
+              <div className="text-sm font-bold font-mono text-green-600">{fmtUsd(marginData.freeMargin)}</div>
+              <div className="text-[10px] text-slate-400">{fmtPct(marginData.freeMarginPct, 1)}</div>
+            </div>
+            <div>
+              <div className="text-[10px] uppercase text-slate-400">Leva Effettiva</div>
+              <div className="text-sm font-bold font-mono text-slate-700">1:{fmt(marginData.leverageEffective, 1)}</div>
+            </div>
+            <div>
+              <div className="text-[10px] uppercase text-slate-400">Valore Nozionale</div>
+              <div className="text-sm font-bold font-mono text-slate-700">{fmtUsd(marginData.totalNotional)}</div>
+            </div>
+          </div>
+          {/* Progress bar */}
+          <div className="mt-3 h-2 bg-slate-100 rounded-full overflow-hidden">
+            <div
+              className={`h-full rounded-full transition-all ${
+                marginData.marginUtilizationPct > 80 ? 'bg-red-500' :
+                marginData.marginUtilizationPct > 50 ? 'bg-amber-500' : 'bg-green-500'
+              }`}
+              style={{ width: `${Math.min(100, marginData.marginUtilizationPct)}%` }}
+            />
+          </div>
+          <div className="flex justify-between text-[10px] text-slate-400 mt-1">
+            <span>0%</span>
+            <span>50%</span>
+            <span>100%</span>
+          </div>
+        </div>
+      )}
+
+      {/* Sizing Advisor */}
+      {advisorData && advisorData.recommendations.length > 0 && (
+        <div className="bg-white rounded-xl border border-slate-200 p-4">
+          <div className="flex items-center justify-between mb-3">
+            <div className="flex items-center gap-2">
+              <h3 className="text-sm font-semibold text-slate-700">Sizing Advisor</h3>
+              <InfoTooltip metricKey="sizing_advisor" />
+              <span className={`text-[10px] px-2 py-0.5 rounded-full font-medium ${
+                advisorData.portfolioHealth === 'critical' ? 'bg-red-100 text-red-700' :
+                advisorData.portfolioHealth === 'attention' ? 'bg-amber-100 text-amber-700' :
+                'bg-green-100 text-green-700'
+              }`}>
+                {advisorData.portfolioHealth === 'critical' ? 'CRITICO' :
+                 advisorData.portfolioHealth === 'attention' ? 'ATTENZIONE' : 'OK'}
+              </span>
+            </div>
+            {advisorData.recommendations.some(r => r.action !== 'hold' && r.action !== 'monitor') && (
+              <button onClick={applyAdvisorRecommendations}
+                className="px-3 py-1.5 text-xs bg-indigo-50 text-indigo-700 rounded-lg border border-indigo-200 hover:bg-indigo-100 transition font-medium">
+                Applica suggerimenti
+              </button>
+            )}
+          </div>
+          <p className="text-xs text-slate-500 mb-3">{advisorData.summary}</p>
+          <div className="space-y-1.5">
+            {advisorData.recommendations.map(r => (
+              <div key={r.strategyId} className={`flex items-start gap-2 p-2 rounded-lg text-xs ${
+                r.severity === 'critical' ? 'bg-red-50' :
+                r.severity === 'warning' ? 'bg-amber-50' : 'bg-slate-50'
+              }`}>
+                <span className="text-base leading-none mt-0.5">
+                  {r.action === 'increase' ? '\u2191' :
+                   r.action === 'decrease' ? '\u2193' :
+                   r.action === 'pause' ? '\u25A0' :
+                   r.action === 'monitor' ? '\u25CB' : '\u2022'}
+                </span>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2">
+                    <span className="font-mono text-slate-500">M{r.magic}</span>
+                    <span className="font-medium text-slate-700 truncate">{r.name}</span>
+                    {r.lotMultiplier !== 1.0 && (
+                      <span className={`text-[10px] px-1.5 py-0.5 rounded font-mono ${
+                        r.lotMultiplier > 1 ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'
+                      }`}>
+                        {r.lotMultiplier > 1 ? '+' : ''}{fmt((r.lotMultiplier - 1) * 100, 0)}%
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-slate-500 mt-0.5">{r.reason}</p>
+                  {r.details.length > 0 && (
+                    <p className="text-[10px] text-slate-400 mt-0.5">{r.details.join(' · ')}</p>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Chart section */}
       {curveData && curveData.curves.length > 0 && (

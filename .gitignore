@@ -28,6 +28,9 @@ mt5-bridge/config_local.py
 mt5-bridge/setup_vps.ps1
 mt5-bridge/*.log
 
+# archive (old context files)
+/archive/
+
 # vercel
 .vercel
 

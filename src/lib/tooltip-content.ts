@@ -12,6 +12,8 @@ export type TooltipKey =
   | 'max_dd' | 'return_dd' | 'alpha' | 'payoff'
   | 'ror' | 'dd_budget' | 'correlation'
   | 'monte_carlo' | 'equity_curve' | 'regime'
+  | 'margin_utilization' | 'margin_per_trade'
+  | 'sizing_advisor'
 
 export const TOOLTIP_CONTENT: Record<TooltipKey, TooltipEntry> = {
   sharpe: {
@@ -138,5 +140,22 @@ export const TOOLTIP_CONTENT: Record<TooltipKey, TooltipEntry> = {
   regime: {
     title: 'Regime di Mercato',
     description: 'Fase attuale del mercato: trending, ranging o alta volatilita. Le strategie mean reversion funzionano meglio in range, le trend following in trend. Un mismatch regime-strategia spiega perdite temporanee senza edge rotto.',
+  },
+  margin_utilization: {
+    title: 'Utilizzo Margine',
+    description: 'Percentuale del capitale impegnata come margine per le posizioni aperte. Un utilizzo troppo alto riduce il margine libero disponibile per nuove operazioni e aumenta il rischio di margin call. Per FTMO, mantenere sotto il 50% e ideale.',
+    formula: 'Utilizzo % = (somma margini per posizione / equity base) * 100',
+    example: 'Equity $10,000, 3 strategie con margine totale $2,500 → utilizzo 25%. Margine libero = $7,500.',
+  },
+  margin_per_trade: {
+    title: 'Margine per Posizione',
+    description: 'Capitale richiesto dal broker per mantenere una posizione aperta. Dipende dal simbolo, dalla leva e dal valore nozionale. Leva FTMO: 1:100 (Forex), 1:20 (Indici), 1:10 (Commodities), 1:2 (Crypto).',
+    formula: 'Margine = lotti * dimensione contratto * prezzo * (1 / leva)',
+    example: 'US500.cash 0.10 lotti, prezzo 5800: nozionale = $580. Con leva 1:20, margine = $29.',
+  },
+  sizing_advisor: {
+    title: 'Sizing Advisor',
+    description: 'Analizza fitness, pendulum, salute e regime di ogni strategia per suggerire aggiustamenti al sizing. I suggerimenti vanno dal +30% (edge forte in recovery) al -30% (DD elevato) fino alla pausa (strategia rotta). Sistema a regole deterministico basato sui dati reali vs test.',
+    example: 'Strategia con fitness 85/100 in fase drawdown ma edge confermato: pendulum +20%. Strategia con DD 2x test e P/L negativo: riduzione 30%.',
   },
 }

@@ -36,26 +36,27 @@ Sizing Engine (Kelly/HRP), correlazioni, Health Monitor, Monte Carlo, Portfolio 
 - 18 strategie, 7 famiglie, 7 asset con benchmark Yahoo Finance
 - Bridge: .bat per sync giornaliero via Windows Task Scheduler
 
-## Cosa fare in Phase 4
+## Stato Phase 4 (completata 2026-04-07)
 
-### Priorita' ALTA
-1. **Margine utilizzato** — Estrarre dato margine dai trade, visualizzare uso margine nel builder
-2. **Costi per trade** — Spread + commissioni + swap → expectancy netta nel builder e overview
-3. **Logo Velqor nel report** — "Velqor Intelligent Quant System" + logo come timbro
+### Priorita' ALTA — COMPLETATE
+1. **Margine utilizzato** ✅ — Card KPI (5 metriche + barra progresso), colonna tabella, sezione report. FTMO_MARGIN_SPECS per 7 simboli. Tassi leva da validare vs margine reale bridge.
+2. **Costi per trade** ✅ — Gia' coperti: net_profit usato ovunque, dashboard ha Analisi Costi completa per simbolo/strategia.
+3. **Logo Velqor nel report** ✅ — Logo gufo base64 200px in header + mini-logo footer. Rebrand "Velqor Intelligent Quant System".
 
-### Priorita' MEDIA
-4. **Import dati WFM/MC da SQX** — Popolare qel_strategy_tests con risultati Walk Forward Matrix
-5. **10K trade ambigui** — 48 trade senza magic, valutare assegnazione manuale per (symbol, direction, timeframe)
+### Priorita' MEDIA — COMPLETATE
+4. **Import dati WFM/MC da SQX** ✅ — Seed 17 righe qel_strategy_tests. Nuova sezione "Test SQX" nella pagina import con toggle Trade/Test, parser CSV 17 header, preview, insert audit + update strategies.
+5. **10K trade ambigui** — SKIP (35 trade senza magic, distribuzione: 29 US500 buy, 5 USDCAD buy, 1 USDJPY buy. Non vale l'effort di assegnazione).
 
-### Priorita' BASSA / Lungo termine
-6. **AI Sizing Advisor** — Suggerimenti automatici basati su regime + fitness
-7. **N8N automazioni** — Weekly optimization + sync monitor + alert Telegram
-8. **Rolling correlations** — Quando dati sufficienti (target fine 2026)
-9. **Builder multi-contesto** — Config per future / capitale proprio / limiti DD personalizzati
+### Priorita' BASSA — PARZIALE
+6. **AI Sizing Advisor** ✅ — Engine a regole (generateSizingAdvice) con 8 livelli: monitor/decrease/hold/increase basati su fitness+pendulum+health+regime. Card nel builder con semaforo, raccomandazioni per strategia, "Applica suggerimenti".
+7. **N8N automazioni** — BACKLOG (richiede infrastruttura esterna)
+8. **Rolling correlations** — BACKLOG (target fine 2026, dati insufficienti)
+9. **Builder multi-contesto** — BACKLOG (per transizione CFD → future)
 
 ## File chiave
-- `src/lib/quant-utils.ts` (~1600 righe) — tutte le utility quant
-- `src/lib/tooltip-content.ts` — 23 metriche in italiano
+- `src/lib/quant-utils.ts` (~1800 righe) — tutte le utility quant (margine, advisor, sizing, MC, health)
+- `src/lib/velqor-logo.ts` — logo gufo base64 per report
+- `src/lib/tooltip-content.ts` — 26 metriche in italiano
 - `src/components/ui/InfoTooltip.tsx` — componente tooltip con createPortal
 - `src/app/(dashboard)/divisioni/quant/page.tsx` — overview con selettore conto + benchmark chart
 - `src/app/(dashboard)/divisioni/quant/builder/page.tsx` — builder con stats per-conto
