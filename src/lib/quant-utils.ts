@@ -881,12 +881,32 @@ export function runSizingEngine(
     })
   }
 
+  // Helper: normalize MC95 DD to per-lot value.
+  // mc95_dd_scaled is DD at lot_neutral; test_mc95_dd is DD at lot_static (~1.0 or test lot).
+  // To get lots from DD budget: lots = budget / mc95_per_lot.
+  function mc95PerLot(s: SizingInput): number {
+    if (s.mc95DdScaled && s.lotNeutral && s.lotNeutral > 0) {
+      return s.mc95DdScaled / s.lotNeutral
+    }
+    if (s.testMc95Dd) {
+      // test_mc95_dd is at lot_static (typically 1.0 for indices, 0.1 for NQ)
+      // If lot_neutral is available, use ratio; otherwise assume lot_static ≈ 1.0
+      if (s.lotNeutral && s.lotNeutral > 0 && s.testMc95Dd > 0) {
+        // Derive per-lot: test DD / lot_neutral gives us a usable per-lot estimate
+        return s.testMc95Dd / (s.lotNeutral || 1)
+      }
+      return s.testMc95Dd // assume per-lot if no lot info
+    }
+    return 0
+  }
+
   // Step 2: HRP family-aware DD budget allocation
+  // HRP uses per-lot MC95 DD for fair relative weighting across strategies
   const hrpWeights = calcHRPWeights(
     strategies.map(s => ({
       id: s.strategyId,
       family: s.family,
-      mc95Dd: s.mc95DdScaled ?? s.testMc95Dd ?? 0,
+      mc95Dd: mc95PerLot(s),
     }))
   )
 
@@ -895,7 +915,7 @@ export function runSizingEngine(
   for (let i = 0; i < strategies.length; i++) {
     const s = strategies[i]
     const r = results[i]
-    const mc95 = s.mc95DdScaled ?? s.testMc95Dd ?? 0
+    const mc95PL = mc95PerLot(s)
     const hrpW = hrpWeights.get(s.strategyId) || (1 / strategies.length)
 
     r.hrpWeight = hrpW
@@ -908,9 +928,9 @@ export function runSizingEngine(
     familyBalance[fam].weight += hrpW * 100
     familyBalance[fam].strategies++
 
-    // Lots from DD budget
-    if (mc95 > 0) {
-      r.recommendedLots = Math.floor((r.ddBudgetUsd / mc95) * 100) / 100
+    // Lots from DD budget: budget / mc95_per_lot = actual lots
+    if (mc95PL > 0) {
+      r.recommendedLots = Math.floor((r.ddBudgetUsd / mc95PL) * 100) / 100
     }
 
     // RoR cap
@@ -932,11 +952,10 @@ export function runSizingEngine(
     familyBalance[fam].weight = Math.round(familyBalance[fam].weight * 10) / 10
   }
 
-  // Step 3: Verify total DD fits budget
+  // Step 3: Verify total DD fits budget (using per-lot mc95 × lots)
   let totalDdUsed = 0
   for (let i = 0; i < strategies.length; i++) {
-    const mc95 = strategies[i].mc95DdScaled ?? strategies[i].testMc95Dd ?? 0
-    totalDdUsed += results[i].recommendedLots * mc95
+    totalDdUsed += results[i].recommendedLots * mc95PerLot(strategies[i])
   }
 
   if (totalDdUsed > ddBudgetUsd && ddBudgetUsd > 0) {
@@ -947,8 +966,7 @@ export function runSizingEngine(
     }
     totalDdUsed = 0
     for (let i = 0; i < strategies.length; i++) {
-      const mc95 = strategies[i].mc95DdScaled ?? strategies[i].testMc95Dd ?? 0
-      totalDdUsed += results[i].recommendedLots * mc95
+      totalDdUsed += results[i].recommendedLots * mc95PerLot(strategies[i])
     }
   }
 

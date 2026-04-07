@@ -342,12 +342,13 @@ export default function BuilderPage() {
       const stratTrades = trades.filter(t => t.strategy_id === s.id)
       const totalPl = stratTrades.reduce((sum, t) => sum + t.net_profit, 0)
       const avgTrade = stratTrades.length > 0 ? totalPl / stratTrades.length : 0
-      // Optimized lots: use sizing engine result if available, else use baseLots scaled
-      const optLots = sizingOutput?.results.find(r => r.strategyId === s.id)?.recommendedLots ?? s.baseLots
+      // Compare baseLots (proportional/original) vs optimized (Kelly/HRP)
+      // Use baseLots as "current" to avoid 100% efficiency when optimized is already applied
+      const optLots = sizingOutput?.results.find(r => r.strategyId === s.id)?.recommendedLots ?? s.userLots
       return {
         strategyId: s.id,
-        currentLots: s.userLots,
-        optimizedLots: optLots,
+        currentLots: s.baseLots,      // original proportional lots (pre-optimization)
+        optimizedLots: optLots,        // Kelly/HRP recommended lots
         avgTradeAtCurrentLots: avgTrade * stratTrades.length, // total P/L for this strategy
       }
     })
@@ -1100,6 +1101,43 @@ ${curveData.curves.sort((a, b) => a.magic - b.magic).map(c => `Magic ${String(c.
       </table>
     </div>
   </div>
+
+  <!-- Projection Chart -->
+  ${(() => {
+    try {
+    const p = projectionData.projection
+    const scenarios = [p.optimistic, p.base, p.pessimistic]
+    const cw = 750, ch = 200, cpad = 55
+    const mos = [0,1,2,3,4,5,6,7,8,9,10,11,12]
+    const pts = scenarios.map(s => mos.map(m => {
+      if (m === 0) return equityBase
+      if (m <= 6) return equityBase + (s.pnl6m / 6) * m
+      return s.equity6m + ((s.equity12m - s.equity6m) / 6) * (m - 6)
+    }))
+    let minV = equityBase, maxV = equityBase
+    for (const arr of pts) for (const v of arr) { if (v < minV) minV = v; if (v > maxV) maxV = v }
+    minV *= 0.98; maxV *= 1.02
+    const rV = maxV - minV || 1
+    const xS = (m: number) => cpad + (m / 12) * (cw - cpad * 2)
+    const yS = (v: number) => ch - cpad - ((v - minV) / rV) * (ch - cpad * 2)
+    const pth = (arr: number[]) => arr.map((v, i) => (i === 0 ? 'M' : 'L') + xS(i).toFixed(1) + ',' + yS(v).toFixed(1)).join(' ')
+    const aD = pth(pts[0]) + pts[2].slice().reverse().map((v, i) => 'L' + xS(12-i).toFixed(1) + ',' + yS(v).toFixed(1)).join('') + ' Z'
+    const yTk = Array.from({length:5}, (_,i) => minV + (rV*i/4))
+    const clr = ['#22c55e','#6366f1','#ef4444']
+    const lbl = ['Ottimistico','Base','Pessimistico']
+    const gridLines = yTk.map(v => '<line x1="'+cpad+'" y1="'+yS(v).toFixed(1)+'" x2="'+(cw-cpad)+'" y2="'+yS(v).toFixed(1)+'" stroke="#f1f5f9" stroke-width="1"/>').join('\n')
+    const baseLine = '<line x1="'+cpad+'" y1="'+yS(equityBase).toFixed(1)+'" x2="'+(cw-cpad)+'" y2="'+yS(equityBase).toFixed(1)+'" stroke="#94a3b8" stroke-width="1" stroke-dasharray="4,4"/>'
+    const area = '<path d="'+aD+'" fill="#6366f1" fill-opacity="0.08"/>'
+    const curves = pts.map((arr,i) => '<path d="'+pth(arr)+'" fill="none" stroke="'+clr[i]+'" stroke-width="'+(i===1?2.5:1.5)+'" stroke-linejoin="round"'+(i!==1?' stroke-dasharray="6,3"':'')+'/>').join('\n')
+    const yLabels = yTk.map(v => '<text x="'+(cpad-6)+'" y="'+yS(v).toFixed(1)+'" text-anchor="end" font-size="8" fill="#94a3b8" dominant-baseline="middle">'+(v>=1000?'$'+(v/1000).toFixed(1)+'k':'$'+Math.round(v))+'</text>').join('\n')
+    const xLabels = mos.filter(m=>m%3===0).map(m => '<text x="'+xS(m).toFixed(1)+'" y="'+(ch-10)+'" text-anchor="middle" font-size="8" fill="#94a3b8">'+(m===0?'Oggi':m+'M')+'</text>').join('\n')
+    const midLine = '<line x1="'+xS(6).toFixed(1)+'" y1="'+cpad+'" x2="'+xS(6).toFixed(1)+'" y2="'+(ch-cpad)+'" stroke="#e2e8f0" stroke-width="1" stroke-dasharray="3,3"/><text x="'+xS(6).toFixed(1)+'" y="'+(cpad-6)+'" text-anchor="middle" font-size="8" fill="#94a3b8">6M</text>'
+    const endLabels = scenarios.map((s,i) => '<text x="'+(cw-cpad+4).toFixed(1)+'" y="'+yS(pts[i][12]).toFixed(1)+'" font-size="9" fill="'+clr[i]+'" font-weight="'+(i===1?700:500)+'" dominant-baseline="middle">'+(s.equity12m/1000).toFixed(1)+'k</text>').join('\n')
+    const legend = lbl.map((l,i) => '<circle cx="'+(cpad+10+i*100)+'" cy="'+(cpad-8)+'" r="3" fill="'+clr[i]+'"/><text x="'+(cpad+16+i*100)+'" y="'+(cpad-8)+'" font-size="8" fill="#64748b" dominant-baseline="middle">'+l+'</text>').join('\n')
+    return '<svg xmlns="http://www.w3.org/2000/svg" width="750" height="200" viewBox="0 0 '+cw+' '+ch+'" style="max-width:100%;background:#fafbfc;border:1px solid #e2e8f0;border-radius:8px;display:block;margin:8px 0">\n'+gridLines+'\n'+baseLine+'\n'+area+'\n'+curves+'\n'+yLabels+'\n'+xLabels+'\n'+midLine+'\n'+endLabels+'\n'+legend+'\n</svg>'
+    } catch(e) { return '<p style="color:#94a3b8;font-style:italic">Grafico proiezione non disponibile</p>' }
+  })()}
+
   ` : ''}
 
   <!-- Disclaimer -->
