@@ -28,9 +28,10 @@ import {
 
 interface StrategyRow extends QelStrategy {
   selected: boolean
-  baseLots: number     // original lots from DB (calibrated for source account)
-  userLots: number     // auto-scaled lots based on equity
+  baseLots: number     // real avg lots from trades (or lot_neutral fallback)
+  userLots: number     // working lots (real, then modified by optimize/manual)
   manualOverride: boolean // true if user manually changed lots
+  realAvgLots: number  // actual average lots from trades on this account (0 if no trades)
   chartColor: string
   visible: boolean
   tradeCount: number
@@ -139,15 +140,16 @@ export default function BuilderPage() {
     }
     setSavedPortfolios(ptfList)
 
-    // Aggregate per-strategy stats from trades
-    const pnlMap = new Map<string, { total: number; count: number }>()
+    // Aggregate per-strategy stats from trades (P/L, count, avg lots)
+    const stratStats = new Map<string, { total: number; count: number; lotsSum: number }>()
     if (tradeData) {
       for (const t of tradeData) {
         if (!t.strategy_id) continue
-        if (!pnlMap.has(t.strategy_id)) pnlMap.set(t.strategy_id, { total: 0, count: 0 })
-        const e = pnlMap.get(t.strategy_id)!
+        if (!stratStats.has(t.strategy_id)) stratStats.set(t.strategy_id, { total: 0, count: 0, lotsSum: 0 })
+        const e = stratStats.get(t.strategy_id)!
         e.total += Number(t.net_profit ?? 0)
         e.count++
+        e.lotsSum += Number(t.lots ?? 0)
       }
     }
 
@@ -156,19 +158,21 @@ export default function BuilderPage() {
     const srcSize = srcAcc?.account_size || 10000
     setSourceAccountSize(srcSize)
 
-    // Scale ratio: if equity target differs from source, scale lots
-    const scale = equityBase / srcSize
-
     if (strats) {
       setStrategies(strats.map((s, i) => {
-        const stats = pnlMap.get(s.id)
-        const base = s.lot_neutral ?? s.lot_static ?? 0.01
+        const stats = stratStats.get(s.id)
+        // Use real avg lots from trades on this account (best source of truth)
+        const realAvg = stats && stats.count > 0 ? stats.lotsSum / stats.count : 0
+        // baseLots: real avg lots if available, else lot_neutral scaled to target equity
+        const dbLots = s.lot_neutral ?? s.lot_static ?? 0.01
+        const base = realAvg > 0 ? realAvg : dbLots
         return {
           ...s,
           selected: s.include_in_portfolio && s.status === 'active',
           baseLots: base,
-          userLots: Math.max(0.01, Math.round(base * scale * 1000) / 1000),
+          userLots: Math.max(0.01, Math.round(base * 1000) / 1000),
           manualOverride: false,
+          realAvgLots: realAvg,
           chartColor: CHART_COLORS[i % CHART_COLORS.length],
           visible: true,
           tradeCount: stats?.count ?? 0,
@@ -213,6 +217,7 @@ export default function BuilderPage() {
     const scale = equityBase / sourceAccountSize
     setStrategies(prev => prev.map(s => {
       if (s.manualOverride) return s // don't touch manually overridden lots
+      // Scale from baseLots (real avg or lot_neutral) proportionally to equity change
       return { ...s, userLots: Math.max(0.01, Math.round(s.baseLots * scale * 1000) / 1000) }
     }))
   }, [equityBase, sourceAccountSize])
@@ -995,7 +1000,8 @@ export default function BuilderPage() {
         <th>Strategia</th>
         <th>Asset</th>
         <th>Stile</th>
-        <th class="text-center">Lotti</th>
+        <th class="text-center">Lotti Reali</th>
+        <th class="text-center">Lotti Builder</th>
         <th class="text-right">Trade</th>
         <th class="text-right">P/L</th>
         <th class="text-right">Win Rate</th>
@@ -1008,12 +1014,14 @@ export default function BuilderPage() {
       ${curveData.curves.sort((a, b) => b.stats.totalPnl - a.stats.totalPnl).map(c => {
         const st = strategies.find(s => s.id === c.strategyId)
         const styleBadge = st?.strategy_style === 'mean_reversion' ? 'badge-mr' : st?.strategy_style === 'trend_following' ? 'badge-tf' : st?.strategy_style === 'seasonal' ? 'badge-se' : 'badge-hy'
+        const realLots = st?.realAvgLots ?? 0
         return `<tr>
           <td>M${c.magic}</td>
           <td style="font-family:sans-serif;max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${c.name}</td>
           <td>${st?.asset_group || st?.asset || ''}</td>
           <td><span class="badge ${styleBadge}">${styleLabel(st?.strategy_style ?? null)}</span></td>
-          <td class="text-center bold">${fmtR(c.userLots, 3)}</td>
+          <td class="text-center bold">${realLots > 0 ? fmtR(realLots, 2) : '\u2014'}</td>
+          <td class="text-center" style="color:#4f46e5">${fmtR(c.userLots, 3)}</td>
           <td class="text-right">${c.stats.totalTrades}</td>
           <td class="text-right bold" style="color:${plC(c.stats.totalPnl)}">${fmtM(c.stats.totalPnl)}</td>
           <td class="text-right">${fmtR(c.stats.winRate, 1)}%</td>
@@ -1026,7 +1034,8 @@ export default function BuilderPage() {
     <tfoot>
       <tr style="border-top:2px solid #e2e8f0;font-weight:700">
         <td colspan="4">TOTALE</td>
-        <td class="text-center">${fmtR(curveData.curves.reduce((s, c) => s + c.userLots, 0), 3)}</td>
+        <td class="text-center">${fmtR(strategies.filter(s => s.selected).reduce((s, st) => s + st.realAvgLots, 0), 2)}</td>
+        <td class="text-center" style="color:#4f46e5">${fmtR(curveData.curves.reduce((s, c) => s + c.userLots, 0), 3)}</td>
         <td class="text-right">${ps.totalTrades}</td>
         <td class="text-right" style="color:${plC(ps.totalPnl)}">${fmtM(ps.totalPnl)}</td>
         <td class="text-right">${fmtR(ps.winRate, 1)}%</td>
@@ -1339,7 +1348,8 @@ ${curveData.curves.sort((a, b) => a.magic - b.magic).map(c => `Magic ${String(c.
               <th className="px-2 py-2 text-[10px] uppercase text-slate-400">Strategia</th>
               <th className="px-2 py-2 text-[10px] uppercase text-slate-400">Asset</th>
               <th className="px-2 py-2 text-[10px] uppercase text-slate-400">Stile</th>
-              <th className="px-2 py-2 text-[10px] uppercase text-slate-400 text-center">Lotti</th>
+              <th className="px-2 py-2 text-[10px] uppercase text-slate-400 text-center">Lotti Reali</th>
+              <th className="px-2 py-2 text-[10px] uppercase text-slate-400 text-center">Lotti Builder</th>
               <th className="px-2 py-2 text-[10px] uppercase text-slate-400 text-right">Trade</th>
               <th className="px-2 py-2 text-[10px] uppercase text-slate-400 text-right">P/L reale</th>
               <th className="px-2 py-2 text-[10px] uppercase text-slate-400 text-right">P/L scalato</th>
@@ -1376,6 +1386,13 @@ ${curveData.curves.sort((a, b) => a.magic - b.magic).map(c => `Magic ${String(c.
                   </td>
                   <td className="px-2 py-1.5">
                     <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${styleColor(s.strategy_style)}`}>{styleLabel(s.strategy_style)}</span>
+                  </td>
+                  <td className="px-2 py-1.5 text-center">
+                    {s.realAvgLots > 0 ? (
+                      <span className="text-xs font-mono font-semibold text-slate-700">{fmt(s.realAvgLots, 2)}</span>
+                    ) : (
+                      <span className="text-xs text-slate-300">—</span>
+                    )}
                   </td>
                   <td className="px-2 py-1.5">
                     {s.selected ? (
