@@ -1680,6 +1680,12 @@ export interface SizingEfficiency {
   underSized: number          // count of strategies using < 80% of optimal
   overSized: number           // count using > 120% of optimal
   perStrategy: StrategySizingDetail[]  // per-strategy breakdown
+  // DD comparison: real sizing vs optimized sizing
+  realDdEstimate: number      // portfolio DD scaled to real lots
+  optDdEstimate: number       // portfolio DD at optimized lots (from builder)
+  realDdPct: number           // real DD as % of equity
+  optDdPct: number            // opt DD as % of equity
+  riskMultiplier: number      // realDD / optDD — how much more risk
 }
 
 export interface ProjectionScenario {
@@ -1709,13 +1715,20 @@ export interface EquityProjection {
  */
 /**
  * Calculate sizing efficiency using REAL lots from trades vs optimized lots.
+ * Also estimates DD at real sizing vs DD at optimized sizing for risk comparison.
+ *
+ * @param portfolioMaxDd The max DD computed by the builder at the optimized lots
+ * @param equityBase Current equity base for DD% calculation
  */
 export function calcSizingEfficiency(
   strategies: {
     strategyId: string; magic: number; name: string;
     realAvgLots: number; optimizedLots: number;
     realPnl: number; trades: number;
+    realMaxDd: number;  // per-strategy max DD from real trades at real lots
   }[],
+  portfolioMaxDd: number,
+  equityBase: number,
 ): SizingEfficiency {
   let currentPnl = 0
   let optimizedPnl = 0
@@ -1724,6 +1737,10 @@ export function calcSizingEfficiency(
   let underSized = 0
   let overSized = 0
   const perStrategy: StrategySizingDetail[] = []
+
+  // Track weighted DD scaling for portfolio DD estimate
+  let realDdWeightedSum = 0
+  let optDdWeightedSum = 0
 
   for (const s of strategies) {
     const real = s.realAvgLots
@@ -1734,12 +1751,14 @@ export function calcSizingEfficiency(
     lotRatioSum += ratio
     lotRatioCount++
 
-    // Real P/L is actual
     currentPnl += s.realPnl
 
-    // Estimated P/L if traded at optimized lots: scale by ratio
     const estPnl = s.realPnl * (opt / real)
     optimizedPnl += estPnl
+
+    // DD at real lots (actual from trades), DD scaled to optimized lots
+    realDdWeightedSum += s.realMaxDd
+    optDdWeightedSum += s.realMaxDd * (opt / real)
 
     if (ratio < 0.8) underSized++
     else if (ratio > 1.2) overSized++
@@ -1764,7 +1783,18 @@ export function calcSizingEfficiency(
   const gapPnl = optimizedPnl - currentPnl
   const gapPct = currentPnl !== 0 ? (gapPnl / Math.abs(currentPnl)) * 100 : 0
 
-  return { currentPnl, optimizedPnl, efficiencyPct, gapPnl, gapPct, avgLotRatio, underSized, overSized, perStrategy }
+  // DD estimates: real is from actual trade data, optimized is scaled down
+  const realDdEstimate = Math.round(realDdWeightedSum)
+  const optDdEstimate = Math.round(optDdWeightedSum)
+  const realDdPct = equityBase > 0 ? (realDdEstimate / equityBase) * 100 : 0
+  const optDdPct = equityBase > 0 ? (optDdEstimate / equityBase) * 100 : 0
+  const riskMultiplier = optDdEstimate > 0 ? realDdEstimate / optDdEstimate : avgLotRatio
+
+  return {
+    currentPnl, optimizedPnl, efficiencyPct, gapPnl, gapPct,
+    avgLotRatio, underSized, overSized, perStrategy,
+    realDdEstimate, optDdEstimate, realDdPct, optDdPct, riskMultiplier,
+  }
 }
 
 /**

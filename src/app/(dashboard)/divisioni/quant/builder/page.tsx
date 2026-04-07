@@ -347,6 +347,14 @@ export default function BuilderPage() {
         : s.baseLots
       // Optimized lots from Kelly/HRP engine
       const optLots = sizingOutput?.results.find(r => r.strategyId === s.id)?.recommendedLots ?? s.userLots
+      // Max DD from real trades (at real lots)
+      let peak = 0, maxDd = 0, cumPl = 0
+      for (const t of stratTrades) {
+        cumPl += t.net_profit
+        if (cumPl > peak) peak = cumPl
+        const dd = peak - cumPl
+        if (dd > maxDd) maxDd = dd
+      }
       return {
         strategyId: s.id,
         magic: s.magic,
@@ -355,14 +363,17 @@ export default function BuilderPage() {
         optimizedLots: optLots,
         realPnl: totalPl,
         trades: stratTrades.length,
+        realMaxDd: maxDd,
       }
     })
 
-    const efficiency = calcSizingEfficiency(effInputs)
+    // Portfolio max DD at builder lots (from equity curves)
+    const portfolioMaxDd = curveData?.portfolioStats?.maxDd ?? 0
+    const efficiency = calcSizingEfficiency(effInputs, portfolioMaxDd, equityBase)
     const projection = calcEquityProjection(monthlyReturns, equityBase, tradesPerMonth)
 
     return { efficiency, projection }
-  }, [strategies, trades, equityBase, sizingOutput])
+  }, [strategies, trades, equityBase, sizingOutput, curveData])
 
   // ---- Apply advisor portfolio: select/deselect strategies + set lots ----
   function applyAdvisorPortfolio() {
@@ -1078,19 +1089,29 @@ ${curveData.curves.sort((a, b) => a.magic - b.magic).map(c => `Magic ${String(c.
 
   <!-- Proiezione & Efficienza -->
   ${projectionData ? `
-  <h2>Proiezione & Efficienza Sizing</h2>
+  <h2>Sizing Reale vs Ottimale</h2>
   <div class="grid-2" style="margin-bottom:12px">
     <div>
-      <h3>Efficienza Sizing</h3>
+      <h3 style="color:#4f46e5">Il tuo sizing (reale dai trade)</h3>
       <table>
-        <tr><td>Efficienza</td><td class="text-right bold" style="color:${projectionData.efficiency.efficiencyPct >= 80 ? '#16a34a' : projectionData.efficiency.efficiencyPct >= 50 ? '#b45309' : '#dc2626'}">${fmtR(projectionData.efficiency.efficiencyPct, 0)}%</td></tr>
-        <tr><td>P/L attuale</td><td class="text-right" style="color:${plC(projectionData.efficiency.currentPnl)}">${fmtM(projectionData.efficiency.currentPnl)}</td></tr>
-        <tr><td>P/L ottimizzato</td><td class="text-right" style="color:${plC(projectionData.efficiency.optimizedPnl)}">${fmtM(projectionData.efficiency.optimizedPnl)}</td></tr>
-        <tr><td>Gap</td><td class="text-right bold" style="color:#b45309">${fmtM(projectionData.efficiency.gapPnl)}</td></tr>
-        <tr><td>Rapporto lotti medio</td><td class="text-right">${fmtR(projectionData.efficiency.avgLotRatio * 100, 0)}%</td></tr>
+        <tr><td>P/L reale</td><td class="text-right bold" style="color:${plC(projectionData.efficiency.currentPnl)}">${fmtM(projectionData.efficiency.currentPnl)}</td></tr>
+        <tr><td>Max DD reale</td><td class="text-right bold negative">${fmtM(-projectionData.efficiency.realDdEstimate)}</td></tr>
+        <tr><td>DD % equity</td><td class="text-right negative">${fmtR(projectionData.efficiency.realDdPct, 1)}%</td></tr>
+        <tr><td>Rapporto lotti vs ottimale</td><td class="text-right bold">${fmtR(projectionData.efficiency.avgLotRatio, 1)}x</td></tr>
       </table>
     </div>
     <div>
+      <h3 style="color:#16a34a">Sizing ottimale (Kelly/HRP)</h3>
+      <table>
+        <tr><td>P/L stimato</td><td class="text-right bold" style="color:${plC(projectionData.efficiency.optimizedPnl)}">${fmtM(projectionData.efficiency.optimizedPnl)}</td></tr>
+        <tr><td>Max DD stimato</td><td class="text-right bold negative">${fmtM(-projectionData.efficiency.optDdEstimate)}</td></tr>
+        <tr><td>DD % equity</td><td class="text-right negative">${fmtR(projectionData.efficiency.optDdPct, 1)}%</td></tr>
+        <tr><td>Rischio relativo</td><td class="text-right">${fmtR(projectionData.efficiency.riskMultiplier, 1)}x meno rischio</td></tr>
+      </table>
+    </div>
+  </div>
+  ${projectionData.efficiency.realDdPct > 5 ? '<div class="section-risk"><strong>' + (projectionData.efficiency.realDdPct > 8 ? 'ATTENZIONE' : 'NOTA') + ':</strong> Con il tuo sizing reale il DD storico è ' + fmtR(projectionData.efficiency.realDdPct, 1) + '% dell\'equity. ' + (projectionData.efficiency.realDdPct > 8 ? 'Vicino al limite FTMO 10%!' : 'Monitorare il budget DD.') + ' Il sizing ottimale ridurrebbe il rischio di ' + fmtR(projectionData.efficiency.riskMultiplier, 1) + 'x.</div>' : ''}
+  <div>
       <h3>Dettaglio per Strategia</h3>
       <table>
         <tr><th>Strategia</th><th class="text-right">Lotti Reali</th><th class="text-right">Lotti Ottim.</th><th class="text-right">Rapporto</th><th class="text-right">P/L Reale</th><th class="text-right">P/L Stimato</th></tr>
@@ -1550,36 +1571,67 @@ ${curveData.curves.sort((a, b) => a.magic - b.magic).map(c => `Magic ${String(c.
         <div className="bg-white rounded-xl border border-slate-200 p-4">
           <h3 className="text-sm font-semibold text-slate-700 mb-3">Proiezione & Efficienza Sizing</h3>
 
-          {/* Sizing Efficiency KPI */}
-          <div className="grid grid-cols-3 gap-3 mb-3">
-            <div className="bg-slate-50 rounded-lg p-3">
-              <div className="text-[10px] uppercase text-slate-400 tracking-wide">Efficienza Sizing</div>
-              <div className={`text-lg font-bold font-mono ${
-                projectionData.efficiency.efficiencyPct >= 80 ? 'text-green-600' :
-                projectionData.efficiency.efficiencyPct >= 50 ? 'text-amber-600' : 'text-red-600'
-              }`}>
-                {fmt(projectionData.efficiency.efficiencyPct, 0)}%
-              </div>
-              <div className="text-[10px] text-slate-400">
-                {fmt(projectionData.efficiency.avgLotRatio * 100, 0)}% dei lotti ottimali
-              </div>
-            </div>
-            <div className="bg-slate-50 rounded-lg p-3">
-              <div className="text-[10px] uppercase text-slate-400 tracking-wide">P/L Reale</div>
-              <div className={`text-lg font-bold font-mono ${projectionData.efficiency.currentPnl >= 0 ? 'text-green-600' : 'text-red-600'}`}>
-                {fmtUsd(projectionData.efficiency.currentPnl)}
-              </div>
-              <div className="text-[10px] text-slate-400">Con lotti reali dai trade</div>
-            </div>
-            <div className="bg-slate-50 rounded-lg p-3">
-              <div className="text-[10px] uppercase text-slate-400 tracking-wide">P/L Stimato (Ottimizzato)</div>
-              <div className={`text-lg font-bold font-mono ${projectionData.efficiency.optimizedPnl >= 0 ? 'text-green-600' : 'text-red-600'}`}>
-                {fmtUsd(projectionData.efficiency.optimizedPnl)}
-              </div>
-              <div className="text-[10px] text-slate-400">
-                Gap: <span className="text-amber-600 font-medium">{fmtUsd(projectionData.efficiency.gapPnl)}</span>
+          {/* Sizing comparison: Real vs Optimized */}
+          <div className="grid grid-cols-2 gap-4 mb-3">
+            {/* Your sizing */}
+            <div className="bg-slate-50 rounded-lg p-3 border-l-4 border-indigo-400">
+              <div className="text-[10px] uppercase text-indigo-500 tracking-wide font-semibold mb-1">Il tuo sizing (reale)</div>
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <div className="text-[10px] text-slate-400">P/L</div>
+                  <div className={`text-lg font-bold font-mono ${projectionData.efficiency.currentPnl >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                    {fmtUsd(projectionData.efficiency.currentPnl)}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-[10px] text-slate-400">Max DD</div>
+                  <div className="text-lg font-bold font-mono text-red-600">
+                    {fmtUsd(-projectionData.efficiency.realDdEstimate)}
+                  </div>
+                  <div className="text-[10px] text-red-500">{fmtPct(projectionData.efficiency.realDdPct, 1)} dell'equity</div>
+                </div>
               </div>
             </div>
+            {/* Optimized sizing */}
+            <div className="bg-slate-50 rounded-lg p-3 border-l-4 border-green-400">
+              <div className="text-[10px] uppercase text-green-600 tracking-wide font-semibold mb-1">Sizing ottimale (Kelly/HRP)</div>
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <div className="text-[10px] text-slate-400">P/L stimato</div>
+                  <div className={`text-lg font-bold font-mono ${projectionData.efficiency.optimizedPnl >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                    {fmtUsd(projectionData.efficiency.optimizedPnl)}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-[10px] text-slate-400">Max DD stimato</div>
+                  <div className="text-lg font-bold font-mono text-red-600">
+                    {fmtUsd(-projectionData.efficiency.optDdEstimate)}
+                  </div>
+                  <div className="text-[10px] text-red-500">{fmtPct(projectionData.efficiency.optDdPct, 1)} dell'equity</div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Tradeoff summary */}
+          <div className={`text-xs p-2.5 rounded-lg mb-3 ${
+            projectionData.efficiency.realDdPct > 8 ? 'bg-red-50 text-red-700' :
+            projectionData.efficiency.realDdPct > 5 ? 'bg-amber-50 text-amber-700' :
+            'bg-blue-50 text-blue-700'
+          }`}>
+            {projectionData.efficiency.avgLotRatio > 1.2 ? (
+              <>Il tuo sizing reale è <strong>{fmt(projectionData.efficiency.avgLotRatio, 1)}x</strong> quello ottimale.
+              Rendi <strong>{fmtUsd(projectionData.efficiency.currentPnl - projectionData.efficiency.optimizedPnl)}</strong> in più
+              ma rischi <strong>{fmt(projectionData.efficiency.riskMultiplier, 1)}x</strong> più DD.
+              {projectionData.efficiency.realDdPct > 8 && ' FTMO limit 10% — margine ridotto!'}
+              {projectionData.efficiency.realDdPct > 5 && projectionData.efficiency.realDdPct <= 8 && ' Attenzione al budget DD.'}
+              </>
+            ) : projectionData.efficiency.avgLotRatio < 0.8 ? (
+              <>Il tuo sizing reale è solo il <strong>{fmt(projectionData.efficiency.avgLotRatio * 100, 0)}%</strong> dell'ottimale.
+              Stai lasciando <strong>{fmtUsd(Math.abs(projectionData.efficiency.gapPnl))}</strong> sul tavolo con rischio contenuto.</>
+            ) : (
+              <>Il tuo sizing è allineato all'ottimale. Buon bilanciamento rischio/rendimento.</>
+            )}
           </div>
 
           {/* Per-strategy sizing comparison table */}
