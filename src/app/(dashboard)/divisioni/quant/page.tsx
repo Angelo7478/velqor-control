@@ -169,7 +169,14 @@ export default function QuantPage() {
       const json = await res.json()
       if (json.success) {
         setBenchResult(`Benchmark aggiornati: ${json.benchmarks?.reduce((s: number, b: { rows: number }) => s + b.rows, 0)} prezzi, ${json.alpha?.length} strategie`)
-        await loadData()
+        // Reload strategies without resetting account selector
+        const supabase = createClient()
+        const { data: strats } = await supabase.from('qel_strategies').select('*').order('magic')
+        if (strats) {
+          setBaseStrategies(strats)
+          // Re-apply per-account data
+          await loadAccountPerf()
+        }
       } else {
         setBenchResult(`Errore: ${json.error}`)
       }
