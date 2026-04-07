@@ -3,7 +3,15 @@
 import { useEffect, useState } from 'react'
 import { createClient } from '@/lib/supabase-browser'
 import { QelStrategy, QelAccount } from '@/types/database'
-import { fmt, fmtUsd, timeAgo, statusBadge, groupColor, plColor, ddBarColor, fmtAlpha, alphaColor } from '@/lib/quant-utils'
+import {
+  fmt, fmtUsd, fmtPct, timeAgo, statusBadge, groupColor, plColor, ddBarColor, fmtAlpha, alphaColor,
+  buildStrategyVsBenchmark, detectMarketRegimes, calcPerRegimeStats,
+  BenchmarkPoint, RegimeZone, RegimeStats, ASSET_BENCHMARK_LABEL,
+} from '@/lib/quant-utils'
+import {
+  ComposedChart, Line, Area, XAxis, YAxis, CartesianGrid, Tooltip,
+  ResponsiveContainer, ReferenceLine, ReferenceArea,
+} from 'recharts'
 import AccountDashboard from './account-dashboard'
 import InfoTooltip from '@/components/ui/InfoTooltip'
 
@@ -24,9 +32,14 @@ export default function QuantPage() {
   const [selectedAcc, setSelectedAcc] = useState<QelAccount | null>(null)
   const [benchLoading, setBenchLoading] = useState(false)
   const [benchResult, setBenchResult] = useState<string | null>(null)
+  const [stratBenchData, setStratBenchData] = useState<BenchmarkPoint[]>([])
+  const [stratRegimes, setStratRegimes] = useState<RegimeZone[]>([])
+  const [stratRegimeStats, setStratRegimeStats] = useState<RegimeStats[]>([])
+  const [chartLoading, setChartLoading] = useState(false)
 
   useEffect(() => { loadInitial() }, [])
   useEffect(() => { if (selectedAccountId) loadAccountPerf() }, [selectedAccountId])
+  useEffect(() => { if (selectedStrat && selectedAccountId) loadStratBenchmark(selectedStrat) }, [selectedStrat, selectedAccountId])
 
   async function loadInitial() {
     const supabase = createClient()
@@ -79,6 +92,69 @@ export default function QuantPage() {
 
   async function loadData() {
     await loadInitial()
+  }
+
+  /** Load strategy trades + benchmark data for the dual chart */
+  async function loadStratBenchmark(strat: QelStrategy) {
+    setChartLoading(true)
+    setStratBenchData([])
+    setStratRegimes([])
+    setStratRegimeStats([])
+
+    const supabase = createClient()
+    const acc = accounts.find(a => a.id === selectedAccountId)
+    const accSize = Number(acc?.account_size || 10000)
+
+    // Load trades for this strategy on this account
+    const { data: trades } = await supabase
+      .from('qel_trades')
+      .select('net_profit, close_time')
+      .eq('account_id', selectedAccountId)
+      .eq('strategy_id', strat.id)
+      .eq('is_open', false)
+      .not('close_time', 'is', null)
+      .order('close_time')
+
+    if (!trades || trades.length === 0) { setChartLoading(false); return }
+
+    const firstDate = trades[0].close_time.slice(0, 10)
+    const lastDate = trades[trades.length - 1].close_time.slice(0, 10)
+
+    // Load benchmark data for this asset (with extra history for SMA200)
+    const extraStart = new Date(firstDate)
+    extraStart.setDate(extraStart.getDate() - 250) // 250 days before for SMA200
+
+    const { data: benchFull } = await supabase
+      .from('qel_benchmarks')
+      .select('ts, close_price')
+      .eq('symbol', strat.asset)
+      .gte('ts', extraStart.toISOString().slice(0, 10))
+      .lte('ts', lastDate)
+      .order('ts')
+
+    if (!benchFull || benchFull.length === 0) { setChartLoading(false); return }
+
+    // Detect regimes on full history (including pre-trade period for SMA)
+    const regimes = detectMarketRegimes(benchFull)
+    setStratRegimes(regimes)
+
+    // Build dual curve only for the trading period
+    const benchTradingPeriod = benchFull.filter(b => b.ts >= firstDate)
+    const dualCurve = buildStrategyVsBenchmark(
+      trades.map(t => ({ net_profit: Number(t.net_profit), close_time: t.close_time })),
+      benchTradingPeriod,
+      accSize,
+    )
+    setStratBenchData(dualCurve)
+
+    // Regime stats
+    const regimeStats = calcPerRegimeStats(
+      trades.map(t => ({ net_profit: Number(t.net_profit), close_time: t.close_time })),
+      regimes,
+    )
+    setStratRegimeStats(regimeStats)
+
+    setChartLoading(false)
   }
 
   async function refreshBenchmarks() {
@@ -611,6 +687,95 @@ export default function QuantPage() {
                 )}
               </div>
             )}
+
+            {/* Benchmark Chart: Strategy vs Underlying */}
+            {stratBenchData.length > 0 && (
+              <div className="mb-6">
+                <h3 className="text-sm font-semibold text-slate-700 mb-2">
+                  Strategia vs {ASSET_BENCHMARK_LABEL[selectedStrat.asset] || selectedStrat.asset} (Buy &amp; Hold)
+                  <InfoTooltip metricKey="alpha" />
+                </h3>
+                <div className="bg-white rounded-xl border border-slate-200 p-4">
+                  <ResponsiveContainer width="100%" height={320}>
+                    <ComposedChart data={stratBenchData} margin={{ top: 5, right: 20, left: 10, bottom: 5 }}>
+                      <defs>
+                        <linearGradient id="alphaGrad" x1="0" y1="0" x2="0" y2="1">
+                          <stop offset="5%" stopColor="#22c55e" stopOpacity={0.15} />
+                          <stop offset="95%" stopColor="#22c55e" stopOpacity={0} />
+                        </linearGradient>
+                      </defs>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                      <XAxis dataKey="date" tick={{ fontSize: 10 }} stroke="#94a3b8"
+                        tickFormatter={v => v.slice(5)} interval={Math.max(1, Math.floor(stratBenchData.length / 8))} />
+                      <YAxis tick={{ fontSize: 10 }} stroke="#94a3b8"
+                        tickFormatter={v => `${v > 0 ? '+' : ''}${v.toFixed(1)}%`}
+                        domain={['auto', 'auto']} />
+                      <Tooltip
+                        contentStyle={{ fontSize: 11, borderRadius: 8 }}
+                        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                        formatter={(v: any, name: any) => [
+                          `${Number(v) > 0 ? '+' : ''}${Number(v).toFixed(2)}%`,
+                          name === 'stratReturn' ? 'Strategia' : name === 'benchReturn' ? 'Buy & Hold' : 'Alpha',
+                        ]}
+                      />
+                      {/* Regime background zones */}
+                      {stratRegimes.filter(z => z.startDate >= stratBenchData[0]?.date).map((z, i) => (
+                        <ReferenceArea key={i} x1={z.startDate} x2={z.endDate}
+                          fill={z.regime === 'up' ? '#22c55e' : z.regime === 'down' ? '#ef4444' : '#f59e0b'}
+                          fillOpacity={0.06} />
+                      ))}
+                      <ReferenceLine y={0} stroke="#94a3b8" strokeDasharray="4 4" />
+                      <Line type="monotone" dataKey="benchReturn" stroke="#94a3b8" strokeWidth={1.5}
+                        strokeDasharray="6 3" dot={false} name="benchReturn" />
+                      <Line type="monotone" dataKey="stratReturn" stroke="#7c3aed" strokeWidth={2}
+                        dot={false} name="stratReturn" />
+                    </ComposedChart>
+                  </ResponsiveContainer>
+
+                  {/* Legend */}
+                  <div className="flex gap-4 mt-2 text-[10px] text-slate-500 justify-center">
+                    <span className="flex items-center gap-1"><span className="w-3 h-0.5 bg-violet-600 inline-block"></span> Strategia</span>
+                    <span className="flex items-center gap-1"><span className="w-3 h-0.5 bg-slate-400 inline-block border-dashed"></span> Buy &amp; Hold</span>
+                    <span className="flex items-center gap-1"><span className="w-2 h-2 bg-green-500/20 inline-block rounded-sm"></span> Trend Up</span>
+                    <span className="flex items-center gap-1"><span className="w-2 h-2 bg-red-500/20 inline-block rounded-sm"></span> Trend Down</span>
+                    <span className="flex items-center gap-1"><span className="w-2 h-2 bg-amber-500/20 inline-block rounded-sm"></span> Range</span>
+                  </div>
+                </div>
+
+                {/* Regime performance table */}
+                {stratRegimeStats.length > 0 && (
+                  <div className="mt-3 bg-white rounded-xl border border-slate-200 p-4">
+                    <h4 className="text-xs font-semibold text-slate-600 mb-2">Performance per regime di mercato</h4>
+                    <table className="w-full text-xs">
+                      <thead>
+                        <tr className="text-slate-400 border-b border-slate-200">
+                          <th className="text-left py-1.5">Regime</th>
+                          <th className="text-right py-1.5">Trade</th>
+                          <th className="text-right py-1.5">Win Rate</th>
+                          <th className="text-right py-1.5">Media trade</th>
+                          <th className="text-right py-1.5">P/L</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {stratRegimeStats.map(rs => (
+                          <tr key={rs.regime}>
+                            <td className="py-1.5 font-medium">
+                              <span className={`inline-block w-2 h-2 rounded-sm mr-1.5 ${rs.regime === 'up' ? 'bg-green-500/30' : rs.regime === 'down' ? 'bg-red-500/30' : 'bg-amber-500/30'}`}></span>
+                              {rs.label}
+                            </td>
+                            <td className="text-right py-1.5">{rs.trades}</td>
+                            <td className="text-right py-1.5">{fmtPct(rs.winRate, 1)}</td>
+                            <td className={`text-right py-1.5 ${plColor(rs.avgTrade)}`}>{fmtUsd(rs.avgTrade, 2)}</td>
+                            <td className={`text-right py-1.5 font-medium ${plColor(rs.totalPl)}`}>{fmtUsd(rs.totalPl)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            )}
+            {chartLoading && <p className="text-xs text-violet-500 animate-pulse mb-4">Caricamento benchmark...</p>}
 
             {/* Test vs Real Comparison */}
             <h3 className="text-sm font-semibold text-slate-700 mb-3">Test vs Real</h3>

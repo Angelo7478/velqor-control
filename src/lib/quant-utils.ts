@@ -48,6 +48,179 @@ export const ASSET_BENCHMARK_LABEL: Record<string, string> = {
   'USDCAD': 'USD/CAD',
 }
 
+// --- Benchmark vs Strategy ---
+
+export type MarketRegime = 'up' | 'down' | 'range'
+
+export interface BenchmarkPoint {
+  date: string        // YYYY-MM-DD
+  stratReturn: number // strategy cumulative return %
+  benchReturn: number // buy-and-hold return %
+  alpha: number       // stratReturn - benchReturn
+}
+
+export interface RegimeZone {
+  startDate: string
+  endDate: string
+  regime: MarketRegime
+}
+
+export interface RegimeStats {
+  regime: MarketRegime
+  label: string
+  trades: number
+  winRate: number
+  avgTrade: number
+  totalPl: number
+}
+
+/**
+ * Build dual curve: strategy cumulative return % vs benchmark buy-and-hold return %.
+ * Both normalized to 0% at the start date.
+ */
+export function buildStrategyVsBenchmark(
+  trades: { net_profit: number; close_time: string }[],
+  benchmarkPrices: { ts: string; close_price: number }[],
+  accountSize: number,
+): BenchmarkPoint[] {
+  if (trades.length === 0 || benchmarkPrices.length === 0 || accountSize <= 0) return []
+
+  const benchStart = Number(benchmarkPrices[0].close_price)
+  if (benchStart === 0) return []
+
+  // Build date→benchmark return map
+  const benchMap = new Map<string, number>()
+  for (const b of benchmarkPrices) {
+    benchMap.set(b.ts, (Number(b.close_price) / benchStart - 1) * 100)
+  }
+
+  // Build strategy curve with daily resolution
+  const points: BenchmarkPoint[] = []
+  let cumPnl = 0
+  let tradeIdx = 0
+
+  for (const b of benchmarkPrices) {
+    // Add trades that closed on or before this date
+    while (tradeIdx < trades.length && trades[tradeIdx].close_time.slice(0, 10) <= b.ts) {
+      cumPnl += trades[tradeIdx].net_profit
+      tradeIdx++
+    }
+    const stratReturn = (cumPnl / accountSize) * 100
+    const benchReturn = benchMap.get(b.ts) || 0
+    points.push({
+      date: b.ts,
+      stratReturn: Math.round(stratReturn * 100) / 100,
+      benchReturn: Math.round(benchReturn * 100) / 100,
+      alpha: Math.round((stratReturn - benchReturn) * 100) / 100,
+    })
+  }
+
+  // Process remaining trades after last benchmark date
+  while (tradeIdx < trades.length) {
+    cumPnl += trades[tradeIdx].net_profit
+    tradeIdx++
+  }
+  if (trades.length > 0 && points.length > 0) {
+    const lastPt = points[points.length - 1]
+    lastPt.stratReturn = Math.round((cumPnl / accountSize) * 100 * 100) / 100
+    lastPt.alpha = Math.round((lastPt.stratReturn - lastPt.benchReturn) * 100) / 100
+  }
+
+  return points
+}
+
+/**
+ * Detect market regimes from daily close prices using SMA50/SMA200 crossover.
+ * Returns zones of consecutive regime (up/down/range).
+ */
+export function detectMarketRegimes(prices: { ts: string; close_price: number }[]): RegimeZone[] {
+  if (prices.length < 50) return [] // need at least 50 days for SMA50
+
+  const closes = prices.map(p => Number(p.close_price))
+
+  // Calculate SMAs
+  function sma(data: number[], period: number, idx: number): number | null {
+    if (idx < period - 1) return null
+    let sum = 0
+    for (let i = idx - period + 1; i <= idx; i++) sum += data[i]
+    return sum / period
+  }
+
+  const zones: RegimeZone[] = []
+  let currentRegime: MarketRegime | null = null
+  let zoneStart = ''
+
+  for (let i = 0; i < closes.length; i++) {
+    const sma50 = sma(closes, 50, i)
+    const sma200 = sma(closes, 200, i)
+    const close = closes[i]
+
+    let regime: MarketRegime = 'range'
+    if (sma50 !== null && sma200 !== null) {
+      if (close > sma50 && sma50 > sma200) regime = 'up'
+      else if (close < sma50 && sma50 < sma200) regime = 'down'
+    } else if (sma50 !== null) {
+      // Only SMA50 available (days 50-199)
+      regime = close > sma50 ? 'up' : close < sma50 ? 'down' : 'range'
+    }
+
+    if (regime !== currentRegime) {
+      if (currentRegime !== null && zoneStart) {
+        zones[zones.length - 1].endDate = prices[i - 1].ts
+      }
+      currentRegime = regime
+      zoneStart = prices[i].ts
+      zones.push({ startDate: zoneStart, endDate: prices[i].ts, regime })
+    } else {
+      zones[zones.length - 1].endDate = prices[i].ts
+    }
+  }
+
+  return zones
+}
+
+/**
+ * Calculate strategy performance breakdown by market regime.
+ */
+export function calcPerRegimeStats(
+  trades: { net_profit: number; close_time: string }[],
+  regimes: RegimeZone[],
+): RegimeStats[] {
+  const labels: Record<MarketRegime, string> = { up: 'Trend Up', down: 'Trend Down', range: 'Range' }
+  const buckets: Record<MarketRegime, { trades: number[]; }> = {
+    up: { trades: [] }, down: { trades: [] }, range: { trades: [] },
+  }
+
+  for (const t of trades) {
+    const tDate = t.close_time.slice(0, 10)
+    // Find which regime this trade falls in
+    let matched: MarketRegime = 'range'
+    for (const z of regimes) {
+      if (tDate >= z.startDate && tDate <= z.endDate) {
+        matched = z.regime
+        break
+      }
+    }
+    buckets[matched].trades.push(t.net_profit)
+  }
+
+  const result: RegimeStats[] = []
+  for (const regime of ['up', 'down', 'range'] as MarketRegime[]) {
+    const trs = buckets[regime].trades
+    if (trs.length === 0) continue
+    const wins = trs.filter(p => p > 0).length
+    result.push({
+      regime,
+      label: labels[regime],
+      trades: trs.length,
+      winRate: Math.round((wins / trs.length) * 1000) / 10,
+      avgTrade: Math.round(trs.reduce((s, v) => s + v, 0) / trs.length * 100) / 100,
+      totalPl: Math.round(trs.reduce((s, v) => s + v, 0) * 100) / 100,
+    })
+  }
+  return result
+}
+
 export function timeAgo(dateStr: string | null): string {
   if (!dateStr) return 'Mai sincronizzato'
   const diff = Date.now() - new Date(dateStr).getTime()
