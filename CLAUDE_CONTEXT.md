@@ -196,15 +196,38 @@ src/
 - [x] Supabase: pg_cron + pg_net, bridge-watchdog v2 con dedup + recovery notifications
 - [x] Deploy su tutte e 3 le VPS (10K, 80K, 100K) — verificato funzionante
 
-### Cosa resta (Sprint 7+)
-- [ ] ~108 trade senza magic → bridge enrich da VPS
-- [ ] Import secondo CSV 360 trade per 100K
-- [ ] Benchmark: confronto strategia vs buy-and-hold sottostante (alpha via Yahoo Finance)
-- [ ] Tooltip didattici (?) su metriche tecniche — componente InfoTooltip
+### Phase 3 — Data Completion + Benchmark + Regime (completata 2026-04-07)
+- [x] Import 360 trade conto 80K + bridge enrich VPS (80K: 0 senza magic)
+- [x] Migration 007: SQL enrich trade univoci + fn_recalc_strategy_stats()
+- [x] InfoTooltip (23 metriche IT, createPortal, responsive) su 6 pagine
+- [x] Edge Function fetch-benchmarks: Yahoo Finance OHLCV 7 asset + alpha
+- [x] Colonna Alpha ranking + bottone Benchmark on-demand
+- [x] **REGOLA CRITICA**: eliminata aggregazione cross-account. Ogni pagina ha selettore conto, metriche solo per-conto dalla view v_strategy_recent_performance
+- [x] Grafico duale: strategia vs buy-and-hold con regime detection (SMA50/200)
+- [x] Tabella performance per regime (trend up/down/range)
+- [x] Health page: selettore conto diretto (non dipende da portfolio)
+- [x] Fix import CSV performance (no re-parsing su render)
+- [x] Responsive: header mobile, griglie adattive, chart height
+- [x] .bat per sync giornaliero VPS (scheduled task Windows)
+
+### Struttura Phase 3 (aggiornata)
+```
+src/
+  components/ui/InfoTooltip.tsx       ← Tooltip "?" con createPortal (responsive)
+  lib/tooltip-content.ts             ← 23 metriche in italiano con formula + esempio
+  lib/quant-utils.ts                 ← +buildStrategyVsBenchmark, detectMarketRegimes, calcPerRegimeStats, fmtAlpha, alphaColor
+```
+
+### Edge Functions attive
+- `fetch-benchmarks` — Yahoo Finance OHLCV per 7 asset, calcolo alpha, on-demand
+- `bridge-watchdog` — monitoring bridge con dedup alert
+
+### Cosa resta (Phase 4+)
 - [ ] Margine utilizzato nel builder
-- [ ] Import dati WFM/MC da SQX → popolare qel_strategy_tests
 - [ ] Costi per trade: spread + commissioni + swap → expectancy netta
-- [ ] Grafica report: logo Velqor + "Velqor Intelligent Quant System"
+- [ ] Logo Velqor + "Velqor Intelligent Quant System" nel report PDF
+- [ ] Import dati WFM/MC da SQX → popolare qel_strategy_tests
+- [ ] 10K: 48 trade ambigui senza magic (storico MT5 troppo vecchio)
 - [ ] AI Sizing Advisor
 - [ ] N8N: weekly optimization + sync monitor + alert Telegram
 - [ ] Rolling correlations (target fine 2026 con dati sufficienti)
