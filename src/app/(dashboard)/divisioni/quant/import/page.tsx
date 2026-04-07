@@ -71,17 +71,56 @@ export default function ImportTradePage() {
       if (t.rows.length > bestTable.rows.length) bestTable = t
     }
 
-    const headerRow = bestTable.rows[0]
+    // Find header row: first row with 5+ cells containing trade-related keywords
+    // MT5 HTML has ~7 title/metadata rows before the actual header
+    let headerIdx = 0
+    const tradeKeywords = ['time', 'symbol', 'profit', 'position', 'type', 'volume', 'price', 'deal', 'order', 'swap', 'commission', 'simbolo', 'profitto', 'prezzo']
+    for (let r = 0; r < Math.min(bestTable.rows.length, 20); r++) {
+      const cells = bestTable.rows[r].cells
+      if (cells.length < 5) continue
+      const text = Array.from(cells).map(c => (c.textContent || '').toLowerCase()).join(' ')
+      if (tradeKeywords.some(kw => text.includes(kw))) {
+        headerIdx = r
+        break
+      }
+    }
+
+    const headerRow = bestTable.rows[headerIdx]
     if (!headerRow) return []
-    const rawHeaders = Array.from(headerRow.cells).map(c => cleanKey(c.textContent || ''))
+    // Skip hidden cells in header too
+    const rawHeaders = Array.from(headerRow.cells)
+      .filter(c => !c.classList.contains('hidden'))
+      .map(c => cleanKey(c.textContent || ''))
     const headers = deduplicateHeaders(rawHeaders)
 
     const rows: Record<string, string>[] = []
-    for (let i = 1; i < bestTable.rows.length; i++) {
+    let hasDataRows = false
+    for (let i = headerIdx + 1; i < bestTable.rows.length; i++) {
       const cells = bestTable.rows[i].cells
-      if (cells.length < 3) continue
+      // Section boundary: spacer/header row after data started → stop
+      if (cells.length < 3) {
+        if (hasDataRows) break
+        continue
+      }
+      if (cells[0].tagName === 'TH') {
+        if (hasDataRows) break
+        continue
+      }
+      hasDataRows = true
       const row: Record<string, string> = {}
-      headers.forEach((h, j) => { row[h] = cells[j]?.textContent?.trim() || '' })
+      let mt5Strategy = ''
+      let hIdx = 0
+      for (let c = 0; c < cells.length; c++) {
+        if (cells[c].classList.contains('hidden')) {
+          mt5Strategy = cells[c].textContent?.trim() || ''
+          continue // skip hidden, don't advance header index
+        }
+        if (hIdx < headers.length) {
+          row[headers[hIdx]] = cells[c].textContent?.trim() || ''
+        }
+        hIdx++
+      }
+      if (mt5Strategy) row['_mt5_strategy'] = mt5Strategy
       rows.push(row)
     }
     return rows
@@ -115,16 +154,25 @@ export default function ImportTradePage() {
   function handleFile(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0]
     if (!file) return
-    const reader = new FileReader()
-    reader.onload = (ev) => {
-      const text = ev.target?.result as string
-      setCsvText(text)
-      const rows = parseCSV(text)
-      setParsedRows(rows)
-      setPreview(rows.slice(0, 5))
-      setResult(null)
+    // Detect UTF-16LE BOM (FF FE) before reading text
+    const bomReader = new FileReader()
+    bomReader.onload = (ev) => {
+      const buf = ev.target?.result as ArrayBuffer
+      const bom = new Uint8Array(buf, 0, 2)
+      const isUtf16LE = bom[0] === 0xFF && bom[1] === 0xFE
+
+      const textReader = new FileReader()
+      textReader.onload = (ev2) => {
+        const text = ev2.target?.result as string
+        setCsvText(text)
+        const rows = parseCSV(text)
+        setParsedRows(rows)
+        setPreview(rows.slice(0, 5))
+        setResult(null)
+      }
+      textReader.readAsText(file, isUtf16LE ? 'utf-16le' : 'utf-8')
     }
-    reader.readAsText(file)
+    bomReader.readAsArrayBuffer(file.slice(0, 2))
   }
 
   function handlePaste(text: string) {
@@ -143,25 +191,30 @@ export default function ImportTradePage() {
       row[cleanKey(k)] = v
     }
 
-    // FTMO Italian + English + generic column names
-    const openTime = row['apri'] || row['open time'] || row['open_time'] || row['opentime'] || row['time'] || row['open date'] || row['data apertura'] || ''
-    const closeTime = row['chiudi'] || row['close time'] || row['close_time'] || row['closetime'] || row['close date'] || row['data chiusura'] || ''
+    // Normalize MT5 dot-dates (2025.01.15 14:30:00 → 2025-01-15 14:30:00)
+    const fixDate = (d: string) => d.replace(/^(\d{4})\.(\d{2})\.(\d{2})/, '$1-$2-$3')
+
+    // FTMO Italian + English + MT5 HTML column names
+    // MT5 HTML has duplicate columns: time/time_2, price/price_2 (via deduplicateHeaders)
+    const openTime = fixDate(row['apri'] || row['open time'] || row['open_time'] || row['opentime'] || row['time'] || row['open date'] || row['data apertura'] || '')
+    const closeTime = fixDate(row['chiudi'] || row['close time'] || row['close_time'] || row['closetime'] || row['time_2'] || row['close date'] || row['data chiusura'] || '')
     const symbol = row['simbolo'] || row['symbol'] || row['instrument'] || row['strumento'] || ''
     const direction = row['tipologia'] || row['action'] || row['type'] || row['direction'] || row['tipo'] || row['side'] || ''
     const profit = row['profitto'] || row['profit'] || row['p/l'] || row['pnl'] || ''
-    const commission = row['commissioni'] || row['commissione'] || row['commission'] || row['comm'] || ''
+    const commission = row['commissioni'] || row['commissione'] || row['commission'] || row['comm'] || row['fee'] || ''
     const swap = row['swap'] || ''
     const ticket = row['ticket'] || row['order'] || row['deal'] || row['position'] || row['id'] || ''
-    const sl = row['sl'] || row['stop loss'] || row['stoploss'] || ''
-    const tp = row['tp'] || row['take profit'] || row['takeprofit'] || ''
+    const sl = row['sl'] || row['s/l'] || row['s / l'] || row['stop loss'] || row['stoploss'] || ''
+    const tp = row['tp'] || row['t/p'] || row['t / p'] || row['take profit'] || row['takeprofit'] || ''
     const pips = row['pips'] || ''
     const durationCol = row['durata del trade in secondi'] || row['duration'] || ''
+    const comment = row['comment'] || row['commento'] || ''
 
-    // Open price: "prezzo" (first occurrence, or deduped as just "prezzo")
-    const openPrice = row['prezzo'] || row['open price'] || row['open_price'] || row['openprice'] || row['prezzo apertura'] || ''
+    // Open price: "prezzo" (first occurrence), or MT5 "price"
+    const openPrice = row['prezzo'] || row['open price'] || row['open_price'] || row['openprice'] || row['prezzo apertura'] || row['price'] || ''
 
-    // Close price: "prezzo_2" (second occurrence via dedup), or explicit close price columns
-    let closePrice = row['prezzo_2'] || row['prezzo chiusura'] || row['close price'] || row['close_price'] || row['closeprice'] || ''
+    // Close price: deduped "prezzo_2"/"price_2", or explicit close price columns
+    let closePrice = row['prezzo_2'] || row['price_2'] || row['prezzo chiusura'] || row['close price'] || row['close_price'] || row['closeprice'] || ''
 
     let magic = row['magic'] || row['magic number'] || row['magic_number'] || row['expert id'] || ''
     let lots = row['lotti'] || row['lots'] || row['size'] || ''
@@ -194,7 +247,10 @@ export default function ImportTradePage() {
       }
     }
 
+    // Skip MT5 balance/deposit/withdrawal rows (no symbol)
     if (!symbol || !openTime) return null
+    const symbolLower = symbol.toLowerCase()
+    if (symbolLower === 'balance' || symbolLower === 'credit' || symbolLower === 'deposit' || symbolLower === 'withdrawal') return null
 
     // Parse direction
     let dir: 'buy' | 'sell' = 'buy'
@@ -205,8 +261,9 @@ export default function ImportTradePage() {
 
     const profitNum = parseFloat(profit) || 0
     const commNum = parseFloat(commission) || 0
+    const feeNum = parseFloat(row['fee'] || '') || 0
     const swapNum = parseFloat(swap) || 0
-    const netProfit = profitNum + commNum + swapNum
+    const netProfit = profitNum + commNum + feeNum + swapNum
     const lotsNum = parseFloat(lots) || 0
     const magicNum = parseInt(magic) || 0
     const ticketNum = parseInt(ticket) || Math.floor(Date.parse(openTime) / 1000 + Math.random() * 10000)
@@ -236,7 +293,7 @@ export default function ImportTradePage() {
       open_time: openTime,
       close_time: closeTime || null,
       profit: profitNum,
-      commission: commNum,
+      commission: commNum + feeNum,
       swap: swapNum,
       net_profit: netProfit,
       duration_seconds: durationSeconds,
