@@ -1313,6 +1313,7 @@ export interface AdvisorRecommendation {
   strategyId: string
   magic: number
   name: string
+  include: boolean            // true = advisor recommends including this strategy
   action: 'increase' | 'decrease' | 'hold' | 'pause' | 'monitor'
   lotMultiplier: number
   suggestedLots: number
@@ -1322,26 +1323,25 @@ export interface AdvisorRecommendation {
 }
 
 export interface AdvisorSummary {
-  recommendations: AdvisorRecommendation[]
+  included: AdvisorRecommendation[]   // strategies to include
+  excluded: AdvisorRecommendation[]   // strategies to exclude/pause
   portfolioHealth: 'good' | 'attention' | 'critical'
   summary: string
   totalStrategies: number
-  healthyCount: number
-  warningCount: number
-  criticalCount: number
+  includedCount: number
+  excludedCount: number
 }
 
 export function generateSizingAdvice(inputs: AdvisorInput[]): AdvisorSummary {
-  const recommendations: AdvisorRecommendation[] = []
-  let healthyCount = 0
-  let warningCount = 0
-  let criticalCount = 0
+  const included: AdvisorRecommendation[] = []
+  const excluded: AdvisorRecommendation[] = []
 
   for (const s of inputs) {
     const rec: AdvisorRecommendation = {
       strategyId: s.strategyId,
       magic: s.magic,
       name: s.name,
+      include: true,
       action: 'hold',
       lotMultiplier: 1.0,
       suggestedLots: s.currentLots,
@@ -1358,88 +1358,115 @@ export function generateSizingAdvice(inputs: AdvisorInput[]): AdvisorSummary {
       ? s.testWinPct - s.realWinPct
       : 0
 
-    // Priority 1: Insufficient data
-    if (s.realTrades < 5) {
+    // === EXCLUDE decisions ===
+
+    // Critical: DD > 2x test + negative edge + enough data → exclude
+    if (s.realTrades >= 30 && ddRatio > 2 && !isOutperforming && s.fitnessScore < 30) {
+      rec.include = false
+      rec.action = 'pause'
+      rec.lotMultiplier = 0
+      rec.severity = 'critical'
+      rec.reason = 'Edge compromesso — DD > 2x test, fitness critico'
+      rec.details.push(`Fitness: ${fmt(s.fitnessScore, 0)}/100`, `DD ratio: ${fmt(ddRatio, 1)}x`, `P/L: $${fmt(s.realPl, 0)}`)
+    }
+
+    // === INCLUDE decisions (with sizing) ===
+
+    // Insufficient data — include cautiously at base lots
+    else if (s.realTrades < 5) {
+      rec.include = true
       rec.action = 'monitor'
       rec.severity = 'info'
-      rec.reason = 'Dati insufficienti — mantenere sizing attuale e raccogliere dati'
+      rec.reason = 'Dati insufficienti — inclusa a sizing base per raccogliere dati'
       rec.details.push(`Solo ${s.realTrades} trade reali`)
-      healthyCount++
     }
-    // Priority 2: Critical — DD breach + negative edge
+    // DD breach but not broken — include with reduced size
     else if (ddRatio > 2 && !isOutperforming && s.fitnessConfidence > 0.6) {
+      rec.include = true
       rec.action = 'decrease'
       rec.lotMultiplier = 0.7
       rec.severity = 'critical'
-      rec.reason = 'DD reale > 2x test con edge negativo — ridurre del 30%'
+      rec.reason = 'DD reale > 2x test — inclusa a sizing ridotto (-30%)'
       rec.details.push(`DD ratio: ${fmt(ddRatio, 1)}x`, `P/L: $${fmt(s.realPl, 0)}`)
-      criticalCount++
     }
-    // Priority 3: Regime mismatch (trend strategy underperforming)
+    // Regime mismatch — include at base (validation OOS)
     else if (s.style === 'trend_following' && !isOutperforming && s.realTrades >= 10) {
+      rec.include = true
       rec.action = 'hold'
       rec.severity = 'warning'
-      rec.reason = 'Possibile regime sfavorevole — mantenere per validazione OOS'
+      rec.reason = 'Regime sfavorevole — inclusa per validazione OOS'
       rec.details.push('Strategia trend con expectancy negativa', 'Non fermare: arricchisce il database')
-      warningCount++
     }
-    // Priority 4: Warning — DD elevated
+    // DD elevated + low fitness — include with reduced size
     else if (ddRatio > 1.5 && s.fitnessScore < 60) {
+      rec.include = true
       rec.action = 'decrease'
       rec.lotMultiplier = 0.85
       rec.severity = 'warning'
-      rec.reason = 'DD sopra soglia con fitness basso — ridurre del 15%'
+      rec.reason = 'DD sopra soglia — inclusa a sizing ridotto (-15%)'
       rec.details.push(`Fitness: ${fmt(s.fitnessScore, 0)}/100`, `DD ratio: ${fmt(ddRatio, 1)}x`)
-      warningCount++
     }
-    // Priority 5: Warning — Win rate drop but still profitable
+    // Win rate drop but profitable — include, hold
     else if (winDrop > 15 && isOutperforming) {
+      rec.include = true
       rec.action = 'hold'
       rec.severity = 'info'
-      rec.reason = 'Win rate in calo ma P/L positivo — monitorare'
+      rec.reason = 'Win rate in calo ma P/L positivo — inclusa, monitorare'
       rec.details.push(`Win rate: ${fmt(s.realWinPct ?? 0, 1)}% (test: ${fmt(s.testWinPct ?? 0, 1)}%)`)
-      healthyCount++
     }
-    // Priority 6: Healthy + outperforming + pendulum recovery/drawdown
+    // Outperforming in drawdown — include with pendulum boost
     else if (isOutperforming && s.pendulumState === 'drawdown' && s.fitnessScore >= 50) {
+      rec.include = true
       rec.action = 'increase'
       rec.lotMultiplier = s.pendulumMultiplier
       rec.severity = 'info'
-      rec.reason = `Edge confermato in fase recovery — pendulum ${fmt(s.pendulumMultiplier, 2)}x`
+      rec.reason = `Edge confermato in recovery — pendulum ${fmt(s.pendulumMultiplier, 2)}x`
       rec.details.push(`Fitness: ${fmt(s.fitnessScore, 0)}/100`, `DD dal picco: ${fmt(s.ddFromPeak, 1)}%`)
-      healthyCount++
     }
-    // Priority 7: Healthy + high fitness
+    // High fitness + outperforming + enough data — include with boost
     else if (s.fitnessScore >= 80 && isOutperforming && s.realTrades >= 30) {
+      rec.include = true
       rec.action = 'increase'
       rec.lotMultiplier = 1.1
       rec.severity = 'info'
-      rec.reason = 'Fitness eccellente e edge confermato — margine per +10%'
+      rec.reason = 'Fitness eccellente, edge confermato — +10%'
       rec.details.push(`Fitness: ${fmt(s.fitnessScore, 0)}/100`, `${s.realTrades} trade reali`)
-      healthyCount++
     }
-    // Default: Hold
+    // Default: include at base sizing
     else {
+      rec.include = true
       rec.action = 'hold'
       rec.severity = 'info'
-      rec.reason = 'Performance in linea — sizing ottimale'
+      rec.reason = 'Performance in linea — sizing standard'
       if (s.fitnessScore > 0) rec.details.push(`Fitness: ${fmt(s.fitnessScore, 0)}/100`)
-      healthyCount++
     }
 
     rec.suggestedLots = Math.max(0.01, Math.round(s.currentLots * rec.lotMultiplier * 1000) / 1000)
-    recommendations.push(rec)
+
+    if (rec.include) {
+      included.push(rec)
+    } else {
+      rec.suggestedLots = 0
+      excluded.push(rec)
+    }
   }
 
-  const portfolioHealth = criticalCount > 0 ? 'critical' : warningCount > 0 ? 'attention' : 'good'
-  const total = inputs.length
-  const summary = portfolioHealth === 'good'
-    ? `${total} strategie analizzate — portafoglio in buona salute`
-    : portfolioHealth === 'attention'
-    ? `${total} strategie analizzate — ${warningCount} richiedono attenzione`
-    : `${total} strategie analizzate — ${criticalCount} in stato critico`
+  // Sort: included by fitness desc, excluded by severity
+  included.sort((a, b) => {
+    const ai = inputs.find(i => i.strategyId === a.strategyId)
+    const bi = inputs.find(i => i.strategyId === b.strategyId)
+    return (bi?.fitnessScore ?? 0) - (ai?.fitnessScore ?? 0)
+  })
 
-  return { recommendations, portfolioHealth, summary, totalStrategies: total, healthyCount, warningCount, criticalCount }
+  const hasWarnings = included.some(r => r.severity === 'warning') || excluded.length > 0
+  const hasCritical = included.some(r => r.severity === 'critical') || excluded.some(r => r.severity === 'critical')
+  const portfolioHealth = hasCritical ? 'critical' : hasWarnings ? 'attention' : 'good'
+  const total = inputs.length
+  const summary = excluded.length === 0
+    ? `${included.length}/${total} strategie raccomandate — portafoglio in buona salute`
+    : `${included.length}/${total} strategie raccomandate — ${excluded.length} escluse`
+
+  return { included, excluded, portfolioHealth, summary, totalStrategies: total, includedCount: included.length, excludedCount: excluded.length }
 }
 
 // --- Monte Carlo Simulation ---

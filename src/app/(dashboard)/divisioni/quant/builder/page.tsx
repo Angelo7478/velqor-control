@@ -242,12 +242,12 @@ export default function BuilderPage() {
     return calcPortfolioMargin(inputs, equityBase)
   }, [strategies, equityBase, refPrices])
 
-  // ---- Sizing Advisor (memoized) ----
+  // ---- Sizing Advisor (memoized) — analyzes ALL active strategies independently ----
   const advisorData = useMemo<AdvisorSummary | null>(() => {
-    const selected = strategies.filter(s => s.selected && s.tradeCount > 0)
-    if (selected.length === 0 || trades.length === 0) return null
+    const active = strategies.filter(s => s.status === 'active')
+    if (active.length === 0 || trades.length === 0) return null
 
-    const inputs: AdvisorInput[] = selected.map(s => {
+    const inputs: AdvisorInput[] = active.map(s => {
       // Compute per-strategy stats from trades
       const stratTrades = trades.filter(t => t.strategy_id === s.id)
       const wins = stratTrades.filter(t => t.net_profit > 0)
@@ -317,13 +317,23 @@ export default function BuilderPage() {
     return generateSizingAdvice(inputs)
   }, [strategies, trades])
 
-  // ---- Apply advisor recommendations ----
-  function applyAdvisorRecommendations() {
+  // ---- Apply advisor portfolio: select/deselect strategies + set lots ----
+  function applyAdvisorPortfolio() {
     if (!advisorData) return
+    const includedIds = new Set(advisorData.included.map(r => r.strategyId))
     setStrategies(prev => prev.map(s => {
-      const rec = advisorData.recommendations.find(r => r.strategyId === s.id)
-      if (!rec || rec.action === 'hold' || rec.action === 'monitor') return s
-      return { ...s, userLots: rec.suggestedLots, manualOverride: true }
+      const inc = advisorData.included.find(r => r.strategyId === s.id)
+      if (inc) {
+        // Include: select + set suggested lots
+        return { ...s, selected: true, userLots: inc.suggestedLots, manualOverride: true }
+      }
+      const exc = advisorData.excluded.find(r => r.strategyId === s.id)
+      if (exc) {
+        // Exclude: deselect
+        return { ...s, selected: false }
+      }
+      // Not analyzed (e.g. paused) — leave unchanged
+      return s
     }))
   }
 
@@ -1324,8 +1334,8 @@ ${curveData.curves.sort((a, b) => a.magic - b.magic).map(c => `Magic ${String(c.
         </div>
       )}
 
-      {/* Sizing Advisor */}
-      {advisorData && advisorData.recommendations.length > 0 && (
+      {/* Sizing Advisor — independent portfolio suggestion */}
+      {advisorData && (advisorData.included.length > 0 || advisorData.excluded.length > 0) && (
         <div className="bg-white rounded-xl border border-slate-200 p-4">
           <div className="flex items-center justify-between mb-3">
             <div className="flex items-center gap-2">
@@ -1340,46 +1350,73 @@ ${curveData.curves.sort((a, b) => a.magic - b.magic).map(c => `Magic ${String(c.
                  advisorData.portfolioHealth === 'attention' ? 'ATTENZIONE' : 'OK'}
               </span>
             </div>
-            {advisorData.recommendations.some(r => r.action !== 'hold' && r.action !== 'monitor') && (
-              <button onClick={applyAdvisorRecommendations}
-                className="px-3 py-1.5 text-xs bg-indigo-50 text-indigo-700 rounded-lg border border-indigo-200 hover:bg-indigo-100 transition font-medium">
-                Applica suggerimenti
-              </button>
-            )}
+            <button onClick={applyAdvisorPortfolio}
+              className="px-3 py-1.5 text-xs bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition font-medium">
+              Applica portafoglio advisor
+            </button>
           </div>
           <p className="text-xs text-slate-500 mb-3">{advisorData.summary}</p>
-          <div className="space-y-1.5">
-            {advisorData.recommendations.map(r => (
-              <div key={r.strategyId} className={`flex items-start gap-2 p-2 rounded-lg text-xs ${
-                r.severity === 'critical' ? 'bg-red-50' :
-                r.severity === 'warning' ? 'bg-amber-50' : 'bg-slate-50'
-              }`}>
-                <span className="text-base leading-none mt-0.5">
-                  {r.action === 'increase' ? '\u2191' :
-                   r.action === 'decrease' ? '\u2193' :
-                   r.action === 'pause' ? '\u25A0' :
-                   r.action === 'monitor' ? '\u25CB' : '\u2022'}
-                </span>
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2">
-                    <span className="font-mono text-slate-500">M{r.magic}</span>
-                    <span className="font-medium text-slate-700 truncate">{r.name}</span>
-                    {r.lotMultiplier !== 1.0 && (
-                      <span className={`text-[10px] px-1.5 py-0.5 rounded font-mono ${
-                        r.lotMultiplier > 1 ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'
-                      }`}>
-                        {r.lotMultiplier > 1 ? '+' : ''}{fmt((r.lotMultiplier - 1) * 100, 0)}%
-                      </span>
+
+          {/* Included strategies */}
+          <div className="mb-3">
+            <div className="text-[10px] uppercase text-green-600 font-semibold mb-1.5">Raccomandate ({advisorData.includedCount})</div>
+            <div className="space-y-1">
+              {advisorData.included.map(r => (
+                <div key={r.strategyId} className={`flex items-start gap-2 p-2 rounded-lg text-xs ${
+                  r.severity === 'critical' ? 'bg-red-50' :
+                  r.severity === 'warning' ? 'bg-amber-50' : 'bg-green-50/50'
+                }`}>
+                  <span className="text-sm leading-none mt-0.5">
+                    {r.action === 'increase' ? '\u2191' :
+                     r.action === 'decrease' ? '\u2193' :
+                     r.action === 'monitor' ? '\u25CB' : '\u2713'}
+                  </span>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2">
+                      <span className="font-mono text-slate-500">M{r.magic}</span>
+                      <span className="font-medium text-slate-700 truncate">{r.name}</span>
+                      <span className="text-[10px] font-mono text-slate-400">{fmt(r.suggestedLots, 3)} lotti</span>
+                      {r.lotMultiplier !== 1.0 && (
+                        <span className={`text-[10px] px-1.5 py-0.5 rounded font-mono ${
+                          r.lotMultiplier > 1 ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'
+                        }`}>
+                          {r.lotMultiplier > 1 ? '+' : ''}{fmt((r.lotMultiplier - 1) * 100, 0)}%
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-slate-500 mt-0.5">{r.reason}</p>
+                    {r.details.length > 0 && (
+                      <p className="text-[10px] text-slate-400 mt-0.5">{r.details.join(' \u00B7 ')}</p>
                     )}
                   </div>
-                  <p className="text-slate-500 mt-0.5">{r.reason}</p>
-                  {r.details.length > 0 && (
-                    <p className="text-[10px] text-slate-400 mt-0.5">{r.details.join(' · ')}</p>
-                  )}
                 </div>
-              </div>
-            ))}
+              ))}
+            </div>
           </div>
+
+          {/* Excluded strategies */}
+          {advisorData.excluded.length > 0 && (
+            <div>
+              <div className="text-[10px] uppercase text-red-600 font-semibold mb-1.5">Escluse ({advisorData.excludedCount})</div>
+              <div className="space-y-1">
+                {advisorData.excluded.map(r => (
+                  <div key={r.strategyId} className="flex items-start gap-2 p-2 rounded-lg text-xs bg-red-50/50">
+                    <span className="text-sm leading-none mt-0.5 text-red-400">{'\u2717'}</span>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2">
+                        <span className="font-mono text-slate-400">M{r.magic}</span>
+                        <span className="font-medium text-slate-500 truncate">{r.name}</span>
+                      </div>
+                      <p className="text-red-500 mt-0.5">{r.reason}</p>
+                      {r.details.length > 0 && (
+                        <p className="text-[10px] text-slate-400 mt-0.5">{r.details.join(' \u00B7 ')}</p>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       )}
 
