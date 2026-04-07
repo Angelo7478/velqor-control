@@ -210,7 +210,7 @@ export default function HealthPage() {
       </div>
 
       {/* Riepilogo */}
-      <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
+      <div className="grid grid-cols-3 sm:grid-cols-5 gap-2 sm:gap-3">
         <SummaryBox emoji="🟢" count={healthy} label="In forma" border="border-green-200" color="text-green-600" />
         <SummaryBox emoji="🟡" count={warning} label="Attenzione" border="border-amber-200" color="text-amber-600" />
         <SummaryBox emoji="🔴" count={critical} label="Critiche" border="border-red-200" color="text-red-600" />
@@ -289,7 +289,7 @@ function StrategyCard({ card }: { card: HealthCardData }) {
       </div>
 
       {/* Performance reale su questo conto */}
-      <div className="grid grid-cols-3 sm:grid-cols-6 gap-3 mt-3">
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2 sm:gap-3 mt-3">
         <MetricBox
           label="P/L totale"
           value={fmtUsd(card.totalPnl, 2)}

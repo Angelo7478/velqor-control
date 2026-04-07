@@ -212,15 +212,15 @@ export default function QuantPage() {
   ]
 
   return (
-    <div className="max-w-6xl mx-auto">
-      <div className="mb-6 flex items-start justify-between">
+    <div className="max-w-6xl mx-auto px-4 sm:px-0">
+      <div className="mb-6 flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3">
         <div>
-          <h1 className="text-2xl font-bold text-slate-900">Quant Engine</h1>
-          <p className="text-sm text-slate-500 mt-1">
+          <h1 className="text-xl sm:text-2xl font-bold text-slate-900">Quant Engine</h1>
+          <p className="text-xs sm:text-sm text-slate-500 mt-1">
             Trading sistematico &middot; QuantEdgeLab &middot; {activeStrategies.length} strategie
           </p>
           <select
-            className="mt-2 text-sm border border-violet-200 rounded-lg px-3 py-1.5 bg-violet-50 text-violet-700 font-medium"
+            className="mt-2 text-sm border border-violet-200 rounded-lg px-3 py-2 bg-violet-50 text-violet-700 font-medium w-full sm:w-auto"
             value={selectedAccountId}
             onChange={e => setSelectedAccountId(e.target.value)}
           >
@@ -229,37 +229,26 @@ export default function QuantPage() {
             ))}
           </select>
         </div>
-        <div className="flex gap-2">
-          <a
-            href="/divisioni/quant/sizing"
-            className="px-4 py-2 bg-indigo-600 text-white text-sm font-medium rounded-lg hover:bg-indigo-700 transition"
-          >
-            Sizing Engine
+        <div className="flex flex-wrap gap-2">
+          <a href="/divisioni/quant/sizing"
+            className="px-3 py-2 bg-indigo-600 text-white text-xs sm:text-sm font-medium rounded-lg hover:bg-indigo-700 transition">
+            Sizing
           </a>
-          <a
-            href="/divisioni/quant/health"
-            className="px-4 py-2 bg-white border border-slate-200 text-slate-700 text-sm font-medium rounded-lg hover:bg-slate-50 transition"
-          >
+          <a href="/divisioni/quant/health"
+            className="px-3 py-2 bg-white border border-slate-200 text-slate-700 text-xs sm:text-sm font-medium rounded-lg hover:bg-slate-50 transition">
             Health
           </a>
-          <a
-            href="/divisioni/quant/scenarios"
-            className="px-4 py-2 bg-white border border-slate-200 text-slate-700 text-sm font-medium rounded-lg hover:bg-slate-50 transition"
-          >
+          <a href="/divisioni/quant/scenarios"
+            className="px-3 py-2 bg-white border border-slate-200 text-slate-700 text-xs sm:text-sm font-medium rounded-lg hover:bg-slate-50 transition">
             Scenari
           </a>
-          <a
-            href="/divisioni/quant/builder"
-            className="px-4 py-2 bg-white border border-slate-200 text-slate-700 text-sm font-medium rounded-lg hover:bg-slate-50 transition"
-          >
+          <a href="/divisioni/quant/builder"
+            className="px-3 py-2 bg-white border border-slate-200 text-slate-700 text-xs sm:text-sm font-medium rounded-lg hover:bg-slate-50 transition">
             Builder
           </a>
-          <button
-            onClick={refreshBenchmarks}
-            disabled={benchLoading}
-            className="px-4 py-2 bg-white border border-slate-200 text-slate-700 text-sm font-medium rounded-lg hover:bg-slate-50 transition disabled:opacity-50"
-          >
-            {benchLoading ? 'Aggiornamento...' : 'Benchmark'}
+          <button onClick={refreshBenchmarks} disabled={benchLoading}
+            className="px-3 py-2 bg-white border border-slate-200 text-slate-700 text-xs sm:text-sm font-medium rounded-lg hover:bg-slate-50 transition disabled:opacity-50">
+            {benchLoading ? '...' : 'Benchmark'}
           </button>
         </div>
       </div>
@@ -283,7 +272,7 @@ export default function QuantPage() {
       {tab === 'overview' && (
         <div className="space-y-6">
           {/* KPI row 1: Money */}
-          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
             <div className="bg-white rounded-xl border border-slate-200 p-4">
               <p className="text-2xl font-bold text-slate-900">{fmtUsd(totalEquity)}</p>
               <p className="text-sm text-slate-500">Equity totale</p>
@@ -703,7 +692,7 @@ export default function QuantPage() {
                   <InfoTooltip metricKey="alpha" />
                 </h3>
                 <div className="bg-white rounded-xl border border-slate-200 p-4">
-                  <ResponsiveContainer width="100%" height={320}>
+                  <ResponsiveContainer width="100%" height={260}>
                     <ComposedChart data={stratBenchData} margin={{ top: 5, right: 20, left: 10, bottom: 5 }}>
                       <defs>
                         <linearGradient id="alphaGrad" x1="0" y1="0" x2="0" y2="1">
