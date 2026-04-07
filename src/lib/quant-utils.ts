@@ -2289,3 +2289,164 @@ export function calcDailyPnl(
     .sort((a, b) => a[0].localeCompare(b[0]))
     .map(([date, pl]) => ({ date, pl: Math.round(pl * 100) / 100 }))
 }
+
+/**
+ * Generate trend commentary for monthly P/L trend.
+ */
+export function generateTrendCommentary(trend: MonthlyTrendEntry[]): string {
+  if (trend.length === 0) return ''
+
+  const posMonths = trend.filter(m => m.pl > 0).length
+  const totalMonths = trend.length
+  const winPct = Math.round((posMonths / totalMonths) * 100)
+
+  const bestMonth = trend.reduce((a, b) => a.pl > b.pl ? a : b)
+  const worstMonth = trend.reduce((a, b) => a.pl < b.pl ? a : b)
+
+  let maxStreak = 0, streak = 0
+  for (const m of trend) {
+    if (m.pl > 0) { streak++; if (streak > maxStreak) maxStreak = streak }
+    else streak = 0
+  }
+
+  const parts: string[] = []
+  parts.push(`${posMonths} mesi positivi su ${totalMonths} (${winPct}%).`)
+  parts.push(`Miglior mese: ${bestMonth.monthLabel} (${fmtUsd(bestMonth.pl)}). Peggior mese: ${worstMonth.monthLabel} (${fmtUsd(worstMonth.pl)}).`)
+  if (maxStreak >= 2) parts.push(`Striscia positiva piu' lunga: ${maxStreak} mesi.`)
+
+  if (trend.length >= 3) {
+    const last3 = trend.slice(-3)
+    const last3Pl = last3.reduce((s, v) => s + v.pl, 0)
+    const allPos = last3.every(m => m.pl > 0)
+    const allNeg = last3.every(m => m.pl < 0)
+
+    if (allPos) parts.push(`Ultimi 3 mesi tutti positivi (${fmtUsd(last3Pl)}) — momentum favorevole.`)
+    else if (allNeg) parts.push(`Ultimi 3 mesi tutti negativi (${fmtUsd(last3Pl)}) — fase da monitorare.`)
+
+    if (trend.length >= 6) {
+      const prev3 = trend.slice(-6, -3)
+      const prev3Pl = prev3.reduce((s, v) => s + v.pl, 0)
+      const delta = last3Pl - prev3Pl
+      if (delta > 50) parts.push(`In miglioramento vs trimestre precedente (+${fmtUsd(delta)}).`)
+      else if (delta < -50) parts.push(`In calo vs trimestre precedente (${fmtUsd(delta)}).`)
+    }
+  }
+
+  return parts.join(' ')
+}
+
+/**
+ * Generate comprehensive general analysis — multi-paragraph, Italian, Angelo's tone.
+ * Returns array of paragraphs for structured rendering.
+ */
+export function generateGeneralAnalysis(
+  stats: MonthlyStrategyStats[],
+  assetSummaries: MonthlyAssetSummary[],
+  trend: MonthlyTrendEntry[],
+  kpis: MonthlyKPIs,
+  best: BestPortfolioResult,
+): string[] {
+  const paragraphs: string[] = []
+
+  // 1. Performance overview
+  const outcome = kpis.totalPl >= 0 ? 'positivo' : 'negativo'
+  let overview = `Risultato complessivo ${outcome}: ${fmtUsd(kpis.totalPl)} su ${kpis.totalTrades} trade in ${trend.length} mesi di operativita'.`
+  if (kpis.cagr !== undefined) {
+    overview += ` CAGR ${fmt(kpis.cagr, 1)}%, Sharpe ${fmt(kpis.sharpe ?? 0)}, Recovery Factor ${fmt(kpis.recoveryFactor ?? 0)}, DD max ${fmt(kpis.maxDdPct, 1)}% dell'equity.`
+  }
+  paragraphs.push(overview)
+
+  // 2. Consistency
+  if (trend.length > 0) {
+    const posMonths = trend.filter(m => m.pl > 0).length
+    const pct = Math.round((posMonths / trend.length) * 100)
+    const bestMonth = trend.reduce((a, b) => a.pl > b.pl ? a : b)
+    const worstMonth = trend.reduce((a, b) => a.pl < b.pl ? a : b)
+    let maxStreak = 0, streak = 0
+    for (const m of trend) {
+      if (m.pl > 0) { streak++; if (streak > maxStreak) maxStreak = streak }
+      else streak = 0
+    }
+    let consText = `Consistenza: ${posMonths} mesi positivi su ${trend.length} (${pct}%). Miglior mese: ${bestMonth.monthLabel} (${fmtUsd(bestMonth.pl)}). Peggior mese: ${worstMonth.monthLabel} (${fmtUsd(worstMonth.pl)}).`
+    if (maxStreak >= 2) consText += ` Striscia positiva piu' lunga: ${maxStreak} mesi.`
+    paragraphs.push(consText)
+  }
+
+  // 3. Core strategies
+  const withTrades = stats.filter(s => s.monthlyTrades >= 5)
+  if (withTrades.length > 0) {
+    const sorted = [...withTrades].sort((a, b) => b.monthlyPl - a.monthlyPl)
+    const top = sorted.slice(0, 3)
+    const topPl = top.reduce((s, v) => s + v.monthlyPl, 0)
+    const contrib = kpis.totalPl > 0 ? Math.round((topPl / kpis.totalPl) * 100) : 0
+    const topDesc = top.map(s => `M${s.magic} ${s.name} (${fmtUsd(s.monthlyPl)})`).join(', ')
+    let coreText = `Strategie core per contributo P/L: ${topDesc}.`
+    if (contrib > 0 && contrib <= 100) coreText += ` Generano il ${contrib}% del risultato totale.`
+
+    const bottom = sorted.filter(s => s.monthlyPl < -50).slice(-3).reverse()
+    if (bottom.length > 0) {
+      const bottomDesc = bottom.map(s => `M${s.magic} (${fmtUsd(s.monthlyPl)})`).join(', ')
+      coreText += ` Strategie in difficolta': ${bottomDesc} — valutare revisione parametri se il trend negativo persiste.`
+    }
+    paragraphs.push(coreText)
+  }
+
+  // 4. Asset/market analysis
+  if (assetSummaries.length > 0) {
+    const bestAsset = assetSummaries.reduce((a, b) => a.totalPl > b.totalPl ? a : b)
+    const worstAsset = assetSummaries.reduce((a, b) => a.totalPl < b.totalPl ? a : b)
+    const contrib = kpis.totalPl > 0 ? Math.round((bestAsset.totalPl / kpis.totalPl) * 100) : 0
+
+    let assetText = `Mercati: ${assetSummaries.length} sottostanti con operativita' significativa. ${bestAsset.assetLabel} il piu' forte (${fmtUsd(bestAsset.totalPl)}${contrib > 0 && contrib <= 100 ? `, ${contrib}% del totale` : ''}).`
+    if (worstAsset.totalPl < 0 && worstAsset.asset !== bestAsset.asset) {
+      assetText += ` ${worstAsset.assetLabel} il piu' debole (${fmtUsd(worstAsset.totalPl)}).`
+    }
+
+    const regimes = assetSummaries.filter(a => a.regime !== 'unknown')
+    if (regimes.length > 0) {
+      const up = regimes.filter(a => a.regime === 'up').map(a => a.assetLabel)
+      const down = regimes.filter(a => a.regime === 'down').map(a => a.assetLabel)
+      const range = regimes.filter(a => a.regime === 'range').map(a => a.assetLabel)
+      const regParts: string[] = []
+      if (up.length > 0) regParts.push(`uptrend: ${up.join(', ')}`)
+      if (down.length > 0) regParts.push(`downtrend: ${down.join(', ')}`)
+      if (range.length > 0) regParts.push(`range: ${range.join(', ')}`)
+      assetText += ` Regimi attuali — ${regParts.join('; ')}.`
+    }
+    paragraphs.push(assetText)
+  }
+
+  // 5. Recent trend
+  if (trend.length >= 3) {
+    const last3 = trend.slice(-3)
+    const last3Pl = last3.reduce((s, v) => s + v.pl, 0)
+
+    let trendText = `Trend recente: ${last3.map(m => `${m.monthLabel} ${fmtUsd(m.pl)}`).join(', ')}.`
+
+    const allPos = last3.every(m => m.pl > 0)
+    const allNeg = last3.every(m => m.pl < 0)
+    if (allPos) trendText += ' Tre mesi consecutivi positivi — momentum favorevole.'
+    else if (allNeg) trendText += ' Tre mesi consecutivi negativi — situazione da monitorare attentamente.'
+
+    if (trend.length >= 6) {
+      const prev3 = trend.slice(-6, -3)
+      const prev3Pl = prev3.reduce((s, v) => s + v.pl, 0)
+      const delta = last3Pl - prev3Pl
+      if (delta > 50) trendText += ` In miglioramento vs trimestre precedente (+${fmtUsd(delta)}).`
+      else if (delta < -50) trendText += ` In calo vs trimestre precedente (${fmtUsd(delta)}).`
+    }
+    paragraphs.push(trendText)
+  }
+
+  // 6. Best Portfolio
+  if (best.selected.length > 0) {
+    const total = best.selected.length + best.excluded.length
+    paragraphs.push(`Best Portfolio: ${best.selected.length} su ${total} strategie soddisfano i criteri selettivi. P/L aggregato ${fmtUsd(best.totalPl)}, WR medio ${fmt(best.avgWinRate, 1)}%, PF medio ${fmt(best.avgProfitFactor)}. Queste sono le strategie su cui costruire l'allocazione del portafoglio.`)
+  } else {
+    paragraphs.push(`Nessuna strategia soddisfa attualmente tutti i criteri del Best Portfolio. Necessaria revisione dei parametri o attesa di un ciclo di mercato piu' favorevole.`)
+  }
+
+  paragraphs.push(`Dati da operativita' reale — le performance passate non garantiscono risultati futuri.`)
+
+  return paragraphs
+}

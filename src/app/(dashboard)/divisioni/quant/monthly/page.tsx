@@ -9,7 +9,7 @@ import {
   MonthlyStrategyStats, BestPortfolioResult, MonthlyAssetSummary, MonthlyKPIs, MonthlyTrendEntry,
   calcMonthlyStrategyStats, selectBestPortfolio, detectAssetRegime,
   generateMonthlyCommentary, generateAssetCommentary, generatePortfolioSummary,
-  buildMonthlyTrend, calcDailyPnl,
+  buildMonthlyTrend, calcDailyPnl, generateTrendCommentary, generateGeneralAnalysis,
   ASSET_BENCHMARK_LABEL,
 } from '@/lib/quant-utils'
 import { VELQOR_LOGO_BASE64 } from '@/lib/velqor-logo'
@@ -301,9 +301,10 @@ export default function MonthlyPage() {
         a.commentary = generateAssetCommentary(a)
         return a
       })
+      .filter(a => a.totalTrades >= (mode === 'general' ? 5 : 2))
       .sort((a, b) => b.totalPl - a.totalPl)
     return summaries
-  }, [enrichedStats, benchmarks])
+  }, [enrichedStats, benchmarks, mode])
 
   // Monthly KPIs
   const kpis = useMemo((): MonthlyKPIs => {
@@ -404,6 +405,18 @@ export default function MonthlyPage() {
     return generatePortfolioSummary(bestPortfolio, kpis, prevKpis, mode, periodLabel)
   }, [bestPortfolio, kpis, prevKpis, mode, selectedMonth])
 
+  // Trend commentary (general mode)
+  const trendCommentary = useMemo(() => {
+    if (mode !== 'general' || monthlyTrend.length === 0) return ''
+    return generateTrendCommentary(monthlyTrend)
+  }, [mode, monthlyTrend])
+
+  // Multi-paragraph general analysis
+  const generalAnalysis = useMemo((): string[] => {
+    if (mode !== 'general') return []
+    return generateGeneralAnalysis(enrichedStats, assetSummaries, monthlyTrend, kpis, bestPortfolio)
+  }, [mode, enrichedStats, assetSummaries, monthlyTrend, kpis, bestPortfolio])
+
   // Equity curve chart data
   const equityChartData = useMemo(() => {
     if (snapshots.length === 0) return []
@@ -476,7 +489,8 @@ export default function MonthlyPage() {
         <table>
           <thead><tr><th>Mese</th><th class="text-right">P/L</th><th class="text-center">Trade</th><th class="text-right">WR</th><th class="text-right">PF</th><th></th></tr></thead>
           <tbody>${trendRows}</tbody>
-        </table>`
+        </table>
+        ${trendCommentary ? `<div style="font-size:10px;color:#475569;margin:8px 0;padding:10px;background:#f8fafc;border-radius:6px;line-height:1.6">${trendCommentary}</div>` : ''}`
     }
 
     // Extra KPIs for general mode
@@ -649,8 +663,11 @@ export default function MonthlyPage() {
   <h2>Equity Curve</h2>
   ${equitySvg}` : ''}
 
-  <!-- Summary -->
-  <div class="summary-box">${summaryText}</div>
+  <!-- Summary / Analysis -->
+  ${mode === 'general' && generalAnalysis.length > 0
+    ? `<h2>Analisi Generale</h2><div class="summary-box">${generalAnalysis.map(p => `<p style="margin-bottom:8px">${p}</p>`).join('')}</div>`
+    : `<div class="summary-box">${summaryText}</div>`
+  }
 
   <!-- Footer -->
   <div class="footer">
@@ -850,6 +867,9 @@ export default function MonthlyPage() {
                   </tbody>
                 </table>
               </div>
+              {trendCommentary && (
+                <div className="mt-3 text-sm text-slate-600 bg-slate-50 rounded-lg p-3 leading-relaxed">{trendCommentary}</div>
+              )}
             </div>
           )}
 
@@ -939,10 +959,19 @@ export default function MonthlyPage() {
             </div>
           )}
 
-          {/* Summary */}
-          <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 mb-6">
-            <div className="text-sm text-slate-700 leading-relaxed">{summaryText}</div>
-          </div>
+          {/* Summary / Analysis */}
+          {mode === 'general' && generalAnalysis.length > 0 ? (
+            <div className="bg-blue-50 border border-blue-200 rounded-xl p-5 mb-6">
+              <h3 className="text-sm font-semibold text-slate-800 mb-3 uppercase tracking-wide">Analisi Generale</h3>
+              {generalAnalysis.map((p, i) => (
+                <p key={i} className="text-sm text-slate-700 leading-relaxed mb-2 last:mb-0">{p}</p>
+              ))}
+            </div>
+          ) : (
+            <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 mb-6">
+              <div className="text-sm text-slate-700 leading-relaxed">{summaryText}</div>
+            </div>
+          )}
         </>
       )}
     </div>
