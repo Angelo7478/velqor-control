@@ -383,9 +383,31 @@ def calc_historical_dd(acc_id, acc_size):
 # STRATEGY MAP
 # ============================================
 
+def normalize_magic(raw_magic):
+    """SQX encodes magic as strategy_magic * 1000 + variant.
+    Try raw first (for CSV-imported trades with simple magic),
+    then floor(magic/1000) for SQX-encoded 4+ digit magic numbers."""
+    return int(raw_magic)
+
+
 def load_strategy_map():
     strategies = sb_get("qel_strategies", {"select": "id,magic", "org_id": f"eq.{ORG_ID}"})
-    return {s["magic"]: s["id"] for s in strategies}
+    base_map = {s["magic"]: s["id"] for s in strategies}
+    return base_map
+
+
+def resolve_strategy(raw_magic, strategy_map):
+    """Resolve raw MT5 magic to strategy_id. Tries exact match first,
+    then SQX-decoded magic (floor(magic/1000))."""
+    m = int(raw_magic)
+    if m in strategy_map:
+        return m, strategy_map[m]
+    # SQX encoding: strategy_magic * 1000 + variant
+    if m >= 1000:
+        decoded = m // 1000
+        if decoded in strategy_map:
+            return decoded, strategy_map[decoded]
+    return m, None
 
 
 # ============================================
@@ -432,8 +454,10 @@ def sync_current_account(account, strategy_map):
     log.info(f"  Posizioni aperte: {len(positions)}")
     for pos in positions:
         pos["account_id"] = acc_id
-        if pos["magic"] in strategy_map:
-            pos["strategy_id"] = strategy_map[pos["magic"]]
+        norm_magic, strat_id = resolve_strategy(pos["magic"], strategy_map)
+        pos["magic"] = norm_magic
+        if strat_id:
+            pos["strategy_id"] = strat_id
         sb_upsert("qel_trades", pos, on_conflict="account_id,ticket")
 
     # Closed trades
@@ -461,8 +485,10 @@ def sync_current_account(account, strategy_map):
     log.info(f"  Trade chiusi: {len(closed)}")
     for trade in closed:
         trade["account_id"] = acc_id
-        if trade["magic"] in strategy_map:
-            trade["strategy_id"] = strategy_map[trade["magic"]]
+        norm_magic, strat_id = resolve_strategy(trade["magic"], strategy_map)
+        trade["magic"] = norm_magic
+        if strat_id:
+            trade["strategy_id"] = strat_id
         sb_upsert("qel_trades", trade, on_conflict="account_id,ticket")
 
     return True
@@ -587,9 +613,10 @@ def run_enrich():
                 except:
                     pass
             if magic:
-                patch_data = {"magic": magic}
-                if magic in strategy_map:
-                    patch_data["strategy_id"] = strategy_map[magic]
+                norm_magic, strat_id = resolve_strategy(magic, strategy_map)
+                patch_data = {"magic": norm_magic}
+                if strat_id:
+                    patch_data["strategy_id"] = strat_id
                 sb_patch("qel_trades", "id", t["id"], patch_data)
                 updated += 1
 

@@ -632,6 +632,11 @@ export default function BuilderPage() {
     const returnPct = equityBase > 0 ? (ps.totalPnl / equityBase) * 100 : 0
     const dateNow = new Date().toLocaleDateString('it-IT', { day: '2-digit', month: 'long', year: 'numeric' })
 
+    // Real P/L = raw sum of net_profit from trades (not scaled by builder lots)
+    const selected = strategies.filter(s => s.selected && s.tradeCount > 0)
+    const realTotalPnl = selected.reduce((sum, s) => sum + s.realPnlOnAccount, 0)
+    const realReturnPct = equityBase > 0 ? (realTotalPnl / equityBase) * 100 : 0
+
     // Group by style and family
     const byStyle: Record<string, { count: number; pnl: number }> = {}
     const byFamily: Record<string, { count: number; pnl: number; lots: number }> = {}
@@ -771,9 +776,9 @@ export default function BuilderPage() {
   <!-- KPI principali -->
   <div class="kpi-grid">
     <div class="kpi">
-      <div class="kpi-label">P/L Totale</div>
-      <div class="kpi-value" style="color:${plC(ps.totalPnl)}">${fmtM(ps.totalPnl)}</div>
-      <div class="kpi-sub">${fmtR(returnPct, 1)}% rendimento</div>
+      <div class="kpi-label">P/L Reale (netto)</div>
+      <div class="kpi-value" style="color:${plC(realTotalPnl)}">${fmtM(realTotalPnl)}</div>
+      <div class="kpi-sub">${fmtR(realReturnPct, 1)}% rendimento | Scalato: ${fmtM(ps.totalPnl)}</div>
     </div>
     <div class="kpi">
       <div class="kpi-label">Max Drawdown</div>
