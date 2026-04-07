@@ -12,7 +12,9 @@ type StrategyView = 'list' | 'detail'
 
 export default function QuantPage() {
   const [strategies, setStrategies] = useState<QelStrategy[]>([])
+  const [baseStrategies, setBaseStrategies] = useState<QelStrategy[]>([])
   const [accounts, setAccounts] = useState<QelAccount[]>([])
+  const [selectedAccountId, setSelectedAccountId] = useState<string>('')
   const [loading, setLoading] = useState(true)
   const [tab, setTab] = useState<Tab>('overview')
   const [stratView, setStratView] = useState<StrategyView>('list')
@@ -23,17 +25,60 @@ export default function QuantPage() {
   const [benchLoading, setBenchLoading] = useState(false)
   const [benchResult, setBenchResult] = useState<string | null>(null)
 
-  useEffect(() => { loadData() }, [])
+  useEffect(() => { loadInitial() }, [])
+  useEffect(() => { if (selectedAccountId) loadAccountPerf() }, [selectedAccountId])
 
-  async function loadData() {
+  async function loadInitial() {
     const supabase = createClient()
     const [stratRes, accRes] = await Promise.all([
       supabase.from('qel_strategies').select('*').order('magic'),
       supabase.from('qel_accounts').select('*').order('name'),
     ])
+    setBaseStrategies(stratRes.data || [])
     setStrategies(stratRes.data || [])
     setAccounts(accRes.data || [])
+    if (accRes.data && accRes.data.length > 0) {
+      setSelectedAccountId(accRes.data[0].id)
+    }
     setLoading(false)
+  }
+
+  /** Load per-account performance and OVERRIDE real_* fields */
+  async function loadAccountPerf() {
+    const supabase = createClient()
+    const { data: perfData } = await supabase
+      .from('v_strategy_recent_performance')
+      .select('*')
+      .eq('account_id', selectedAccountId)
+
+    const perfMap = new Map(perfData?.map(p => [p.strategy_id, p]) || [])
+
+    // Merge per-account data into strategies, replacing aggregated real_* fields
+    setStrategies(baseStrategies.map(s => {
+      const p = perfMap.get(s.id)
+      if (!p) {
+        // No trades on this account → zero out all real metrics
+        return { ...s, real_trades: 0, real_pl: 0, real_win_pct: null, real_payoff: null, real_expectancy: null, real_max_dd: 0, real_profit_factor: null, real_recovery_factor: null, real_ret_dd: 0, real_avg_duration_hours: null }
+      }
+      const retDd = p.max_dd > 0 ? Number(p.total_pnl) / p.max_dd : 0
+      return {
+        ...s,
+        real_trades: p.total_trades,
+        real_pl: Number(p.total_pnl),
+        real_win_pct: Number(p.win_pct),
+        real_payoff: Number(p.payoff),
+        real_expectancy: Number(p.avg_trade),
+        real_max_dd: Number(p.max_dd),
+        real_profit_factor: Number(p.profit_factor),
+        real_recovery_factor: Number(p.recovery_factor),
+        real_ret_dd: retDd,
+        real_avg_duration_hours: Number(p.avg_duration_hours),
+      }
+    }))
+  }
+
+  async function loadData() {
+    await loadInitial()
   }
 
   async function refreshBenchmarks() {
@@ -89,8 +134,17 @@ export default function QuantPage() {
         <div>
           <h1 className="text-2xl font-bold text-slate-900">Quant Engine</h1>
           <p className="text-sm text-slate-500 mt-1">
-            Trading sistematico &middot; QuantEdgeLab &middot; {activeStrategies.length} strategie &middot; {syncedAccounts.length}/{accounts.length} conti sincronizzati
+            Trading sistematico &middot; QuantEdgeLab &middot; {activeStrategies.length} strategie
           </p>
+          <select
+            className="mt-2 text-sm border border-violet-200 rounded-lg px-3 py-1.5 bg-violet-50 text-violet-700 font-medium"
+            value={selectedAccountId}
+            onChange={e => setSelectedAccountId(e.target.value)}
+          >
+            {accounts.map(a => (
+              <option key={a.id} value={a.id}>{a.name} (${Number(a.account_size).toLocaleString()})</option>
+            ))}
+          </select>
         </div>
         <div className="flex gap-2">
           <a

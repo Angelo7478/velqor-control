@@ -91,8 +91,8 @@ export default function SizingPage() {
         : Promise.resolve({ data: [] }),
     ])
 
-    // Build per-account maps
-    const perfMap = new Map<string, { winPct: number | null; avgTrade: number | null; totalPnl: number; trades: number }>()
+    // Build per-account maps (ALL metrics from view, never use aggregated real_*)
+    const perfMap = new Map<string, { winPct: number | null; avgTrade: number | null; totalPnl: number; trades: number; payoff: number | null; maxDd: number; profitFactor: number | null; recoveryFactor: number | null }>()
     if (perfRes.data) {
       for (const p of perfRes.data) {
         perfMap.set(p.strategy_id, {
@@ -100,6 +100,10 @@ export default function SizingPage() {
           avgTrade: p.avg_trade ? Number(p.avg_trade) : null,
           totalPnl: Number(p.total_pnl ?? 0),
           trades: Number(p.total_trades ?? 0),
+          payoff: p.payoff ? Number(p.payoff) : null,
+          maxDd: Number(p.max_dd ?? 0),
+          profitFactor: p.profit_factor ? Number(p.profit_factor) : null,
+          recoveryFactor: p.recovery_factor ? Number(p.recovery_factor) : null,
         })
       }
     }
@@ -130,11 +134,15 @@ export default function SizingPage() {
           return {
             ...s,
             ps: psMap.get(s.id),
-            // Override with per-account data
+            // Override with per-account data (NEVER use aggregated real_*)
             _accountWinPct: perf?.winPct ?? null,
             _accountAvgTrade: perf?.avgTrade ?? null,
             _accountPnl: perf?.totalPnl ?? 0,
             _accountTrades: perf?.trades ?? 0,
+            _accountPayoff: perf?.payoff ?? null,
+            _accountMaxDd: perf?.maxDd ?? 0,
+            _accountProfitFactor: perf?.profitFactor ?? null,
+            _accountRecoveryFactor: perf?.recoveryFactor ?? null,
             _avgRealLot: avgLotMap.get(s.id) ?? null,
           }
         })
@@ -151,9 +159,10 @@ export default function SizingPage() {
     if (!selectedPortfolio || strategies.length === 0) return
     setOptimizing(true)
 
-    // Use per-account stats when available (never aggregate dollar metrics across accounts)
+    // ALWAYS use per-account stats — NEVER aggregate dollar metrics across accounts
     const inputs: SizingInput[] = strategies.map((s: StrategyRow) => {
-      const hasAccountData = (s as any)._accountTrades > 0
+      const a = s as any
+      const hasData = a._accountTrades > 0
       return {
         strategyId: s.id,
         magic: s.magic,
@@ -168,13 +177,13 @@ export default function SizingPage() {
         mc95DdScaled: s.mc95_dd_scaled,
         testExpectancy: s.test_expectancy,
         testMaxDd: s.test_max_dd,
-        // Per-account stats override aggregated values
-        realTrades: hasAccountData ? (s as any)._accountTrades : s.real_trades,
-        realWinPct: hasAccountData ? (s as any)._accountWinPct : s.real_win_pct,
-        realPayoff: s.real_payoff, // payoff not computed per-account yet, keep aggregated
-        realMaxDd: s.real_max_dd,
-        realExpectancy: hasAccountData ? (s as any)._accountAvgTrade : s.real_expectancy,
-        realPl: hasAccountData ? (s as any)._accountPnl : s.real_pl,
+        // Per-account stats (0/null if no trades on this account)
+        realTrades: hasData ? a._accountTrades : 0,
+        realWinPct: hasData ? a._accountWinPct : null,
+        realPayoff: hasData ? a._accountPayoff : null,
+        realMaxDd: hasData ? a._accountMaxDd : 0,
+        realExpectancy: hasData ? a._accountAvgTrade : null,
+        realPl: hasData ? a._accountPnl : 0,
         lotNeutral: s.lot_neutral,
         overlapMed: s.test_overlap_med,
       }
