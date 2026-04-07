@@ -1895,3 +1895,397 @@ export function calcCurveStats(pnls: number[], equityBase: number): CurveStats {
     recoveryFactor: maxDd > 0 ? Math.round((totalPnl / maxDd) * 100) / 100 : 0,
   }
 }
+
+// ============================================
+// Monthly Analysis Engine
+// ============================================
+
+export interface MonthlyStrategyStats {
+  strategyId: string
+  magic: number
+  name: string
+  asset: string
+  family: string | null
+  style: string | null
+  monthlyPl: number
+  monthlyTrades: number
+  monthlyWinRate: number
+  monthlyProfitFactor: number
+  monthlyBestTrade: number
+  monthlyWorstTrade: number
+  prevMonthPl: number | null
+  prevMonthTrades: number | null
+  healthStatus: string
+  fitnessScore: number
+  inBestPortfolio: boolean
+  commentary: string
+}
+
+export interface BestPortfolioResult {
+  selected: MonthlyStrategyStats[]
+  excluded: MonthlyStrategyStats[]
+  totalPl: number
+  avgWinRate: number
+  avgProfitFactor: number
+  selectionCriteria: string
+}
+
+export interface MonthlyAssetSummary {
+  asset: string
+  assetLabel: string
+  totalPl: number
+  totalTrades: number
+  strategies: { name: string; magic: number; pl: number; winRate: number; trades: number }[]
+  regime: 'up' | 'down' | 'range' | 'unknown'
+  regimeDetail: string
+  commentary: string
+}
+
+export interface MonthlyKPIs {
+  totalPl: number
+  totalTrades: number
+  winRate: number
+  maxDd: number
+  maxDdPct: number
+  profitFactor: number
+  bestDay: { date: string; pl: number } | null
+  worstDay: { date: string; pl: number } | null
+  tradingDays: number
+  cagr?: number
+  sharpe?: number
+  recoveryFactor?: number
+}
+
+export interface MonthlyTrendEntry {
+  month: string
+  monthLabel: string
+  pl: number
+  trades: number
+  winRate: number
+  profitFactor: number
+}
+
+/**
+ * Calculate monthly stats for a single strategy from filtered trades.
+ */
+export function calcMonthlyStrategyStats(
+  trades: { net_profit: number; close_time: string }[],
+  prevTrades: { net_profit: number }[],
+  strategy: { id: string; magic: number; name: string | null; asset: string; strategy_family: string | null; strategy_style: string | null; test_win_pct: number | null },
+  healthStatus: string,
+  fitnessScore: number,
+): MonthlyStrategyStats {
+  const pnls = trades.map(t => Number(t.net_profit))
+  const wins = pnls.filter(p => p > 0)
+  const losses = pnls.filter(p => p < 0)
+  const totalPl = pnls.reduce((s, v) => s + v, 0)
+  const winRate = pnls.length > 0 ? (wins.length / pnls.length) * 100 : 0
+  const grossProfit = wins.reduce((s, v) => s + v, 0)
+  const grossLoss = Math.abs(losses.reduce((s, v) => s + v, 0))
+  const profitFactor = grossLoss > 0 ? grossProfit / grossLoss : grossProfit > 0 ? 999 : 0
+
+  const prevPnls = prevTrades.map(t => Number(t.net_profit))
+  const prevPl = prevPnls.length > 0 ? prevPnls.reduce((s, v) => s + v, 0) : null
+
+  return {
+    strategyId: strategy.id,
+    magic: strategy.magic,
+    name: strategy.name || `Magic ${strategy.magic}`,
+    asset: strategy.asset,
+    family: strategy.strategy_family,
+    style: strategy.strategy_style,
+    monthlyPl: Math.round(totalPl * 100) / 100,
+    monthlyTrades: pnls.length,
+    monthlyWinRate: Math.round(winRate * 10) / 10,
+    monthlyProfitFactor: Math.round(profitFactor * 100) / 100,
+    monthlyBestTrade: pnls.length > 0 ? Math.round(Math.max(...pnls) * 100) / 100 : 0,
+    monthlyWorstTrade: pnls.length > 0 ? Math.round(Math.min(...pnls) * 100) / 100 : 0,
+    prevMonthPl: prevPl !== null ? Math.round(prevPl * 100) / 100 : null,
+    prevMonthTrades: prevPnls.length > 0 ? prevPnls.length : null,
+    healthStatus,
+    fitnessScore,
+    inBestPortfolio: false, // set later by selectBestPortfolio
+    commentary: '', // set later by generateMonthlyCommentary
+  }
+}
+
+/**
+ * Select best portfolio with strict criteria.
+ */
+export function selectBestPortfolio(
+  strategies: MonthlyStrategyStats[],
+  testMetrics: Map<string, { test_win_pct: number | null }>,
+): BestPortfolioResult {
+  const selected: MonthlyStrategyStats[] = []
+  const excluded: MonthlyStrategyStats[] = []
+
+  for (const s of strategies) {
+    const test = testMetrics.get(s.strategyId)
+    const testWr = test?.test_win_pct ?? null
+
+    // Win rate check: >= 50% OR >= 90% of test win rate
+    const wrOk = s.monthlyWinRate >= 50 || (testWr !== null && s.monthlyWinRate >= testWr * 0.9)
+
+    const passes =
+      s.monthlyPl > 0 &&
+      s.monthlyProfitFactor >= 1.5 &&
+      wrOk &&
+      s.healthStatus === 'healthy' &&
+      s.fitnessScore >= 50 &&
+      s.monthlyTrades >= 3
+
+    if (passes) {
+      selected.push({ ...s, inBestPortfolio: true })
+    } else {
+      excluded.push({ ...s, inBestPortfolio: false })
+    }
+  }
+
+  selected.sort((a, b) => b.monthlyPl - a.monthlyPl)
+  excluded.sort((a, b) => b.monthlyPl - a.monthlyPl)
+
+  const totalPl = selected.reduce((s, v) => s + v.monthlyPl, 0)
+  const avgWinRate = selected.length > 0
+    ? selected.reduce((s, v) => s + v.monthlyWinRate, 0) / selected.length : 0
+  const avgProfitFactor = selected.length > 0
+    ? selected.reduce((s, v) => s + v.monthlyProfitFactor, 0) / selected.length : 0
+
+  return {
+    selected,
+    excluded,
+    totalPl: Math.round(totalPl * 100) / 100,
+    avgWinRate: Math.round(avgWinRate * 10) / 10,
+    avgProfitFactor: Math.round(avgProfitFactor * 100) / 100,
+    selectionCriteria: 'P/L > 0, PF ≥ 1.5, WR ≥ 50% (o ≥ 90% test), Health OK, Fitness ≥ 50, Trade ≥ 3',
+  }
+}
+
+/**
+ * Detect current regime for an asset from benchmark data.
+ * Uses last available close vs SMA50 and SMA200.
+ */
+export function detectAssetRegime(
+  prices: { ts: string; close_price: number }[],
+): { regime: 'up' | 'down' | 'range' | 'unknown'; detail: string } {
+  if (prices.length < 50) return { regime: 'unknown', detail: 'Dati insufficienti per calcolo regime' }
+
+  const closes = prices.map(p => Number(p.close_price))
+  const last = closes[closes.length - 1]
+
+  const sma = (period: number) => {
+    if (closes.length < period) return null
+    const slice = closes.slice(-period)
+    return slice.reduce((s, v) => s + v, 0) / period
+  }
+
+  const sma50 = sma(50)
+  const sma200 = sma(200)
+
+  if (sma50 !== null && sma200 !== null) {
+    if (last > sma50 && sma50 > sma200) {
+      return { regime: 'up', detail: `Uptrend — prezzo sopra SMA50 e SMA200` }
+    } else if (last < sma50 && sma50 < sma200) {
+      return { regime: 'down', detail: `Downtrend — prezzo sotto SMA50 e SMA200` }
+    } else {
+      return { regime: 'range', detail: `Range — segnali misti tra SMA50 e SMA200` }
+    }
+  } else if (sma50 !== null) {
+    if (last > sma50) return { regime: 'up', detail: `Sopra SMA50 (SMA200 non disponibile)` }
+    return { regime: 'down', detail: `Sotto SMA50 (SMA200 non disponibile)` }
+  }
+
+  return { regime: 'unknown', detail: 'Dati insufficienti per calcolo regime' }
+}
+
+/**
+ * Generate per-strategy monthly commentary in Angelo's tone.
+ * Rules-based, deterministic, no AI.
+ */
+export function generateMonthlyCommentary(s: MonthlyStrategyStats): string {
+  // No trades this month
+  if (s.monthlyTrades === 0) {
+    return `Nessun trade nel mese. Strategia inattiva o senza segnali.`
+  }
+
+  // Critical health
+  if (s.healthStatus === 'critical') {
+    return `Health critica. ${fmtUsd(s.monthlyPl)} in ${s.monthlyTrades} trade. Se il trend continua, candidata alla sospensione.`
+  }
+
+  // Best portfolio + strong
+  if (s.inBestPortfolio && s.monthlyProfitFactor >= 2) {
+    const delta = s.prevMonthPl !== null ? ` (vs ${fmtUsd(s.prevMonthPl)} mese prec.)` : ''
+    return `Edge confermato. ${fmtUsd(s.monthlyPl)} in ${s.monthlyTrades} trade, PF ${fmt(s.monthlyProfitFactor)}.${delta} Solida.`
+  }
+
+  // Best portfolio
+  if (s.inBestPortfolio) {
+    const delta = s.prevMonthPl !== null
+      ? s.prevMonthPl < 0 ? ' Recupero vs mese precedente.' : ''
+      : ''
+    return `Nel Best Portfolio. ${fmtUsd(s.monthlyPl)}, WR ${fmt(s.monthlyWinRate, 1)}%, PF ${fmt(s.monthlyProfitFactor)}.${delta}`
+  }
+
+  // Too few trades
+  if (s.monthlyTrades < 3) {
+    return `${s.monthlyTrades} trade — campione insufficiente per valutare il mese.`
+  }
+
+  // Positive but excluded for low PF
+  if (s.monthlyPl > 0 && s.monthlyProfitFactor < 1.5) {
+    return `P/L positivo (${fmtUsd(s.monthlyPl)}) ma PF ${fmt(s.monthlyProfitFactor)}: edge non convincente questo mese.`
+  }
+
+  // Positive but excluded for win rate
+  if (s.monthlyPl > 0 && s.monthlyWinRate < 50) {
+    return `P/L positivo ma WR ${fmt(s.monthlyWinRate, 1)}% sotto soglia. Monitorare consistenza.`
+  }
+
+  // Positive but excluded for health/fitness
+  if (s.monthlyPl > 0) {
+    return `P/L positivo (${fmtUsd(s.monthlyPl)}) ma esclusa dal Best per health/fitness. Monitorare.`
+  }
+
+  // Negative + regime mismatch
+  if (s.monthlyPl < 0 && s.healthStatus === 'regime_mismatch') {
+    const label = s.style === 'trend_following' ? 'trend' : s.style === 'mean_reversion' ? 'mean reversion' : (s.style || 'n/a')
+    return `Mese negativo (${fmtUsd(s.monthlyPl)}). Regime sfavorevole per ${label}. Mantenere attiva per validazione.`
+  }
+
+  // Negative with recovery vs prev month
+  if (s.monthlyPl < 0 && s.prevMonthPl !== null && s.monthlyPl > s.prevMonthPl) {
+    return `Negativo (${fmtUsd(s.monthlyPl)}) ma in recupero vs mese precedente (${fmtUsd(s.prevMonthPl)}). Trend in miglioramento.`
+  }
+
+  // Negative
+  if (s.monthlyPl < 0) {
+    return `Mese negativo: ${fmtUsd(s.monthlyPl)} su ${s.monthlyTrades} trade, WR ${fmt(s.monthlyWinRate, 1)}%. Verificare condizioni di mercato.`
+  }
+
+  // Default (zero P/L or edge cases)
+  return `Operativita' normale. ${s.monthlyTrades} trade, ${fmtUsd(s.monthlyPl)}.`
+}
+
+/**
+ * Generate per-asset commentary.
+ */
+export function generateAssetCommentary(summary: MonthlyAssetSummary): string {
+  const { asset, assetLabel, totalPl, strategies, regime, regimeDetail } = summary
+  const label = assetLabel || asset
+  const positive = strategies.filter(s => s.pl > 0)
+  const negative = strategies.filter(s => s.pl < 0)
+
+  if (strategies.length === 0) {
+    return `${label}: nessun trade nel mese.`
+  }
+
+  const regimeSuffix = regime !== 'unknown' ? ` Regime: ${regimeDetail}.` : ''
+
+  if (negative.length === 0 && positive.length > 0) {
+    return `${label}: mese favorevole. ${positive.length} ${positive.length === 1 ? 'strategia' : 'strategie'} in profitto, totale ${fmtUsd(totalPl)}.${regimeSuffix}`
+  }
+
+  if (positive.length === 0 && negative.length > 0) {
+    return `${label}: mese sfavorevole. Nessuna strategia in profitto. Totale ${fmtUsd(totalPl)}.${regimeSuffix}`
+  }
+
+  // Mixed
+  const best = strategies.reduce((a, b) => a.pl > b.pl ? a : b)
+  const worst = strategies.reduce((a, b) => a.pl < b.pl ? a : b)
+  return `${label}: misto. ${positive.length}/${strategies.length} positive. Best M${best.magic} (${fmtUsd(best.pl)}), worst M${worst.magic} (${fmtUsd(worst.pl)}).${regimeSuffix}`
+}
+
+/**
+ * Generate overall portfolio summary text.
+ */
+export function generatePortfolioSummary(
+  best: BestPortfolioResult,
+  kpis: MonthlyKPIs,
+  prevKpis: MonthlyKPIs | null,
+  mode: 'monthly' | 'general',
+  periodLabel: string,
+): string {
+  const parts: string[] = []
+
+  if (mode === 'monthly') {
+    const outcome = kpis.totalPl >= 0 ? 'positivo' : 'negativo'
+    parts.push(`Mese ${outcome}: ${fmtUsd(kpis.totalPl)} su ${kpis.totalTrades} trade (WR ${fmt(kpis.winRate, 1)}%, PF ${fmt(kpis.profitFactor)}).`)
+
+    if (best.selected.length > 0) {
+      parts.push(`Best Portfolio: ${best.selected.length}/${best.selected.length + best.excluded.length} strategie selezionate, ${fmtUsd(best.totalPl)} aggregato.`)
+    } else {
+      parts.push(`Nessuna strategia soddisfa i criteri Best Portfolio questo mese.`)
+    }
+
+    if (prevKpis) {
+      const delta = kpis.totalPl - prevKpis.totalPl
+      const dir = delta >= 0 ? '+' : ''
+      parts.push(`vs mese precedente: ${dir}${fmtUsd(delta)}.`)
+    }
+  } else {
+    // General mode
+    parts.push(`Periodo ${periodLabel}: ${fmtUsd(kpis.totalPl)} cumulativo, ${kpis.totalTrades} trade.`)
+
+    if (kpis.cagr !== undefined) {
+      parts.push(`CAGR ${fmt(kpis.cagr, 1)}%, DD max ${fmt(kpis.maxDdPct, 1)}%, Recovery ${fmt(kpis.recoveryFactor ?? 0)}.`)
+    }
+
+    if (best.selected.length > 0) {
+      const top3 = best.selected.slice(0, 3).map(s => `M${s.magic}`).join(', ')
+      parts.push(`Core del portafoglio: ${top3}.`)
+    }
+  }
+
+  parts.push(`Dati da operativita' reale. Le performance passate non garantiscono risultati futuri.`)
+  return parts.join(' ')
+}
+
+/**
+ * Build monthly P/L trend from trades grouped by month.
+ */
+export function buildMonthlyTrend(
+  trades: { net_profit: number; close_time: string }[],
+): MonthlyTrendEntry[] {
+  const MONTH_NAMES = ['Gen','Feb','Mar','Apr','Mag','Giu','Lug','Ago','Set','Ott','Nov','Dic']
+
+  const byMonth = new Map<string, number[]>()
+  for (const t of trades) {
+    const key = t.close_time.slice(0, 7) // YYYY-MM
+    if (!byMonth.has(key)) byMonth.set(key, [])
+    byMonth.get(key)!.push(Number(t.net_profit))
+  }
+
+  return [...byMonth.entries()]
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([month, pnls]) => {
+      const wins = pnls.filter(p => p > 0)
+      const losses = pnls.filter(p => p < 0)
+      const grossProfit = wins.reduce((s, v) => s + v, 0)
+      const grossLoss = Math.abs(losses.reduce((s, v) => s + v, 0))
+      const [y, m] = month.split('-')
+      return {
+        month,
+        monthLabel: `${MONTH_NAMES[parseInt(m) - 1]} ${y}`,
+        pl: Math.round(pnls.reduce((s, v) => s + v, 0) * 100) / 100,
+        trades: pnls.length,
+        winRate: pnls.length > 0 ? Math.round((wins.length / pnls.length) * 1000) / 10 : 0,
+        profitFactor: grossLoss > 0 ? Math.round((grossProfit / grossLoss) * 100) / 100 : grossProfit > 0 ? 999 : 0,
+      }
+    })
+}
+
+/**
+ * Calculate daily P/L from trades for monthly KPI computation.
+ */
+export function calcDailyPnl(
+  trades: { net_profit: number; close_time: string }[],
+): { date: string; pl: number }[] {
+  const byDay = new Map<string, number>()
+  for (const t of trades) {
+    const day = t.close_time.slice(0, 10) // YYYY-MM-DD
+    byDay.set(day, (byDay.get(day) || 0) + Number(t.net_profit))
+  }
+  return [...byDay.entries()]
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([date, pl]) => ({ date, pl: Math.round(pl * 100) / 100 }))
+}

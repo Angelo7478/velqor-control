@@ -8,6 +8,7 @@ const PAGES = [
   { href: '/divisioni/quant/health', label: 'Salute', icon: '🩺' },
   { href: '/divisioni/quant/scenarios', label: 'Scenari', icon: '🎲' },
   { href: '/divisioni/quant/builder', label: 'Builder', icon: '🔧' },
+  { href: '/divisioni/quant/monthly', label: 'Mensile', icon: '📊' },
   { href: '/divisioni/quant/import', label: 'Import', icon: '📥' },
   { href: '/divisioni/quant/conti', label: 'Conti', icon: '🏦' },
 ]
