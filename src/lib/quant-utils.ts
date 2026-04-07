@@ -1637,6 +1637,175 @@ export function runScenarioComparison(
 }
 
 // ============================================
+// SIZING EFFICIENCY & EQUITY PROJECTION
+// ============================================
+
+export interface SizingEfficiency {
+  currentPnl: number          // actual P/L with current lots
+  optimizedPnl: number        // estimated P/L with optimal lots
+  efficiencyPct: number       // currentPnl / optimizedPnl * 100
+  gapPnl: number              // optimizedPnl - currentPnl
+  gapPct: number              // how much more you could earn %
+  avgLotRatio: number         // avg(currentLot / optimalLot)
+  underSized: number          // count of strategies using < 80% of optimal
+  overSized: number           // count using > 120% of optimal
+}
+
+export interface ProjectionScenario {
+  label: string
+  equity6m: number
+  equity12m: number
+  pnl6m: number
+  pnl12m: number
+  return6mPct: number
+  return12mPct: number
+  monthlyPnl: number
+  maxDdEstimate: number
+}
+
+export interface EquityProjection {
+  pessimistic: ProjectionScenario   // P10
+  base: ProjectionScenario          // P50 median
+  optimistic: ProjectionScenario    // P90
+  tradesPerMonth: number
+  monthsOfData: number
+  dataQuality: 'low' | 'medium' | 'high'  // based on months of history
+}
+
+/**
+ * Calculate sizing efficiency: how well current lots exploit the account capacity.
+ * Compares actual P/L to what the P/L would have been with optimized (Kelly/HRP) lots.
+ */
+export function calcSizingEfficiency(
+  strategies: { strategyId: string; currentLots: number; optimizedLots: number; avgTradeAtCurrentLots: number }[],
+): SizingEfficiency {
+  let currentPnl = 0
+  let optimizedPnl = 0
+  let lotRatioSum = 0
+  let lotRatioCount = 0
+  let underSized = 0
+  let overSized = 0
+
+  for (const s of strategies) {
+    const curr = s.currentLots
+    const opt = s.optimizedLots
+    if (opt <= 0 || curr <= 0) continue
+
+    const ratio = curr / opt
+    lotRatioSum += ratio
+    lotRatioCount++
+
+    // Current P/L = actual avg trade * number implied
+    // We use avgTrade at current lots as-is
+    currentPnl += s.avgTradeAtCurrentLots
+
+    // Optimized P/L = scale avg trade by lot ratio
+    optimizedPnl += s.avgTradeAtCurrentLots * (opt / curr)
+
+    if (ratio < 0.8) underSized++
+    else if (ratio > 1.2) overSized++
+  }
+
+  const avgLotRatio = lotRatioCount > 0 ? lotRatioSum / lotRatioCount : 1
+  const efficiencyPct = optimizedPnl !== 0 ? (currentPnl / optimizedPnl) * 100 : 100
+  const gapPnl = optimizedPnl - currentPnl
+  const gapPct = currentPnl !== 0 ? (gapPnl / Math.abs(currentPnl)) * 100 : 0
+
+  return { currentPnl, optimizedPnl, efficiencyPct, gapPnl, gapPct, avgLotRatio, underSized, overSized }
+}
+
+/**
+ * Project equity forward 6/12 months using Monte Carlo bootstrap on monthly returns.
+ * Generates 3 scenarios: pessimistic (P10), base (P50), optimistic (P90).
+ *
+ * @param monthlyReturns Array of monthly P/L values (absolute $)
+ * @param equityBase Current equity
+ * @param tradesPerMonth Average trades per month
+ */
+export function calcEquityProjection(
+  monthlyReturns: number[],
+  equityBase: number,
+  tradesPerMonth: number,
+): EquityProjection {
+  const nMonths = monthlyReturns.length
+  const dataQuality: 'low' | 'medium' | 'high' = nMonths < 3 ? 'low' : nMonths < 6 ? 'medium' : 'high'
+
+  if (nMonths === 0) {
+    const empty: ProjectionScenario = {
+      label: '', equity6m: equityBase, equity12m: equityBase,
+      pnl6m: 0, pnl12m: 0, return6mPct: 0, return12mPct: 0,
+      monthlyPnl: 0, maxDdEstimate: 0,
+    }
+    return {
+      pessimistic: { ...empty, label: 'Pessimistico' },
+      base: { ...empty, label: 'Base' },
+      optimistic: { ...empty, label: 'Ottimistico' },
+      tradesPerMonth, monthsOfData: 0, dataQuality,
+    }
+  }
+
+  // Run 1000 MC paths of 12 months each using monthly bootstrap
+  const numPaths = 1000
+  const pathLength = 12
+
+  const paths6m: number[] = []   // equity at 6 months
+  const paths12m: number[] = []  // equity at 12 months
+  const pathMaxDd: number[] = []
+
+  for (let p = 0; p < numPaths; p++) {
+    let equity = equityBase
+    let peak = equityBase
+    let maxDd = 0
+
+    for (let m = 0; m < pathLength; m++) {
+      const idx = Math.floor(Math.random() * nMonths)
+      equity += monthlyReturns[idx]
+      if (equity > peak) peak = equity
+      const dd = peak - equity
+      if (dd > maxDd) maxDd = dd
+
+      if (m === 5) paths6m.push(equity)  // after 6 months
+    }
+    paths12m.push(equity)
+    pathMaxDd.push(maxDd)
+  }
+
+  // Sort for percentiles
+  paths6m.sort((a, b) => a - b)
+  paths12m.sort((a, b) => a - b)
+  pathMaxDd.sort((a, b) => a - b)
+
+  const pct = (arr: number[], p: number) => arr[Math.floor(arr.length * p)]
+
+  function buildScenario(label: string, percentile: number): ProjectionScenario {
+    const eq6 = pct(paths6m, percentile)
+    const eq12 = pct(paths12m, percentile)
+    const pnl6 = eq6 - equityBase
+    const pnl12 = eq12 - equityBase
+    return {
+      label,
+      equity6m: Math.round(eq6),
+      equity12m: Math.round(eq12),
+      pnl6m: Math.round(pnl6),
+      pnl12m: Math.round(pnl12),
+      return6mPct: equityBase > 0 ? (pnl6 / equityBase) * 100 : 0,
+      return12mPct: equityBase > 0 ? (pnl12 / equityBase) * 100 : 0,
+      monthlyPnl: Math.round(pnl12 / 12),
+      maxDdEstimate: Math.round(pct(pathMaxDd, percentile)),
+    }
+  }
+
+  return {
+    pessimistic: buildScenario('Pessimistico', 0.10),
+    base: buildScenario('Base', 0.50),
+    optimistic: buildScenario('Ottimistico', 0.90),
+    tradesPerMonth,
+    monthsOfData: nMonths,
+    dataQuality,
+  }
+}
+
+// ============================================
 // BUILDER V2 — Equity Curves & Portfolio Builder
 // ============================================
 

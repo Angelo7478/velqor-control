@@ -11,6 +11,8 @@ import {
   calcPortfolioMargin, PortfolioMarginResult, DEFAULT_REF_PRICES,
   calcFitnessScore, detectPendulumState,
   generateSizingAdvice, AdvisorInput, AdvisorSummary,
+  calcSizingEfficiency, SizingEfficiency,
+  calcEquityProjection, EquityProjection,
 } from '@/lib/quant-utils'
 import QuantNav from '../quant-nav'
 import { VELQOR_LOGO_BASE64 } from '@/lib/velqor-logo'
@@ -316,6 +318,45 @@ export default function BuilderPage() {
 
     return generateSizingAdvice(inputs)
   }, [strategies, trades])
+
+  // ---- Sizing Efficiency + Equity Projection (memoized) ----
+  const projectionData = useMemo<{ efficiency: SizingEfficiency; projection: EquityProjection } | null>(() => {
+    const selected = strategies.filter(s => s.selected && s.tradeCount > 0)
+    if (selected.length === 0 || trades.length === 0) return null
+
+    // Build monthly P/L from combined portfolio trades
+    const monthlyPnl = new Map<string, number>()
+    let totalTradeCount = 0
+    for (const t of trades) {
+      if (!selected.some(s => s.id === t.strategy_id)) continue
+      const ym = t.close_time.slice(0, 7) // YYYY-MM
+      monthlyPnl.set(ym, (monthlyPnl.get(ym) || 0) + t.net_profit)
+      totalTradeCount++
+    }
+    const monthlyReturns = [...monthlyPnl.values()]
+    const monthsOfData = monthlyReturns.length
+    const tradesPerMonth = monthsOfData > 0 ? totalTradeCount / monthsOfData : 0
+
+    // Sizing efficiency: compare current lots to optimized lots (from sizing engine)
+    const effInputs = selected.map(s => {
+      const stratTrades = trades.filter(t => t.strategy_id === s.id)
+      const totalPl = stratTrades.reduce((sum, t) => sum + t.net_profit, 0)
+      const avgTrade = stratTrades.length > 0 ? totalPl / stratTrades.length : 0
+      // Optimized lots: use sizing engine result if available, else use baseLots scaled
+      const optLots = sizingOutput?.results.find(r => r.strategyId === s.id)?.recommendedLots ?? s.baseLots
+      return {
+        strategyId: s.id,
+        currentLots: s.userLots,
+        optimizedLots: optLots,
+        avgTradeAtCurrentLots: avgTrade * stratTrades.length, // total P/L for this strategy
+      }
+    })
+
+    const efficiency = calcSizingEfficiency(effInputs)
+    const projection = calcEquityProjection(monthlyReturns, equityBase, tradesPerMonth)
+
+    return { efficiency, projection }
+  }, [strategies, trades, equityBase, sizingOutput])
 
   // ---- Apply advisor portfolio: select/deselect strategies + set lots ----
   function applyAdvisorPortfolio() {
@@ -1029,6 +1070,38 @@ export default function BuilderPage() {
   <div class="section-note" style="font-family:monospace;font-size:10px;white-space:pre-wrap;line-height:1.8">
 ${curveData.curves.sort((a, b) => a.magic - b.magic).map(c => `Magic ${String(c.magic).padStart(2)} | ${c.name.padEnd(30)} | ${String(fmtR(c.userLots, 3)).padStart(6)} lotti | ${c.stats.totalTrades} trade`).join('\n')}</div>
 
+  <!-- Proiezione & Efficienza -->
+  ${projectionData ? `
+  <h2>Proiezione & Efficienza Sizing</h2>
+  <div class="grid-2" style="margin-bottom:12px">
+    <div>
+      <h3>Efficienza Sizing</h3>
+      <table>
+        <tr><td>Efficienza</td><td class="text-right bold" style="color:${projectionData.efficiency.efficiencyPct >= 80 ? '#16a34a' : projectionData.efficiency.efficiencyPct >= 50 ? '#b45309' : '#dc2626'}">${fmtR(projectionData.efficiency.efficiencyPct, 0)}%</td></tr>
+        <tr><td>P/L attuale</td><td class="text-right" style="color:${plC(projectionData.efficiency.currentPnl)}">${fmtM(projectionData.efficiency.currentPnl)}</td></tr>
+        <tr><td>P/L ottimizzato</td><td class="text-right" style="color:${plC(projectionData.efficiency.optimizedPnl)}">${fmtM(projectionData.efficiency.optimizedPnl)}</td></tr>
+        <tr><td>Gap</td><td class="text-right bold" style="color:#b45309">${fmtM(projectionData.efficiency.gapPnl)}</td></tr>
+        <tr><td>Rapporto lotti medio</td><td class="text-right">${fmtR(projectionData.efficiency.avgLotRatio * 100, 0)}%</td></tr>
+      </table>
+    </div>
+    <div>
+      <h3>Proiezione Monte Carlo (${projectionData.projection.monthsOfData} mesi dati)</h3>
+      <table>
+        <tr><th>Scenario</th><th class="text-right">P/L 6M</th><th class="text-right">P/L 12M</th><th class="text-right">Equity 12M</th><th class="text-right">Rend.</th></tr>
+        ${[projectionData.projection.optimistic, projectionData.projection.base, projectionData.projection.pessimistic].map((s, i) =>
+          `<tr${i === 1 ? ' style="background:#eef2ff;font-weight:600"' : ''}>
+            <td>${i === 0 ? '\u{1F7E2}' : i === 1 ? '\u{1F535}' : '\u{1F534}'} ${s.label}</td>
+            <td class="text-right" style="color:${plC(s.pnl6m)}">${fmtM(s.pnl6m)}</td>
+            <td class="text-right bold" style="color:${plC(s.pnl12m)}">${fmtM(s.pnl12m)}</td>
+            <td class="text-right bold">${fmtM(s.equity12m)}</td>
+            <td class="text-right" style="color:${plC(s.return12mPct)}">${fmtR(s.return12mPct, 1)}%</td>
+          </tr>`
+        ).join('')}
+      </table>
+    </div>
+  </div>
+  ` : ''}
+
   <!-- Disclaimer -->
   <div class="footer">
     <div style="display:flex;align-items:center;justify-content:center;gap:6px;margin-bottom:4px">
@@ -1417,6 +1490,136 @@ ${curveData.curves.sort((a, b) => a.magic - b.magic).map(c => `Magic ${String(c.
               </div>
             </div>
           )}
+        </div>
+      )}
+
+      {/* Projection & Sizing Efficiency */}
+      {projectionData && (
+        <div className="bg-white rounded-xl border border-slate-200 p-4">
+          <h3 className="text-sm font-semibold text-slate-700 mb-3">Proiezione & Efficienza Sizing</h3>
+
+          {/* Sizing Efficiency row */}
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+            <div className="bg-slate-50 rounded-lg p-3">
+              <div className="text-[10px] uppercase text-slate-400 tracking-wide">Efficienza Sizing</div>
+              <div className={`text-lg font-bold font-mono ${
+                projectionData.efficiency.efficiencyPct >= 80 ? 'text-green-600' :
+                projectionData.efficiency.efficiencyPct >= 50 ? 'text-amber-600' : 'text-red-600'
+              }`}>
+                {fmt(projectionData.efficiency.efficiencyPct, 0)}%
+              </div>
+              <div className="text-[10px] text-slate-400">P/L attuale vs ottimizzato</div>
+            </div>
+            <div className="bg-slate-50 rounded-lg p-3">
+              <div className="text-[10px] uppercase text-slate-400 tracking-wide">P/L Attuale</div>
+              <div className={`text-lg font-bold font-mono ${projectionData.efficiency.currentPnl >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                {fmtUsd(projectionData.efficiency.currentPnl)}
+              </div>
+              <div className="text-[10px] text-slate-400">Con sizing corrente</div>
+            </div>
+            <div className="bg-slate-50 rounded-lg p-3">
+              <div className="text-[10px] uppercase text-slate-400 tracking-wide">P/L Ottimizzato</div>
+              <div className={`text-lg font-bold font-mono ${projectionData.efficiency.optimizedPnl >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                {fmtUsd(projectionData.efficiency.optimizedPnl)}
+              </div>
+              <div className="text-[10px] text-slate-400">Con Kelly/HRP</div>
+            </div>
+            <div className="bg-slate-50 rounded-lg p-3">
+              <div className="text-[10px] uppercase text-slate-400 tracking-wide">Gap</div>
+              <div className={`text-lg font-bold font-mono ${projectionData.efficiency.gapPnl > 0 ? 'text-amber-600' : 'text-green-600'}`}>
+                {projectionData.efficiency.gapPnl > 0 ? '+' : ''}{fmtUsd(projectionData.efficiency.gapPnl)}
+              </div>
+              <div className="text-[10px] text-slate-400">
+                {projectionData.efficiency.underSized > 0 && `${projectionData.efficiency.underSized} sotto-dimensionate`}
+                {projectionData.efficiency.underSized > 0 && projectionData.efficiency.overSized > 0 && ' · '}
+                {projectionData.efficiency.overSized > 0 && `${projectionData.efficiency.overSized} sovra-dimensionate`}
+                {projectionData.efficiency.underSized === 0 && projectionData.efficiency.overSized === 0 && 'Sizing bilanciato'}
+              </div>
+            </div>
+          </div>
+
+          {/* Efficiency bar */}
+          <div className="mb-5">
+            <div className="flex items-center justify-between text-[10px] text-slate-500 mb-1">
+              <span>Sfruttamento capacità conto</span>
+              <span className="font-mono">{fmt(projectionData.efficiency.avgLotRatio * 100, 0)}% dei lotti ottimali</span>
+            </div>
+            <div className="w-full h-2.5 bg-slate-100 rounded-full overflow-hidden">
+              <div
+                className={`h-full rounded-full transition-all ${
+                  projectionData.efficiency.avgLotRatio >= 0.8 ? 'bg-green-500' :
+                  projectionData.efficiency.avgLotRatio >= 0.5 ? 'bg-amber-500' : 'bg-red-500'
+                }`}
+                style={{ width: `${Math.min(100, projectionData.efficiency.avgLotRatio * 100)}%` }}
+              />
+            </div>
+          </div>
+
+          {/* Projection table */}
+          <div className="border-t border-slate-100 pt-3">
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-xs font-semibold text-slate-600">Proiezione Equity</span>
+              <span className={`text-[10px] px-2 py-0.5 rounded-full font-medium ${
+                projectionData.projection.dataQuality === 'high' ? 'bg-green-100 text-green-700' :
+                projectionData.projection.dataQuality === 'medium' ? 'bg-amber-100 text-amber-700' :
+                'bg-red-100 text-red-700'
+              }`}>
+                {projectionData.projection.monthsOfData} mesi di dati
+                {projectionData.projection.dataQuality === 'low' && ' — bassa affidabilità'}
+              </span>
+            </div>
+
+            <div className="overflow-x-auto">
+              <table className="w-full text-xs">
+                <thead>
+                  <tr className="text-[10px] uppercase text-slate-400 border-b border-slate-100">
+                    <th className="text-left py-1.5 pr-3">Scenario</th>
+                    <th className="text-right py-1.5 px-2">P/L 6M</th>
+                    <th className="text-right py-1.5 px-2">Equity 6M</th>
+                    <th className="text-right py-1.5 px-2">P/L 12M</th>
+                    <th className="text-right py-1.5 px-2">Equity 12M</th>
+                    <th className="text-right py-1.5 px-2">Rend. 12M</th>
+                    <th className="text-right py-1.5 pl-2">Max DD Est.</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {[projectionData.projection.optimistic, projectionData.projection.base, projectionData.projection.pessimistic].map((s, i) => (
+                    <tr key={s.label} className={`border-b border-slate-50 ${i === 1 ? 'bg-indigo-50/30 font-medium' : ''}`}>
+                      <td className="py-1.5 pr-3">
+                        <span className={`inline-block w-2 h-2 rounded-full mr-1.5 ${
+                          i === 0 ? 'bg-green-500' : i === 1 ? 'bg-indigo-500' : 'bg-red-500'
+                        }`} />
+                        {s.label}
+                      </td>
+                      <td className={`text-right py-1.5 px-2 font-mono ${s.pnl6m >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                        {fmtUsd(s.pnl6m)}
+                      </td>
+                      <td className="text-right py-1.5 px-2 font-mono text-slate-700">
+                        {fmtUsd(s.equity6m)}
+                      </td>
+                      <td className={`text-right py-1.5 px-2 font-mono font-semibold ${s.pnl12m >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                        {fmtUsd(s.pnl12m)}
+                      </td>
+                      <td className="text-right py-1.5 px-2 font-mono text-slate-700 font-semibold">
+                        {fmtUsd(s.equity12m)}
+                      </td>
+                      <td className={`text-right py-1.5 px-2 font-mono ${s.return12mPct >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                        {fmtPct(s.return12mPct, 1)}
+                      </td>
+                      <td className="text-right py-1.5 pl-2 font-mono text-red-500">
+                        {fmtUsd(-s.maxDdEstimate)}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            <div className="flex items-center gap-4 mt-2 text-[10px] text-slate-400">
+              <span>{fmt(projectionData.projection.tradesPerMonth, 1)} trade/mese</span>
+              <span>MC bootstrap su {projectionData.projection.monthsOfData} mesi storici × 1000 path</span>
+            </div>
+          </div>
         </div>
       )}
 
