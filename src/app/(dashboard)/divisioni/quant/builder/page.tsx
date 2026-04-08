@@ -103,17 +103,23 @@ export default function BuilderPage() {
 
   async function loadData() {
     setLoading(true)
+    // Clear stale data immediately to prevent mismatched state
+    setTrades([])
+    setRefPrices(new Map())
+
     const supabase = createClient()
 
     // Load strategies
-    const { data: strats } = await supabase
+    const { data: strats, error: stratsErr } = await supabase
       .from('qel_strategies')
       .select('*')
       .in('status', ['active', 'paused'])
       .order('magic')
 
+    if (stratsErr) console.error('[Builder] strategies query error:', stratsErr)
+
     // Load closed trades for selected account
-    const { data: tradeData } = await supabase
+    const { data: tradeData, error: tradesErr } = await supabase
       .from('qel_trades')
       .select('strategy_id, net_profit, lots, close_time, symbol, open_price')
       .eq('account_id', selectedAccountId)
@@ -121,6 +127,8 @@ export default function BuilderPage() {
       .not('strategy_id', 'is', null)
       .not('close_time', 'is', null)
       .order('close_time')
+
+    if (tradesErr) console.error('[Builder] trades query error:', tradesErr)
 
     // Load saved portfolios
     const { data: ptfs } = await supabase
@@ -142,21 +150,26 @@ export default function BuilderPage() {
 
     // Aggregate per-strategy stats from trades (P/L, count, avg lots)
     const stratStats = new Map<string, { total: number; count: number; lotsSum: number }>()
-    if (tradeData) {
-      for (const t of tradeData) {
-        if (!t.strategy_id) continue
-        if (!stratStats.has(t.strategy_id)) stratStats.set(t.strategy_id, { total: 0, count: 0, lotsSum: 0 })
-        const e = stratStats.get(t.strategy_id)!
-        e.total += Number(t.net_profit ?? 0)
-        e.count++
-        e.lotsSum += Number(t.lots ?? 0)
-      }
+    const tradeRows = tradeData ?? []
+    for (const t of tradeRows) {
+      if (!t.strategy_id) continue
+      if (!stratStats.has(t.strategy_id)) stratStats.set(t.strategy_id, { total: 0, count: 0, lotsSum: 0 })
+      const e = stratStats.get(t.strategy_id)!
+      e.total += Number(t.net_profit ?? 0)
+      e.count++
+      e.lotsSum += Number(t.lots ?? 0)
     }
 
     // Remember source account size for auto-scaling
     const srcAcc = accounts.find(a => a.id === selectedAccountId)
     const srcSize = srcAcc?.account_size || 10000
     setSourceAccountSize(srcSize)
+
+    // Log loaded data for debugging
+    const totalLoadedTrades = tradeRows.length
+    const strategiesWithTrades = [...stratStats.entries()].map(([id, s]) => ({ id, count: s.count, pnl: Math.round(s.total) }))
+    const totalPnl = strategiesWithTrades.reduce((s, x) => s + x.pnl, 0)
+    console.log(`[Builder] Account ${srcAcc?.name}: ${totalLoadedTrades} trades loaded, ${strategiesWithTrades.length} strategies with trades, P/L $${totalPnl}`, strategiesWithTrades)
 
     if (strats) {
       setStrategies(strats.map((s, i) => {
@@ -181,32 +194,31 @@ export default function BuilderPage() {
       }))
     }
 
-    if (tradeData) {
-      setTrades(tradeData.map(t => ({
-        strategy_id: t.strategy_id!,
-        net_profit: Number(t.net_profit ?? 0),
-        lots: Number(t.lots),
-        close_time: t.close_time!,
-        symbol: t.symbol,
-        open_price: t.open_price != null ? Number(t.open_price) : undefined,
-      })))
+    // Always update trades (empty array if query failed — prevents stale data)
+    setTrades(tradeRows.map(t => ({
+      strategy_id: t.strategy_id!,
+      net_profit: Number(t.net_profit ?? 0),
+      lots: Number(t.lots),
+      close_time: t.close_time!,
+      symbol: t.symbol,
+      open_price: t.open_price != null ? Number(t.open_price) : undefined,
+    })))
 
-      // Build reference prices per symbol (avg open_price from trades)
-      const priceAgg = new Map<string, { sum: number; count: number }>()
-      for (const t of tradeData) {
-        if (t.open_price == null || Number(t.open_price) <= 0) continue
-        const sym = t.symbol
-        if (!priceAgg.has(sym)) priceAgg.set(sym, { sum: 0, count: 0 })
-        const e = priceAgg.get(sym)!
-        e.sum += Number(t.open_price)
-        e.count++
-      }
-      const priceMap = new Map<string, number>()
-      for (const [sym, agg] of priceAgg) {
-        priceMap.set(sym, agg.count > 0 ? agg.sum / agg.count : (DEFAULT_REF_PRICES[sym] ?? 0))
-      }
-      setRefPrices(priceMap)
+    // Build reference prices per symbol (avg open_price from trades)
+    const priceAgg = new Map<string, { sum: number; count: number }>()
+    for (const t of tradeRows) {
+      if (t.open_price == null || Number(t.open_price) <= 0) continue
+      const sym = t.symbol
+      if (!priceAgg.has(sym)) priceAgg.set(sym, { sum: 0, count: 0 })
+      const e = priceAgg.get(sym)!
+      e.sum += Number(t.open_price)
+      e.count++
     }
+    const priceMap = new Map<string, number>()
+    for (const [sym, agg] of priceAgg) {
+      priceMap.set(sym, agg.count > 0 ? agg.sum / agg.count : (DEFAULT_REF_PRICES[sym] ?? 0))
+    }
+    setRefPrices(priceMap)
 
     setLoading(false)
   }
@@ -1215,6 +1227,11 @@ ${curveData.curves.sort((a, b) => a.magic - b.magic).map(c => `Magic ${String(c.
   const selected = strategies.filter(s => s.selected)
   const visibleOnChart = strategies.filter(s => s.selected && s.visible)
 
+  // Account data summary (for diagnostics and user info)
+  const strategiesWithTrades = strategies.filter(s => s.tradeCount > 0)
+  const loadedTradeCount = strategiesWithTrades.reduce((s, st) => s + st.tradeCount, 0)
+  const loadedRealPnl = strategiesWithTrades.reduce((s, st) => s + st.realPnlOnAccount, 0)
+
   return (
     <div className="p-4 sm:p-6 space-y-4">
       <div>
@@ -1239,6 +1256,9 @@ ${curveData.curves.sort((a, b) => a.magic - b.magic).map(c => `Magic ${String(c.
                 <option key={a.id} value={a.id}>{a.name} ({fmtUsd(a.account_size)})</option>
               ))}
             </select>
+            <div className="text-[10px] text-slate-400 mt-1 font-mono">
+              {loadedTradeCount} trade | {strategiesWithTrades.length} strategie | P/L {fmtUsd(loadedRealPnl)}
+            </div>
           </div>
           <div>
             <label className="text-[10px] uppercase text-slate-400 block mb-1">Equity base ($)</label>
