@@ -916,7 +916,7 @@ export function runSizingEngine(
     const s = strategies[i]
     const r = results[i]
     const mc95PL = mc95PerLot(s)
-    const hrpW = hrpWeights.get(s.strategyId) || (1 / strategies.length)
+    const hrpW = hrpWeights.get(s.strategyId) ?? (1 / strategies.length)
 
     r.hrpWeight = hrpW
     r.ddBudgetPct = hrpW * 100
@@ -931,6 +931,9 @@ export function runSizingEngine(
     // Lots from DD budget: budget / mc95_per_lot = actual lots
     if (mc95PL > 0) {
       r.recommendedLots = Math.floor((r.ddBudgetUsd / mc95PL) * 100) / 100
+    } else if (s.lotNeutral && s.lotNeutral > 0) {
+      // No mc95 data: fall back to lot_neutral (10K reference lots)
+      r.recommendedLots = s.lotNeutral
     }
 
     // RoR cap

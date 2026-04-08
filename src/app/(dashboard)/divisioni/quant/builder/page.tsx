@@ -275,7 +275,7 @@ export default function BuilderPage() {
       const realWinPct = stratTrades.length > 0 ? (wins.length / stratTrades.length) * 100 : null
       const avgWin = wins.length > 0 ? wins.reduce((s, t) => s + t.net_profit, 0) / wins.length : 0
       const avgLoss = losses.length > 0 ? Math.abs(losses.reduce((s, t) => s + t.net_profit, 0) / losses.length) : 0
-      const realPayoff = avgLoss > 0 ? avgWin / avgLoss : 0
+      const realPayoff = avgLoss > 0 ? avgWin / avgLoss : null
       const realExpectancy = stratTrades.length > 0 ? totalPl / stratTrades.length : null
 
       // Max DD from equity curve
@@ -474,7 +474,7 @@ export default function BuilderPage() {
     const winPct = (wins.length / stratTrades.length) * 100
     const avgWin = wins.length > 0 ? wins.reduce((s, t) => s + t.net_profit, 0) / wins.length : 0
     const avgLoss = losses.length > 0 ? Math.abs(losses.reduce((s, t) => s + t.net_profit, 0) / losses.length) : 0
-    const payoff = avgLoss > 0 ? avgWin / avgLoss : 0
+    const payoff = avgLoss > 0 ? avgWin / avgLoss : null
     const expectancy = stratTrades.reduce((s, t) => s + t.net_profit, 0) / stratTrades.length
     const totalPl = stratTrades.reduce((s, t) => s + t.net_profit, 0)
 
