@@ -64,7 +64,7 @@ except ImportError:
 # ============================================
 
 parser = argparse.ArgumentParser(description="Velqor MT5 Bridge v2.1")
-parser.add_argument("mode", nargs="?", default="loop", choices=["loop", "once", "enrich", "status"])
+parser.add_argument("mode", nargs="?", default="loop", choices=["loop", "once", "enrich", "status", "resync"])
 parser.add_argument("--mt5-path", required=True, help="Percorso terminal64.exe")
 parser.add_argument("--interval", type=int, default=None, help="Override sync interval (secondi)")
 parser.add_argument("--log-file", default=None, help="Override log file path")
@@ -115,9 +115,11 @@ def sb_patch(table, match_col, match_val, data):
 
 def sb_upsert(table, data, on_conflict=None):
     h = {**HEADERS}
+    url = f"{API}/{table}"
     if on_conflict:
         h["Prefer"] = "return=minimal,resolution=merge-duplicates"
-    r = requests.post(f"{API}/{table}", headers=h, json=data)
+        url += f"?on_conflict={on_conflict}"
+    r = requests.post(url, headers=h, json=data)
     if r.status_code not in (200, 201, 204):
         log.error(f"Upsert {table} failed: {r.status_code} {r.text}")
     return r
@@ -265,6 +267,44 @@ def get_open_positions():
     return result
 
 
+def warmup_history():
+    """Pre-load MT5 deal history to ensure all data is available.
+    MT5 may not return complete history on the first call if the terminal
+    hasn't loaded it yet. We call history_deals_total repeatedly until
+    the count stabilizes."""
+    date_from = datetime.now(tz=timezone.utc) - timedelta(days=HISTORY_DAYS)
+    date_to = datetime.now(tz=timezone.utc)
+    prev_count = -1
+    for attempt in range(5):
+        total = mt5.history_deals_total(date_from, date_to)
+        if total is None:
+            total = 0
+        log.info(f"  History warmup attempt {attempt+1}: {total} deals")
+        if total == prev_count and total > 0:
+            return total
+        prev_count = total
+        if attempt < 4:
+            time.sleep(2)
+    return prev_count
+
+
+def _apply_close_data(trade, d):
+    """Apply close deal data to an existing trade record."""
+    trade["close_price"] = float(d.price)
+    trade["close_time"] = datetime.fromtimestamp(d.time, tz=timezone.utc).isoformat()
+    trade["profit"] = float(d.profit)
+    trade["swap"] = float(d.swap)
+    trade["commission"] = trade.get("commission", 0) + (float(d.commission) if hasattr(d, 'commission') else 0)
+    trade["is_open"] = False
+    trade["net_profit"] = float(d.profit) + float(d.swap) + trade["commission"]
+    try:
+        open_dt = datetime.fromisoformat(trade["open_time"])
+        close_dt = datetime.fromtimestamp(d.time, tz=timezone.utc)
+        trade["duration_seconds"] = int((close_dt - open_dt).total_seconds())
+    except:
+        pass
+
+
 def get_closed_deals(since_date):
     date_to = datetime.now(tz=timezone.utc)
     deals = mt5.history_deals_get(since_date, date_to)
@@ -273,6 +313,10 @@ def get_closed_deals(since_date):
 
     trades = {}
     for d in deals:
+        # Skip balance/credit/correction deals (type >= 2)
+        if d.type >= 2:
+            continue
+
         if d.entry == 0:  # DEAL_ENTRY_IN
             trades[d.position_id] = {
                 "ticket": int(d.position_id),
@@ -290,20 +334,28 @@ def get_closed_deals(since_date):
         elif d.entry == 1:  # DEAL_ENTRY_OUT
             pos_id = d.position_id
             if pos_id in trades:
-                trades[pos_id]["close_price"] = float(d.price)
-                trades[pos_id]["close_time"] = datetime.fromtimestamp(d.time, tz=timezone.utc).isoformat()
-                trades[pos_id]["profit"] = float(d.profit)
-                trades[pos_id]["swap"] = float(d.swap)
-                trades[pos_id]["commission"] = trades[pos_id].get("commission", 0) + (float(d.commission) if hasattr(d, 'commission') else 0)
-                trades[pos_id]["is_open"] = False
-                net = float(d.profit) + float(d.swap) + trades[pos_id]["commission"]
-                trades[pos_id]["net_profit"] = net
-                try:
-                    open_dt = datetime.fromisoformat(trades[pos_id]["open_time"])
-                    close_dt = datetime.fromtimestamp(d.time, tz=timezone.utc)
-                    trades[pos_id]["duration_seconds"] = int((close_dt - open_dt).total_seconds())
-                except:
-                    pass
+                _apply_close_data(trades[pos_id], d)
+            else:
+                # OUT without matching IN (trade opened before since_date)
+                trades[pos_id] = {
+                    "ticket": int(pos_id),
+                    "magic": int(d.magic),
+                    "symbol": d.symbol,
+                    "direction": "sell" if d.type == 0 else "buy",
+                    "lots": float(d.volume),
+                    "close_price": float(d.price),
+                    "close_time": datetime.fromtimestamp(d.time, tz=timezone.utc).isoformat(),
+                    "profit": float(d.profit),
+                    "swap": float(d.swap),
+                    "commission": float(d.commission) if hasattr(d, 'commission') else 0,
+                    "net_profit": float(d.profit) + float(d.swap) + (float(d.commission) if hasattr(d, 'commission') else 0),
+                    "is_open": False,
+                    "_partial": True,  # flag: missing open data
+                }
+        elif d.entry == 2:  # DEAL_ENTRY_INOUT (position reversal)
+            pos_id = d.position_id
+            if pos_id in trades:
+                _apply_close_data(trades[pos_id], d)
             else:
                 trades[pos_id] = {
                     "ticket": int(pos_id),
@@ -311,9 +363,7 @@ def get_closed_deals(since_date):
                     "symbol": d.symbol,
                     "direction": "sell" if d.type == 0 else "buy",
                     "lots": float(d.volume),
-                    "open_price": 0,
                     "close_price": float(d.price),
-                    "open_time": datetime.fromtimestamp(d.time, tz=timezone.utc).isoformat(),
                     "close_time": datetime.fromtimestamp(d.time, tz=timezone.utc).isoformat(),
                     "profit": float(d.profit),
                     "swap": float(d.swap),
@@ -322,7 +372,13 @@ def get_closed_deals(since_date):
                     "is_open": False,
                 }
 
-    return list(trades.values())
+    # Filter: only return completed trades (have close_time)
+    result = []
+    for t in trades.values():
+        if "close_time" in t:
+            t.pop("_partial", None)
+            result.append(t)
+    return result
 
 
 # ============================================
@@ -471,7 +527,9 @@ def sync_current_account(account, strategy_map):
     })
     trade_count = len(existing_trades) if existing_trades else 0
 
-    if force_full or not last_sync or trade_count < 10:
+    is_full_import = force_full or not last_sync or trade_count < 10
+    if is_full_import:
+        warmup_history()
         since = datetime.now(tz=timezone.utc) - timedelta(days=HISTORY_DAYS)
         log.info(f"  FULL IMPORT: {trade_count} trade in DB")
     else:
@@ -489,6 +547,16 @@ def sync_current_account(account, strategy_map):
         trade["magic"] = norm_magic
         if strat_id:
             trade["strategy_id"] = strat_id
+        # Don't overwrite good data with partial records (missing open_price)
+        if not is_full_import and trade.get("open_price") in (None, 0):
+            existing = sb_get("qel_trades", {
+                "select": "open_price",
+                "account_id": f"eq.{acc_id}",
+                "ticket": f"eq.{trade['ticket']}",
+            })
+            if existing and existing[0].get("open_price") and float(existing[0]["open_price"]) > 0:
+                trade.pop("open_price", None)
+                trade.pop("open_time", None)
         sb_upsert("qel_trades", trade, on_conflict="account_id,ticket")
 
     return True
@@ -674,6 +742,12 @@ if args.mode == "status":
     mt5.shutdown()
 elif args.mode == "once":
     run_sync()
+elif args.mode == "resync":
+    log.info("=" * 50)
+    log.info("RESYNC: forced full reimport with history warmup")
+    FORCE_FULL_IMPORT = True
+    run_sync()
+    log.info("RESYNC DONE")
 elif args.mode == "enrich":
     run_enrich()
 elif args.mode == "loop":
