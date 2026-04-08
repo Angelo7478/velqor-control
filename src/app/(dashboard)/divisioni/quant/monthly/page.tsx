@@ -10,6 +10,8 @@ import {
   calcMonthlyStrategyStats, selectBestPortfolio, detectAssetRegime,
   generateMonthlyCommentary, generateAssetCommentary, generatePortfolioSummary,
   buildMonthlyTrend, calcDailyPnl, generateTrendCommentary, generateGeneralAnalysis,
+  buildPublicStyleBreakdown, generatePublicAssetNarrative, generatePublicStyleNarrative,
+  generatePublicSummary, PublicStyleBreakdown,
   ASSET_BENCHMARK_LABEL,
 } from '@/lib/quant-utils'
 import { VELQOR_LOGO_BASE64 } from '@/lib/velqor-logo'
@@ -417,6 +419,17 @@ export default function MonthlyPage() {
     return generateGeneralAnalysis(enrichedStats, assetSummaries, monthlyTrend, kpis, bestPortfolio)
   }, [mode, enrichedStats, assetSummaries, monthlyTrend, kpis, bestPortfolio])
 
+  // Public report data
+  const styleBreakdown = useMemo((): PublicStyleBreakdown[] => {
+    return buildPublicStyleBreakdown(enrichedStats)
+  }, [enrichedStats])
+
+  const publicSummary = useMemo((): string[] => {
+    const monthLabel = monthOptions.find(o => o.value === selectedMonth)?.label || selectedMonth
+    const periodLabel = mode === 'monthly' ? monthLabel : `inizio — ${monthLabel}`
+    return generatePublicSummary(kpis, assetSummaries, styleBreakdown, monthlyTrend, mode, periodLabel)
+  }, [kpis, assetSummaries, styleBreakdown, monthlyTrend, mode, selectedMonth])
+
   // Equity curve chart data
   const equityChartData = useMemo(() => {
     if (snapshots.length === 0) return []
@@ -686,6 +699,239 @@ export default function MonthlyPage() {
     }
   }
 
+  // ---- Public Report PDF ----
+
+  function openPublicReport() {
+    const dateNow = new Date().toLocaleDateString('it-IT', { day: '2-digit', month: 'long', year: 'numeric' })
+    const monthLbl = monthOptions.find(o => o.value === selectedMonth)?.label || selectedMonth
+    const title = mode === 'monthly' ? 'Performance Report' : 'Cumulative Performance Report'
+    const subtitle = mode === 'monthly'
+      ? `${monthLbl} — ${dateNow}`
+      : `Dall\'inizio a ${monthLbl} — ${dateNow}`
+
+    const fmtR = (n: number, d = 2) => Number(n).toLocaleString('it-IT', { minimumFractionDigits: d, maximumFractionDigits: d })
+    const fmtM = (n: number) => { const p = n >= 0 ? '' : '-'; return `${p}$${Math.abs(n).toLocaleString('it-IT', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}` }
+    const plC = (n: number) => n > 0 ? '#16a34a' : n < 0 ? '#dc2626' : '#475569'
+
+    // Asset narrative cards (no strategy names/magic)
+    const assetCards = assetSummaries.map(a => {
+      const narrative = generatePublicAssetNarrative(a, mode)
+      const regimeIcon = a.regime === 'up' ? '&#9650;' : a.regime === 'down' ? '&#9660;' : a.regime === 'range' ? '&#9644;' : ''
+      const regimeColor = a.regime === 'up' ? '#16a34a' : a.regime === 'down' ? '#dc2626' : '#b45309'
+      return `
+        <div style="background:#f8fafc;border-radius:10px;padding:14px;border-left:4px solid ${plC(a.totalPl)}">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+            <div style="font-weight:700;font-size:13px">${a.assetLabel}</div>
+            <div style="display:flex;align-items:center;gap:8px">
+              ${a.regime !== 'unknown' ? `<span style="font-size:10px;color:${regimeColor}">${regimeIcon} ${a.regime.toUpperCase()}</span>` : ''}
+              <span style="font-weight:700;font-family:monospace;color:${plC(a.totalPl)}">${fmtM(a.totalPl)}</span>
+            </div>
+          </div>
+          <div style="font-size:10px;color:#64748b;margin-bottom:4px">${a.totalTrades} operazioni</div>
+          <div style="font-size:11px;color:#334155;line-height:1.6">${narrative}</div>
+        </div>`
+    }).join('')
+
+    // Style breakdown cards (no individual strategy details)
+    const styleCards = styleBreakdown.map(s => {
+      const narrative = generatePublicStyleNarrative(s, kpis.totalPl)
+      const styleIcons: Record<string, string> = {
+        mean_reversion: '&#8634;', trend_following: '&#8599;', seasonal: '&#9681;',
+        breakout: '&#9889;', hybrid: '&#8727;',
+      }
+      return `
+        <div style="background:#f8fafc;border-radius:10px;padding:14px;border-left:4px solid ${plC(s.totalPl)}">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+            <div style="font-weight:700;font-size:13px">${styleIcons[s.style] || ''} ${s.styleLabel}</div>
+            <span style="font-weight:700;font-family:monospace;color:${plC(s.totalPl)}">${fmtM(s.totalPl)}</span>
+          </div>
+          <div style="font-size:10px;color:#64748b;margin-bottom:4px">${s.count} strategie — ${s.totalTrades} operazioni — WR ${fmtR(s.winRate, 1)}%</div>
+          <div style="font-size:11px;color:#334155;line-height:1.6">${narrative}</div>
+        </div>`
+    }).join('')
+
+    // Monthly trend table (general mode only, no strategy details)
+    let trendSection = ''
+    if (mode === 'general' && monthlyTrend.length > 0) {
+      const trendRows = monthlyTrend.map(m => `
+        <tr>
+          <td class="bold">${m.monthLabel}</td>
+          <td class="text-right" style="color:${plC(m.pl)};font-weight:700">${fmtM(m.pl)}</td>
+          <td class="text-center">${m.trades}</td>
+          <td class="text-right">${fmtR(m.winRate, 1)}%</td>
+          <td>
+            <div style="display:flex;align-items:center;gap:4px">
+              <div style="width:${Math.min(100, Math.abs(m.pl) / Math.max(...monthlyTrend.map(x => Math.abs(x.pl)), 1) * 100)}px;height:12px;background:${m.pl >= 0 ? '#16a34a' : '#dc2626'};border-radius:3px"></div>
+            </div>
+          </td>
+        </tr>`).join('')
+
+      trendSection = `
+        <h2>Andamento Mensile</h2>
+        <table>
+          <thead><tr><th>Mese</th><th class="text-right">Risultato</th><th class="text-center">Operazioni</th><th class="text-right">Win Rate</th><th></th></tr></thead>
+          <tbody>${trendRows}</tbody>
+        </table>
+        ${trendCommentary ? `<div style="font-size:10px;color:#475569;margin:8px 0;padding:10px;background:#f8fafc;border-radius:6px;line-height:1.6">${trendCommentary}</div>` : ''}`
+    }
+
+    // Equity SVG
+    let equitySvg = ''
+    if (equityChartData.length > 1) {
+      const w = 700, h = 200, pad = 30
+      const eqVals = equityChartData.map(d => d.equity)
+      const minEq = Math.min(...eqVals) * 0.999
+      const maxEq = Math.max(...eqVals) * 1.001
+      const scaleX = (i: number) => pad + (i / (equityChartData.length - 1)) * (w - 2 * pad)
+      const scaleY = (v: number) => h - pad - ((v - minEq) / (maxEq - minEq)) * (h - 2 * pad)
+      const points = equityChartData.map((d, i) => `${scaleX(i).toFixed(1)},${scaleY(d.equity).toFixed(1)}`).join(' ')
+      const areaPoints = `${scaleX(0).toFixed(1)},${(h - pad).toFixed(1)} ${points} ${scaleX(equityChartData.length - 1).toFixed(1)},${(h - pad).toFixed(1)}`
+      equitySvg = `
+        <svg viewBox="0 0 ${w} ${h}" style="width:100%;max-height:200px">
+          <polygon points="${areaPoints}" fill="#6366f120" />
+          <polyline points="${points}" fill="none" stroke="#6366f1" stroke-width="1.5" />
+          <text x="${pad}" y="${h - 8}" font-size="9" fill="#94a3b8">${equityChartData[0].ts}</text>
+          <text x="${w - pad}" y="${h - 8}" font-size="9" fill="#94a3b8" text-anchor="end">${equityChartData[equityChartData.length - 1].ts}</text>
+        </svg>`
+    }
+
+    // Public summary paragraphs
+    const summaryHtml = publicSummary.map(p => `<p style="margin-bottom:8px">${p}</p>`).join('')
+
+    // Extra KPIs for general mode
+    const extraKpis = mode === 'general' ? `
+      <div class="kpi">
+        <div class="kpi-label">CAGR</div>
+        <div class="kpi-value" style="color:${plC(kpis.cagr || 0)}">${fmtR(kpis.cagr || 0, 1)}%</div>
+      </div>
+      <div class="kpi">
+        <div class="kpi-label">Sharpe Ratio</div>
+        <div class="kpi-value" style="color:${(kpis.sharpe || 0) >= 0.5 ? '#16a34a' : '#b45309'}">${fmtR(kpis.sharpe || 0)}</div>
+      </div>
+      <div class="kpi">
+        <div class="kpi-label">Recovery Factor</div>
+        <div class="kpi-value">${fmtR(kpis.recoveryFactor || 0)}</div>
+      </div>` : ''
+
+    const html = `<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="UTF-8">
+<title>VELQOR Quant — ${title}</title>
+<style>
+  @page { size: A4; margin: 15mm; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; color: #1e293b; font-size: 11px; line-height: 1.6; background: #fff; }
+  .page { max-width: 800px; margin: 0 auto; padding: 20px; }
+  h1 { font-size: 22px; font-weight: 700; margin-bottom: 2px; }
+  h2 { font-size: 14px; font-weight: 600; margin: 24px 0 10px; padding-bottom: 4px; border-bottom: 2px solid #e2e8f0; color: #334155; }
+  .subtitle { color: #64748b; font-size: 12px; margin-bottom: 20px; }
+  .header-row { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 10px; }
+  .logo-row { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
+  .logo-img { width: 40px; height: 40px; object-fit: contain; }
+  .logo-text { font-size: 14px; font-weight: 800; color: #0f172a; letter-spacing: 3px; }
+  .logo-sub { font-size: 9px; font-weight: 500; color: #6366f1; letter-spacing: 1.5px; text-transform: uppercase; }
+  .meta { text-align: right; color: #94a3b8; font-size: 10px; }
+  .kpi-grid { display: grid; grid-template-columns: repeat(${mode === 'general' ? 3 : 4}, 1fr); gap: 10px; margin-bottom: 20px; }
+  .kpi { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 10px; padding: 12px; }
+  .kpi-label { font-size: 9px; text-transform: uppercase; letter-spacing: 0.5px; color: #94a3b8; }
+  .kpi-value { font-size: 18px; font-weight: 700; font-family: 'SF Mono', Monaco, monospace; margin-top: 2px; }
+  .kpi-sub { font-size: 9px; color: #94a3b8; }
+  table { width: 100%; border-collapse: collapse; margin-bottom: 15px; font-size: 10px; }
+  th { background: #f8fafc; text-align: left; padding: 6px 8px; font-size: 9px; text-transform: uppercase; letter-spacing: 0.5px; color: #94a3b8; border-bottom: 2px solid #e2e8f0; }
+  td { padding: 5px 8px; border-bottom: 1px solid #f1f5f9; font-family: 'SF Mono', Monaco, monospace; }
+  .text-right { text-align: right; }
+  .text-center { text-align: center; }
+  .bold { font-weight: 700; }
+  .cards-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; margin-bottom: 15px; }
+  .summary-box { background: #f0f9ff; border: 1px solid #bae6fd; border-radius: 10px; padding: 16px; margin: 20px 0; font-size: 11px; line-height: 1.7; color: #334155; }
+  .footer { margin-top: 30px; padding-top: 10px; border-top: 1px solid #e2e8f0; color: #94a3b8; font-size: 9px; text-align: center; }
+  @media print { .no-print { display: none; } body { -webkit-print-color-adjust: exact; print-color-adjust: exact; } }
+</style>
+</head>
+<body>
+<div class="page">
+
+  <!-- Header -->
+  <div class="header-row">
+    <div>
+      <div class="logo-row">
+        <img src="data:image/png;base64,${VELQOR_LOGO_BASE64}" class="logo-img" />
+        <div>
+          <div class="logo-text">VELQOR</div>
+          <div class="logo-sub">Intelligent Quant System</div>
+        </div>
+      </div>
+      <h1>${title}</h1>
+      <div class="subtitle">${subtitle}</div>
+    </div>
+    <div class="meta">
+      <div>Portafoglio Sistematico</div>
+      <div>${assetSummaries.length} sottostanti — ${styleBreakdown.length} famiglie</div>
+      <div style="margin-top:4px"><button class="no-print" onclick="window.print()" style="padding:4px 12px;border:1px solid #e2e8f0;border-radius:6px;cursor:pointer;font-size:11px">Stampa / PDF</button></div>
+    </div>
+  </div>
+
+  <!-- KPI -->
+  <div class="kpi-grid">
+    <div class="kpi">
+      <div class="kpi-label">Risultato ${mode === 'monthly' ? 'Mese' : 'Cumulativo'}</div>
+      <div class="kpi-value" style="color:${plC(kpis.totalPl)}">${fmtM(kpis.totalPl)}</div>
+      <div class="kpi-sub">${kpis.totalTrades} operazioni</div>
+    </div>
+    <div class="kpi">
+      <div class="kpi-label">Win Rate</div>
+      <div class="kpi-value">${fmtR(kpis.winRate, 1)}%</div>
+      <div class="kpi-sub">${kpis.tradingDays} giorni di trading</div>
+    </div>
+    <div class="kpi">
+      <div class="kpi-label">Max Drawdown</div>
+      <div class="kpi-value" style="color:#dc2626">${fmtR(kpis.maxDdPct, 1)}%</div>
+      <div class="kpi-sub">${fmtM(kpis.maxDd)} assoluto</div>
+    </div>
+    <div class="kpi">
+      <div class="kpi-label">Profit Factor</div>
+      <div class="kpi-value" style="color:${kpis.profitFactor >= 1 ? '#16a34a' : '#dc2626'}">${fmtR(kpis.profitFactor)}</div>
+    </div>
+    ${extraKpis}
+  </div>
+
+  <!-- Approcci Operativi -->
+  <h2>Approcci Operativi</h2>
+  <div class="cards-grid">${styleCards}</div>
+
+  ${trendSection}
+
+  <!-- Analisi per Sottostante -->
+  <h2>Analisi per Sottostante</h2>
+  <div class="cards-grid">${assetCards}</div>
+
+  <!-- Equity Curve -->
+  ${equitySvg ? `
+  <h2>Equity Curve</h2>
+  ${equitySvg}` : ''}
+
+  <!-- Summary -->
+  <h2>Sintesi</h2>
+  <div class="summary-box">${summaryHtml}</div>
+
+  <!-- Footer -->
+  <div class="footer">
+    <div>Generato il ${dateNow} — Velqor Intelligent Quant System</div>
+    <div style="margin-top:4px">I risultati derivano da operativita' reale su conti live. Le performance passate non costituiscono garanzia di risultati futuri.</div>
+  </div>
+
+</div>
+</body>
+</html>`
+
+    const pw = window.open('', '_blank')
+    if (pw) {
+      pw.document.write(html)
+      pw.document.close()
+    }
+  }
+
   // ============================================
   // Render
   // ============================================
@@ -737,13 +983,20 @@ export default function MonthlyPage() {
               {monthOptions.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
             </select>
           )}
-          {/* Report button */}
+          {/* Report buttons */}
           <button
             onClick={openReport}
             disabled={loading || enrichedStats.length === 0}
             className="bg-indigo-600 text-white px-4 py-1.5 rounded-lg text-sm font-medium hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed transition"
           >
-            Genera Report PDF
+            Report Interno
+          </button>
+          <button
+            onClick={openPublicReport}
+            disabled={loading || enrichedStats.length === 0}
+            className="bg-slate-700 text-white px-4 py-1.5 rounded-lg text-sm font-medium hover:bg-slate-800 disabled:opacity-50 disabled:cursor-not-allowed transition"
+          >
+            Report Pubblico
           </button>
         </div>
       </div>

@@ -2702,3 +2702,197 @@ export function generateGeneralAnalysis(
 
   return paragraphs
 }
+
+// ============================================
+// Public Report Engine — no strategy details
+// ============================================
+
+export interface PublicStyleBreakdown {
+  style: string
+  styleLabel: string
+  totalPl: number
+  totalTrades: number
+  winRate: number
+  count: number
+  description: string
+}
+
+const STYLE_DESCRIPTIONS: Record<string, string> = {
+  mean_reversion: 'Strategie che operano su eccessi di prezzo, acquistando su ipervenduto e vendendo su ipercomprato. Tipicamente utilizzano indicatori come RSI, bande di Bollinger e deviazioni dalla media.',
+  trend_following: 'Strategie che identificano e cavalcano i trend di medio-lungo periodo. Entrano in posizione quando il mercato conferma una direzione e seguono il movimento fino a segnali di inversione.',
+  seasonal: 'Strategie basate su pattern stagionali e ciclici ricorrenti nei mercati. Sfruttano anomalie statistiche legate a periodi specifici dell\'anno o della settimana.',
+  breakout: 'Strategie che operano sulle rotture di livelli chiave di prezzo. Entrano in posizione quando il mercato supera resistenze o supporti significativi con incremento di volatilita\'.',
+  hybrid: 'Strategie che combinano piu\' approcci — ad esempio elementi di mean reversion con filtri di trend — per adattarsi a condizioni di mercato diverse.',
+}
+
+const STYLE_LABELS_FULL: Record<string, string> = {
+  mean_reversion: 'Mean Reversion',
+  trend_following: 'Trend Following',
+  seasonal: 'Seasonal',
+  breakout: 'Breakout',
+  hybrid: 'Hybrid',
+}
+
+/**
+ * Aggregate strategies by style for public report. No individual strategy details exposed.
+ */
+export function buildPublicStyleBreakdown(stats: MonthlyStrategyStats[]): PublicStyleBreakdown[] {
+  const byStyle = new Map<string, { pls: number[]; count: number }>()
+
+  for (const s of stats) {
+    if (s.monthlyTrades === 0) continue
+    const style = s.style || 'hybrid'
+    if (!byStyle.has(style)) byStyle.set(style, { pls: [], count: 0 })
+    const entry = byStyle.get(style)!
+    for (let i = 0; i < s.monthlyTrades; i++) {
+      // approximate individual trade PL distribution
+    }
+    entry.pls.push(s.monthlyPl)
+    entry.count++
+  }
+
+  // Recalculate from strategy-level aggregates
+  const result: PublicStyleBreakdown[] = []
+  for (const [style, data] of byStyle) {
+    const totalPl = data.pls.reduce((s, v) => s + v, 0)
+    const strats = stats.filter(s => (s.style || 'hybrid') === style && s.monthlyTrades > 0)
+    const totalTrades = strats.reduce((s, v) => s + v.monthlyTrades, 0)
+    const totalWins = strats.reduce((s, v) => s + Math.round(v.monthlyTrades * v.monthlyWinRate / 100), 0)
+    const winRate = totalTrades > 0 ? (totalWins / totalTrades) * 100 : 0
+
+    result.push({
+      style,
+      styleLabel: STYLE_LABELS_FULL[style] || style,
+      totalPl: Math.round(totalPl * 100) / 100,
+      totalTrades,
+      winRate: Math.round(winRate * 10) / 10,
+      count: data.count,
+      description: STYLE_DESCRIPTIONS[style] || '',
+    })
+  }
+
+  return result.sort((a, b) => b.totalPl - a.totalPl)
+}
+
+/**
+ * Generate narrative asset commentary for public report — descriptive, no strategy names.
+ */
+export function generatePublicAssetNarrative(summary: MonthlyAssetSummary, mode: 'monthly' | 'general'): string {
+  const { assetLabel, totalPl, totalTrades, strategies, regime, regimeDetail } = summary
+  const numStrats = strategies.length
+  const positive = strategies.filter(s => s.pl > 0).length
+  const negative = strategies.filter(s => s.pl < 0).length
+
+  const parts: string[] = []
+
+  if (totalPl > 0) {
+    parts.push(`${assetLabel} ha registrato un risultato positivo di ${fmtUsd(totalPl)} con ${totalTrades} operazioni${mode === 'general' ? ' nel periodo analizzato' : ' nel mese'}.`)
+  } else if (totalPl < 0) {
+    parts.push(`${assetLabel} ha chiuso in negativo a ${fmtUsd(totalPl)} su ${totalTrades} operazioni${mode === 'general' ? ' nel periodo' : ' nel mese'}.`)
+  } else {
+    parts.push(`${assetLabel}: ${totalTrades} operazioni con risultato sostanzialmente neutro.`)
+  }
+
+  if (numStrats > 1) {
+    if (positive > 0 && negative > 0) {
+      parts.push(`Su ${numStrats} strategie operative, ${positive} hanno chiuso in profitto e ${negative} in perdita — un quadro misto che riflette la diversificazione degli approcci.`)
+    } else if (positive === numStrats) {
+      parts.push(`Tutte le ${numStrats} strategie operative hanno chiuso in profitto — condizioni di mercato particolarmente favorevoli.`)
+    } else if (negative === numStrats) {
+      parts.push(`Nessuna delle ${numStrats} strategie ha chiuso in positivo — condizioni avverse per gli approcci utilizzati su questo sottostante.`)
+    }
+  }
+
+  if (regime !== 'unknown') {
+    const regimeNarr: Record<string, string> = {
+      up: `attualmente in fase di uptrend`,
+      down: `attualmente in fase di downtrend`,
+      range: `attualmente in fase laterale (range)`,
+    }
+    parts.push(`Il sottostante si trova ${regimeNarr[regime]}, come indicato dall'analisi delle medie mobili a 50 e 200 periodi.`)
+  }
+
+  return parts.join(' ')
+}
+
+/**
+ * Generate narrative style commentary for public report.
+ */
+export function generatePublicStyleNarrative(breakdown: PublicStyleBreakdown, kpisTotalPl: number): string {
+  const { styleLabel, totalPl, totalTrades, winRate, count, description } = breakdown
+  const parts: string[] = []
+
+  parts.push(description)
+
+  const contrib = kpisTotalPl !== 0 ? Math.round((totalPl / Math.abs(kpisTotalPl)) * 100) : 0
+
+  if (totalPl > 0) {
+    parts.push(`Questo approccio ha generato ${fmtUsd(totalPl)} complessivi su ${totalTrades} operazioni (win rate ${fmt(winRate, 1)}%), con ${count} strategie attive.`)
+    if (contrib > 30) parts.push(`Rappresenta il contributo piu\' significativo al risultato complessivo del portafoglio.`)
+  } else if (totalPl < 0) {
+    parts.push(`Ha registrato un risultato negativo di ${fmtUsd(totalPl)} su ${totalTrades} operazioni. ${count} strategie attive con questo approccio.`)
+    if (winRate < 40) parts.push(`Il win rate contenuto (${fmt(winRate, 1)}%) suggerisce condizioni di mercato non allineate con questa metodologia.`)
+  } else {
+    parts.push(`Risultato neutro su ${totalTrades} operazioni con ${count} strategie attive.`)
+  }
+
+  return parts.join(' ')
+}
+
+/**
+ * Generate full public summary — narrative, no technical internals.
+ */
+export function generatePublicSummary(
+  kpis: MonthlyKPIs,
+  assetSummaries: MonthlyAssetSummary[],
+  styleBreakdown: PublicStyleBreakdown[],
+  trend: MonthlyTrendEntry[],
+  mode: 'monthly' | 'general',
+  periodLabel: string,
+): string[] {
+  const paragraphs: string[] = []
+
+  // Opening
+  if (mode === 'monthly') {
+    const outcome = kpis.totalPl >= 0 ? 'positivo' : 'negativo'
+    paragraphs.push(`Il portafoglio ha chiuso il mese di ${periodLabel} con un risultato ${outcome} di ${fmtUsd(kpis.totalPl)}, generato da ${kpis.totalTrades} operazioni su ${assetSummaries.length} sottostanti. Il win rate complessivo si e\' attestato al ${fmt(kpis.winRate, 1)}% con un profit factor di ${fmt(kpis.profitFactor)}.`)
+  } else {
+    paragraphs.push(`Nel periodo analizzato (${periodLabel}), il portafoglio ha prodotto un risultato cumulativo di ${fmtUsd(kpis.totalPl)} attraverso ${kpis.totalTrades} operazioni distribuite su ${assetSummaries.length} mercati. Il drawdown massimo registrato e\' stato del ${fmt(kpis.maxDdPct, 1)}% dell'equity.`)
+    if (kpis.cagr !== undefined) {
+      paragraphs.push(`Il rendimento annualizzato (CAGR) si attesta al ${fmt(kpis.cagr, 1)}% con uno Sharpe ratio di ${fmt(kpis.sharpe ?? 0)} e un recovery factor di ${fmt(kpis.recoveryFactor ?? 0)}, indicatori che misurano rispettivamente il rapporto rendimento/rischio e la capacita\' di recupero dopo le fasi di drawdown.`)
+    }
+  }
+
+  // Style overview
+  if (styleBreakdown.length > 0) {
+    const best = styleBreakdown[0]
+    const approaches = styleBreakdown.map(s => s.styleLabel).join(', ')
+    paragraphs.push(`L'operativita\' si basa su ${styleBreakdown.length} famiglie di strategie: ${approaches}. L'approccio ${best.styleLabel} ha prodotto il miglior contributo nel periodo con ${fmtUsd(best.totalPl)}.`)
+  }
+
+  // Market context
+  if (assetSummaries.length > 0) {
+    const bestAsset = assetSummaries.reduce((a, b) => a.totalPl > b.totalPl ? a : b)
+    const regimes = assetSummaries.filter(a => a.regime !== 'unknown')
+    let mktText = `Il mercato piu\' favorevole e\' stato ${bestAsset.assetLabel} con ${fmtUsd(bestAsset.totalPl)}.`
+    if (regimes.length > 0) {
+      const up = regimes.filter(a => a.regime === 'up').map(a => a.assetLabel)
+      const down = regimes.filter(a => a.regime === 'down').map(a => a.assetLabel)
+      if (up.length > 0) mktText += ` In fase di uptrend: ${up.join(', ')}.`
+      if (down.length > 0) mktText += ` In fase di downtrend: ${down.join(', ')}.`
+    }
+    paragraphs.push(mktText)
+  }
+
+  // Trend (general mode)
+  if (mode === 'general' && trend.length >= 3) {
+    const posMonths = trend.filter(m => m.pl > 0).length
+    const pct = Math.round((posMonths / trend.length) * 100)
+    paragraphs.push(`Nell'arco di ${trend.length} mesi di operativita\', ${posMonths} sono stati chiusi in positivo (${pct}%). La consistenza nel tempo e\' un indicatore fondamentale della robustezza di un approccio sistematico.`)
+  }
+
+  // Disclaimer
+  paragraphs.push(`I risultati presentati derivano da operativita\' reale su conti live. Le performance passate non costituiscono garanzia di risultati futuri. Il trading sistematico comporta rischi di perdita del capitale investito.`)
+
+  return paragraphs
+}
