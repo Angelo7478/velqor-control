@@ -341,13 +341,24 @@ export default function BuilderPage() {
     const selected = strategies.filter(s => s.selected && s.tradeCount > 0)
     if (selected.length === 0 || trades.length === 0) return null
 
-    // Build monthly P/L from combined portfolio trades
+    // Build monthly P/L from combined portfolio trades, scaled to builder lots
+    // Pre-compute lot scale per strategy (same logic as buildEquityCurves)
+    const lotScaleMap = new Map<string, number>()
+    for (const s of selected) {
+      const stratTrades = trades.filter(t => t.strategy_id === s.id)
+      const avgLots = stratTrades.length > 0
+        ? stratTrades.reduce((sum, t) => sum + t.lots, 0) / stratTrades.length
+        : 0
+      lotScaleMap.set(s.id, avgLots > 0 ? s.userLots / avgLots : 1)
+    }
+
     const monthlyPnl = new Map<string, number>()
     let totalTradeCount = 0
     for (const t of trades) {
       if (!selected.some(s => s.id === t.strategy_id)) continue
+      const scale = lotScaleMap.get(t.strategy_id) ?? 1
       const ym = t.close_time.slice(0, 7) // YYYY-MM
-      monthlyPnl.set(ym, (monthlyPnl.get(ym) || 0) + t.net_profit)
+      monthlyPnl.set(ym, (monthlyPnl.get(ym) || 0) + t.net_profit * scale)
       totalTradeCount++
     }
     const monthlyReturns = [...monthlyPnl.values()]

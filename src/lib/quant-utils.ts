@@ -482,9 +482,10 @@ export function calcFitnessScore(strategy: {
   // Normalize if not all components available
   let rawScore = componentWeightUsed > 0 ? componentScore / componentWeightUsed : 50
 
-  // Apply confidence weighting: blend raw score with neutral (60%) based on confidence
-  // At 1 trade: mostly neutral. At 50+ trades: fully trust the score.
-  const neutralScore = 60
+  // Apply confidence weighting: blend raw score with neutral (30) based on confidence
+  // At 1 trade: mostly neutral → low score means "insufficient data"
+  // At 50+ trades: fully trust the score. Strategy must prove itself.
+  const neutralScore = 30
   const finalScore = Math.round(rawScore * confidence + neutralScore * (1 - confidence))
 
   return { score: Math.max(0, Math.min(100, finalScore)), details, confidence: Math.round(confidence * 100) }
@@ -890,12 +891,18 @@ export function runSizingEngine(
     }
     if (s.testMc95Dd) {
       // test_mc95_dd is at lot_static (typically 1.0 for indices, 0.1 for NQ)
-      // If lot_neutral is available, use ratio; otherwise assume lot_static ≈ 1.0
       if (s.lotNeutral && s.lotNeutral > 0 && s.testMc95Dd > 0) {
-        // Derive per-lot: test DD / lot_neutral gives us a usable per-lot estimate
         return s.testMc95Dd / (s.lotNeutral || 1)
       }
-      return s.testMc95Dd // assume per-lot if no lot info
+      return s.testMc95Dd
+    }
+    // Fallback: use testMaxDd as conservative MC95 estimate
+    if (s.testMaxDd && s.testMaxDd > 0) {
+      return s.lotNeutral && s.lotNeutral > 0 ? s.testMaxDd / s.lotNeutral : s.testMaxDd
+    }
+    // Last resort: use realMaxDd (already at real trade lots, can't normalize perfectly)
+    if (s.realMaxDd > 0 && s.realTrades >= 10) {
+      return s.realMaxDd
     }
     return 0
   }
@@ -1148,10 +1155,17 @@ export function calcHRPWeights(
 
   // Level 1: Inverse-variance across families
   // Use 1/totalMc95 as proxy for inverse variance
+  // Families without MC95 data use median MC95 of other families as fallback
+  const mc95Values = [...families.values()].map(f => f.totalMc95).filter(v => v > 0)
+  const medianMc95 = mc95Values.length > 0
+    ? mc95Values.sort((a, b) => a - b)[Math.floor(mc95Values.length / 2)]
+    : 1 // absolute fallback
+
   let totalInvVar = 0
   const familyWeights = new Map<string, number>()
   for (const [fam, data] of families) {
-    const invVar = data.totalMc95 > 0 ? 1 / data.totalMc95 : 0
+    const mc95 = data.totalMc95 > 0 ? data.totalMc95 : medianMc95
+    const invVar = 1 / mc95
     familyWeights.set(fam, invVar)
     totalInvVar += invVar
   }
@@ -2117,11 +2131,17 @@ export function calcCurveStats(pnls: number[], equityBase: number): CurveStats {
   const grossLoss = Math.abs(losses.reduce((s, v) => s + v, 0))
   const profitFactor = grossLoss > 0 ? grossProfit / grossLoss : grossProfit > 0 ? 999 : 0
 
-  // Sharpe (annualized approx)
-  const mean = avgTrade
-  const variance = pnls.reduce((s, v) => s + Math.pow(v - mean, 2), 0) / pnls.length
-  const std = Math.sqrt(variance)
-  const sharpe = std > 0 ? (mean / std) * Math.sqrt(252) : 0
+  // Sharpe (annualized) — uses % returns, not dollar P/Ls
+  const returns: number[] = []
+  let eqBefore = equityBase
+  for (const pnl of pnls) {
+    returns.push(eqBefore > 0 ? pnl / eqBefore : 0)
+    eqBefore += pnl
+  }
+  const meanReturn = returns.reduce((s, v) => s + v, 0) / returns.length
+  const varianceR = returns.reduce((s, v) => s + Math.pow(v - meanReturn, 2), 0) / returns.length
+  const stdR = Math.sqrt(varianceR)
+  const sharpe = stdR > 0 ? (meanReturn / stdR) * Math.sqrt(252) : 0
 
   // Max consecutive losses
   let maxConsec = 0, currentConsec = 0
