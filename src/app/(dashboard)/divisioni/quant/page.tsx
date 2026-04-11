@@ -14,6 +14,7 @@ import {
 } from 'recharts'
 import AccountDashboard from './account-dashboard'
 import InfoTooltip from '@/components/ui/InfoTooltip'
+import { VELQOR_LOGO_BASE64 } from '@/lib/velqor-logo'
 
 type Tab = 'overview' | 'strategies' | 'accounts'
 type StrategyView = 'list' | 'detail'
@@ -169,6 +170,220 @@ export default function QuantPage() {
     setStratRegimeStats(regimeStats)
 
     setChartLoading(false)
+  }
+
+  /** Export strategy detail as printable HTML report */
+  function exportStrategy() {
+    if (!selectedStrat) return
+    const s = selectedStrat
+    const acc = accounts.find(a => a.id === selectedAccountId)
+    const accName = acc?.name || 'Conto'
+    const dateNow = new Date().toLocaleDateString('it-IT', { day: '2-digit', month: 'long', year: 'numeric' })
+    const fmtR = (n: number | null | undefined, d = 2) => n !== null && n !== undefined ? Number(n).toLocaleString('it-IT', { minimumFractionDigits: d, maximumFractionDigits: d }) : '—'
+    const fmtM = (n: number) => { const p = n >= 0 ? '' : '-'; return `${p}$${Math.abs(n).toLocaleString('it-IT', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}` }
+    const plC = (n: number) => n > 0 ? '#16a34a' : n < 0 ? '#dc2626' : '#475569'
+
+    // Build SVG chart
+    let chartSvg = ''
+    if (stratBenchData.length > 1) {
+      const w = 750, h = 220, pad = 40
+      const vals = stratBenchData.map(d => [d.stratReturn, d.benchReturn]).flat()
+      const minV = Math.min(...vals) - 0.5
+      const maxV = Math.max(...vals) + 0.5
+      const scX = (i: number) => pad + (i / (stratBenchData.length - 1)) * (w - 2 * pad)
+      const scY = (v: number) => h - pad - ((v - minV) / (maxV - minV)) * (h - 2 * pad)
+
+      // Regime zones
+      const zoneRects = stratRegimes
+        .filter(z => z.startDate >= stratBenchData[0]?.date)
+        .map(z => {
+          const i1 = stratBenchData.findIndex(d => d.date >= z.startDate)
+          const i2 = stratBenchData.findIndex(d => d.date > z.endDate)
+          const x1 = i1 >= 0 ? scX(i1) : pad
+          const x2 = i2 >= 0 ? scX(i2) : w - pad
+          const fill = z.regime === 'up' ? '#22c55e' : z.regime === 'down' ? '#ef4444' : '#f59e0b'
+          return `<rect x="${x1}" y="${pad / 2}" width="${x2 - x1}" height="${h - pad * 1.5}" fill="${fill}" opacity="0.08" />`
+        }).join('')
+
+      // Zero line
+      const zeroY = scY(0)
+      const zeroLine = `<line x1="${pad}" y1="${zeroY}" x2="${w - pad}" y2="${zeroY}" stroke="#94a3b8" stroke-dasharray="4 4" />`
+
+      // Strategy line
+      const stratPts = stratBenchData.map((d, i) => `${scX(i).toFixed(1)},${scY(d.stratReturn).toFixed(1)}`).join(' ')
+      // Benchmark line
+      const benchPts = stratBenchData.map((d, i) => `${scX(i).toFixed(1)},${scY(d.benchReturn).toFixed(1)}`).join(' ')
+
+      // Y-axis labels
+      const ySteps = 5
+      const yLabels = Array.from({ length: ySteps + 1 }, (_, i) => {
+        const v = minV + (maxV - minV) * (i / ySteps)
+        return `<text x="${pad - 4}" y="${scY(v)}" font-size="8" fill="#94a3b8" text-anchor="end" dominant-baseline="middle">${v > 0 ? '+' : ''}${v.toFixed(1)}%</text>`
+      }).join('')
+
+      // X-axis labels
+      const xInterval = Math.max(1, Math.floor(stratBenchData.length / 7))
+      const xLabels = stratBenchData.filter((_, i) => i % xInterval === 0).map((d, i) =>
+        `<text x="${scX(i * xInterval)}" y="${h - 6}" font-size="8" fill="#94a3b8" text-anchor="middle">${d.date.slice(5)}</text>`
+      ).join('')
+
+      chartSvg = `
+        <svg viewBox="0 0 ${w} ${h}" style="width:100%;max-height:220px;margin:10px 0">
+          ${zoneRects}
+          ${zeroLine}
+          ${yLabels}
+          ${xLabels}
+          <polyline points="${benchPts}" fill="none" stroke="#94a3b8" stroke-width="1.5" stroke-dasharray="6 3" />
+          <polyline points="${stratPts}" fill="none" stroke="#7c3aed" stroke-width="2" />
+        </svg>
+        <div style="display:flex;gap:16px;justify-content:center;font-size:9px;color:#64748b;margin-top:4px">
+          <span>━ Strategia</span><span style="opacity:0.6">╌╌ Buy &amp; Hold</span>
+          <span>🟢 Trend Up</span><span>🔴 Trend Down</span><span>🟡 Range</span>
+        </div>`
+    }
+
+    // Regime table
+    const regimeRows = stratRegimeStats.map(rs => `
+      <tr>
+        <td style="padding:6px 8px;font-weight:500"><span style="display:inline-block;width:8px;height:8px;border-radius:2px;margin-right:6px;background:${rs.regime === 'up' ? '#22c55e40' : rs.regime === 'down' ? '#ef444440' : '#f59e0b40'}"></span>${rs.label}</td>
+        <td style="text-align:right;padding:6px 8px">${rs.trades}</td>
+        <td style="text-align:right;padding:6px 8px">${fmtR(rs.winRate, 1)}%</td>
+        <td style="text-align:right;padding:6px 8px;color:${plC(rs.avgTrade)}">${fmtM(rs.avgTrade)}</td>
+        <td style="text-align:right;padding:6px 8px;font-weight:700;color:${plC(rs.totalPl)}">${fmtM(rs.totalPl)}</td>
+      </tr>`).join('')
+
+    // Test vs Real rows
+    const tvr = [
+      { label: 'Trades', test: s.test_trades, real: s.real_trades },
+      { label: 'Win Rate', test: s.test_win_pct, real: s.real_win_pct, suffix: '%' },
+      { label: 'Payoff', test: s.test_payoff, real: s.real_payoff },
+      { label: 'Expectancy', test: s.test_expectancy, real: s.real_expectancy, prefix: '$' },
+      { label: 'Max DD', test: s.test_max_dd, real: s.real_max_dd, prefix: '$' },
+      { label: 'Profit Factor', test: null, real: s.real_profit_factor },
+      { label: 'Recovery Factor', test: null, real: s.real_recovery_factor },
+      { label: 'Return/DD', test: s.test_ret_dd, real: s.real_ret_dd, highlight: true },
+    ]
+    const tvrRows = tvr.map(r => {
+      const t = r.test !== null && r.test !== undefined ? Number(r.test) : null
+      const rv = r.real !== null && r.real !== undefined && Number(r.real) !== 0 ? Number(r.real) : null
+      const delta = t !== null && rv !== null ? rv - t : null
+      const pre = (r as { prefix?: string }).prefix || ''
+      const suf = (r as { suffix?: string }).suffix || ''
+      const hl = (r as { highlight?: boolean }).highlight
+      return `
+        <tr${hl ? ' style="background:#f5f3ff"' : ''}>
+          <td style="padding:6px 8px;${hl ? 'font-weight:700;color:#6d28d9' : ''}">${r.label}</td>
+          <td style="text-align:right;padding:6px 8px;color:#475569">${t !== null ? `${pre}${fmtR(t)}${suf}` : '—'}</td>
+          <td style="text-align:right;padding:6px 8px;font-weight:600">${rv !== null ? `${pre}${fmtR(rv)}${suf}` : '—'}</td>
+          <td style="text-align:right;padding:6px 8px;font-size:11px;color:${delta !== null ? plC(delta) : '#94a3b8'}">${delta !== null ? `${delta >= 0 ? '+' : ''}${fmtR(delta)}${suf}` : '—'}</td>
+        </tr>`
+    }).join('')
+
+    const html = `<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="UTF-8">
+<title>VELQOR Quant — ${s.name}</title>
+<style>
+  @page { size: A4; margin: 15mm; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; color: #1e293b; background: #fff; max-width: 800px; margin: 0 auto; padding: 20px; font-size: 12px; }
+  h2 { font-size: 14px; color: #334155; margin: 18px 0 8px; border-bottom: 1px solid #e2e8f0; padding-bottom: 4px; }
+  table { width: 100%; border-collapse: collapse; font-size: 11px; }
+  th { text-align: left; padding: 6px 8px; color: #64748b; font-weight: 500; border-bottom: 1px solid #e2e8f0; font-size: 10px; }
+  td { padding: 6px 8px; border-bottom: 1px solid #f1f5f9; }
+  .header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 16px; padding-bottom: 12px; border-bottom: 2px solid #7c3aed; }
+  .kpi-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin: 12px 0; }
+  .kpi { background: #f8fafc; border-radius: 8px; padding: 10px; text-align: center; }
+  .kpi-value { font-size: 16px; font-weight: 700; }
+  .kpi-label { font-size: 9px; color: #64748b; margin-top: 2px; }
+  .logic-box { background: #f8fafc; border-radius: 8px; padding: 10px; margin-bottom: 14px; }
+  @media print { body { padding: 0; } }
+</style>
+</head>
+<body>
+  <div class="header">
+    <div>
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:4px">
+        <img src="${VELQOR_LOGO_BASE64}" style="height:28px" alt="Velqor" />
+        <span style="font-size:9px;color:#94a3b8">Strategy Report</span>
+      </div>
+      <h1 style="font-size:20px;font-weight:800;color:#0f172a;margin:4px 0">${s.name || s.strategy_id}</h1>
+      <div style="font-size:11px;color:#64748b">
+        Magic #${s.magic} · ${s.asset} · ${s.timeframe} · ${s.strategy_style || ''} · ${accName}
+      </div>
+      <div style="font-size:10px;color:#94a3b8;margin-top:2px">${dateNow}</div>
+    </div>
+    ${s.real_trades > 0 ? `
+    <div style="text-align:right;padding:10px 16px;border-radius:10px;background:${Number(s.real_pl) >= 0 ? '#f0fdf4' : '#fef2f2'}">
+      <div style="font-size:22px;font-weight:800;color:${plC(Number(s.real_pl))}">${fmtM(Number(s.real_pl))}</div>
+      <div style="font-size:10px;color:#64748b">${s.real_trades} trade live</div>
+    </div>` : ''}
+  </div>
+
+  ${s.logic_summary ? `
+  <div class="logic-box">
+    <div style="font-size:10px;color:#64748b;margin-bottom:2px">Logica</div>
+    <div style="font-size:12px">${s.logic_summary}</div>
+    ${s.parameters ? `<div style="font-size:10px;color:#94a3b8;margin-top:2px">Parametri: ${s.parameters}</div>` : ''}
+  </div>` : ''}
+
+  ${chartSvg ? `
+  <h2>Strategia vs ${ASSET_BENCHMARK_LABEL[s.asset] || s.asset} (Buy &amp; Hold)</h2>
+  ${chartSvg}` : ''}
+
+  ${regimeRows ? `
+  <h2>Performance per regime di mercato (Daily SMA50/SMA200)</h2>
+  <table>
+    <thead><tr><th>Regime</th><th style="text-align:right">Trade</th><th style="text-align:right">Win Rate</th><th style="text-align:right">Media trade</th><th style="text-align:right">P/L</th></tr></thead>
+    <tbody>${regimeRows}</tbody>
+  </table>` : ''}
+
+  <h2>Test vs Real</h2>
+  <table>
+    <thead><tr><th>Metrica</th><th style="text-align:right">Test (SQX)</th><th style="text-align:right">Real (Live)</th><th style="text-align:right">Delta</th></tr></thead>
+    <tbody>${tvrRows}</tbody>
+  </table>
+
+  <h2>Metriche Test (SQX)</h2>
+  <div class="kpi-grid">
+    ${[
+      ['Trades', s.test_trades],
+      ['Win Rate', `${fmtR(s.test_win_pct, 1)}%`],
+      ['Payoff', fmtR(s.test_payoff)],
+      ['Expectancy', `$${fmtR(s.test_expectancy)}`],
+      ['Max Consec Loss', s.test_max_consec_loss],
+      ['Worst Trade', `$${fmtR(s.test_worst_trade)}`],
+      ['Max DD', `$${fmtR(s.test_max_dd)}`],
+      ['MC 95% DD', `$${fmtR(s.test_mc95_dd)}`],
+      ['Return/DD', fmtR(s.test_ret_dd)],
+      ['Stability R²', fmtR(s.test_stability)],
+      ['Ulcer Index', `${fmtR(s.test_ulcer_index)}%`],
+      ['Exposure', `${fmtR(s.test_exposure_pct, 1)}%`],
+    ].map(([label, value]) => `
+      <div class="kpi">
+        <div class="kpi-value">${value ?? '—'}</div>
+        <div class="kpi-label">${label}</div>
+      </div>`).join('')}
+  </div>
+
+  <h2>Sizing (per 10K equity)</h2>
+  <div class="kpi-grid">
+    <div class="kpi"><div class="kpi-value">${s.lot_static ?? '—'}</div><div class="kpi-label">Lot Test</div></div>
+    <div class="kpi" style="background:#f0fdf4"><div class="kpi-value" style="color:#16a34a">${s.lot_neutral ?? '—'}</div><div class="kpi-label">Neutrale</div></div>
+    <div class="kpi" style="background:#fffbeb"><div class="kpi-value" style="color:#d97706">${s.lot_aggressive ?? '—'}</div><div class="kpi-label">Aggressivo</div></div>
+    <div class="kpi" style="background:#eff6ff"><div class="kpi-value" style="color:#2563eb">${s.lot_conservative ?? '—'}</div><div class="kpi-label">Conservativo</div></div>
+  </div>
+
+  <div style="margin-top:20px;padding-top:10px;border-top:1px solid #e2e8f0;display:flex;justify-content:space-between;font-size:9px;color:#94a3b8">
+    <span>VELQOR Quant · Strategy Report</span>
+    <span>${dateNow}</span>
+  </div>
+</body>
+</html>`
+
+    const win = window.open('', '_blank')
+    if (win) { win.document.write(html); win.document.close() }
   }
 
   async function refreshBenchmarks() {
@@ -664,10 +879,18 @@ export default function QuantPage() {
       {/* ===== STRATEGY DETAIL ===== */}
       {tab === 'strategies' && stratView === 'detail' && selectedStrat && (
         <div className="space-y-4">
-          <button onClick={() => { setStratView('list'); setSelectedStrat(null) }}
-            className="text-sm text-violet-600 hover:text-violet-800 flex items-center gap-1">
-            &larr; Torna alla lista
-          </button>
+          <div className="flex items-center justify-between">
+            <button onClick={() => { setStratView('list'); setSelectedStrat(null) }}
+              className="text-sm text-violet-600 hover:text-violet-800 flex items-center gap-1">
+              &larr; Torna alla lista
+            </button>
+            <button onClick={exportStrategy}
+              className="text-xs px-3 py-1.5 bg-violet-100 text-violet-700 rounded-lg hover:bg-violet-200 transition-colors flex items-center gap-1.5"
+              title="Esporta scheda strategia">
+              <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" /></svg>
+              Esporta
+            </button>
+          </div>
 
           <div className="bg-white rounded-xl border border-slate-200 p-6">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-6">
