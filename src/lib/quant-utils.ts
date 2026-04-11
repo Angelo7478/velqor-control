@@ -52,6 +52,75 @@ export const ASSET_BENCHMARK_LABEL: Record<string, string> = {
 
 export type MarketRegime = 'up' | 'down' | 'range'
 
+// --- 4-Quadrant Regime (Ali Casey / StatOasis approach) ---
+// Direction: SMA(34) vs SMA(144)  +  Volatility: ATR(13) vs ATR(55)
+export type MarketRegime4Q = 'bull_volatile' | 'bull_quiet' | 'bear_volatile' | 'bear_quiet'
+
+export interface RegimeZone4Q {
+  startDate: string
+  endDate: string
+  regime: MarketRegime4Q
+}
+
+export interface RegimeStats4Q {
+  regime: MarketRegime4Q
+  label: string
+  trades: number
+  winRate: number
+  avgTrade: number
+  totalPl: number
+}
+
+export const REGIME_4Q_LABELS: Record<MarketRegime4Q, string> = {
+  bull_volatile: 'Bull Volatile',
+  bull_quiet: 'Bull Quiet',
+  bear_volatile: 'Bear Volatile',
+  bear_quiet: 'Bear Quiet',
+}
+
+export const REGIME_4Q_COLORS: Record<MarketRegime4Q, string> = {
+  bull_volatile: '#22c55e',  // green
+  bull_quiet: '#0d9488',     // teal
+  bear_volatile: '#ef4444',  // red
+  bear_quiet: '#f97316',     // orange
+}
+
+export const REGIME_4Q_BG: Record<MarketRegime4Q, string> = {
+  bull_volatile: '#22c55e15',
+  bull_quiet: '#0d948815',
+  bear_volatile: '#ef444415',
+  bear_quiet: '#f9731615',
+}
+
+/** Strategy style → which regimes are favorable and which are unfavorable */
+export const REGIME_COHERENCE: Record<string, { favorable: MarketRegime4Q[]; unfavorable: MarketRegime4Q[]; logic: string }> = {
+  mean_reversion: {
+    favorable: ['bear_quiet', 'bull_quiet'],
+    unfavorable: ['bull_volatile', 'bear_volatile'],
+    logic: 'Mean reversion performa in mercati a bassa volatilità dove i prezzi tendono a tornare alla media. Alta volatilità genera falsi segnali e stop prematuri.',
+  },
+  trend_following: {
+    favorable: ['bull_volatile', 'bear_volatile'],
+    unfavorable: ['bull_quiet', 'bear_quiet'],
+    logic: 'Trend following ha bisogno di momentum e volatilità per catturare movimenti direzionali. In mercati quiet le oscillazioni non bastano a generare profitto.',
+  },
+  breakout: {
+    favorable: ['bull_volatile', 'bear_volatile'],
+    unfavorable: ['bull_quiet', 'bear_quiet'],
+    logic: 'Le strategie breakout necessitano di espansione di volatilità per confermare la rottura dei livelli. In mercati quiet i falsi breakout sono frequenti.',
+  },
+  seasonal: {
+    favorable: ['bull_quiet', 'bear_quiet', 'bull_volatile', 'bear_volatile'],
+    unfavorable: [],
+    logic: 'Strategie stagionali sono relativamente regime-neutral, basate su pattern ricorrenti temporali.',
+  },
+  hybrid: {
+    favorable: ['bull_quiet', 'bear_quiet'],
+    unfavorable: ['bear_volatile'],
+    logic: 'Strategie ibride tipicamente combinano elementi mean-reversion con filtri trend, funzionano meglio in condizioni di volatilità moderata.',
+  },
+}
+
 export interface BenchmarkPoint {
   date: string        // YYYY-MM-DD
   stratReturn: number // strategy cumulative return %
@@ -219,6 +288,202 @@ export function calcPerRegimeStats(
     })
   }
   return result
+}
+
+// ─── 4-QUADRANT REGIME DETECTION (Direction + Volatility) ───────────────────
+
+/**
+ * Detect 4-quadrant market regimes using SMA(34)/SMA(144) for direction
+ * and ATR(13)/ATR(55) for volatility — inspired by Ali Casey / StatOasis.
+ * Requires OHLC data: { ts, high, low, close_price }.
+ */
+export function detectMarketRegimes4Q(
+  prices: { ts: string; high: number | null; low: number | null; close_price: number }[],
+): RegimeZone4Q[] {
+  if (prices.length < 55) return [] // need at least 55 bars for ATR(55)
+
+  const closes = prices.map(p => Number(p.close_price))
+  const highs = prices.map(p => Number(p.high ?? p.close_price))
+  const lows = prices.map(p => Number(p.low ?? p.close_price))
+
+  // Helper: simple moving average
+  function sma(data: number[], period: number, idx: number): number | null {
+    if (idx < period - 1) return null
+    let sum = 0
+    for (let i = idx - period + 1; i <= idx; i++) sum += data[i]
+    return sum / period
+  }
+
+  // Build True Range series: max(H-L, |H-prevC|, |L-prevC|)
+  const tr: number[] = [highs[0] - lows[0]]
+  for (let i = 1; i < prices.length; i++) {
+    const hl = highs[i] - lows[i]
+    const hc = Math.abs(highs[i] - closes[i - 1])
+    const lc = Math.abs(lows[i] - closes[i - 1])
+    tr.push(Math.max(hl, hc, lc))
+  }
+
+  const zones: RegimeZone4Q[] = []
+  let currentRegime: MarketRegime4Q | null = null
+  let zoneStart = ''
+
+  for (let i = 0; i < closes.length; i++) {
+    const sma34 = sma(closes, 34, i)
+    const sma144 = sma(closes, 144, i)
+    const atr13 = sma(tr, 13, i)
+    const atr55 = sma(tr, 55, i)
+
+    // Need at least direction indicator
+    if (sma34 === null) continue
+
+    // Direction: bull if SMA34 >= SMA144 (or SMA34 trending up if SMA144 not available)
+    const isBull = sma144 !== null ? sma34 >= sma144 : closes[i] > sma34
+
+    // Volatility: volatile if ATR13 >= ATR55
+    const isVolatile = (atr13 !== null && atr55 !== null) ? atr13 >= atr55 : true // default volatile if not enough data
+
+    let regime: MarketRegime4Q
+    if (isBull && isVolatile) regime = 'bull_volatile'
+    else if (isBull && !isVolatile) regime = 'bull_quiet'
+    else if (!isBull && isVolatile) regime = 'bear_volatile'
+    else regime = 'bear_quiet'
+
+    if (regime !== currentRegime) {
+      if (currentRegime !== null && zones.length > 0) {
+        zones[zones.length - 1].endDate = prices[i - 1].ts
+      }
+      currentRegime = regime
+      zoneStart = prices[i].ts
+      zones.push({ startDate: zoneStart, endDate: prices[i].ts, regime })
+    } else {
+      zones[zones.length - 1].endDate = prices[i].ts
+    }
+  }
+
+  return zones
+}
+
+/**
+ * Calculate strategy performance breakdown by 4-quadrant regime.
+ */
+export function calcPerRegimeStats4Q(
+  trades: { net_profit: number; close_time: string }[],
+  regimes: RegimeZone4Q[],
+): RegimeStats4Q[] {
+  const buckets: Record<MarketRegime4Q, number[]> = {
+    bull_volatile: [], bull_quiet: [], bear_volatile: [], bear_quiet: [],
+  }
+
+  for (const t of trades) {
+    const tDate = t.close_time.slice(0, 10)
+    let matched: MarketRegime4Q = 'bull_quiet' // default fallback
+    for (const z of regimes) {
+      if (tDate >= z.startDate && tDate <= z.endDate) {
+        matched = z.regime
+        break
+      }
+    }
+    buckets[matched].push(t.net_profit)
+  }
+
+  const result: RegimeStats4Q[] = []
+  for (const regime of ['bull_volatile', 'bull_quiet', 'bear_volatile', 'bear_quiet'] as MarketRegime4Q[]) {
+    const trs = buckets[regime]
+    if (trs.length === 0) continue
+    const wins = trs.filter(p => p > 0).length
+    const total = trs.reduce((s, v) => s + v, 0)
+    result.push({
+      regime,
+      label: REGIME_4Q_LABELS[regime],
+      trades: trs.length,
+      winRate: Math.round((wins / trs.length) * 1000) / 10,
+      avgTrade: Math.round(total / trs.length * 100) / 100,
+      totalPl: Math.round(total * 100) / 100,
+    })
+  }
+  return result
+}
+
+export interface RegimeCoherenceResult {
+  verdict: 'coherent' | 'mixed' | 'incoherent'
+  score: number // 0-100
+  favorablePerf: { regime: string; pl: number; trades: number }[]
+  unfavorablePerf: { regime: string; pl: number; trades: number }[]
+  insights: string[]
+}
+
+/**
+ * Analyze whether strategy performance is coherent with its style.
+ * A mean_reversion strategy profiting in volatile regimes = incoherent.
+ * A trend_following strategy profiting in quiet regimes = incoherent.
+ */
+export function analyzeRegimeCoherence(
+  style: string | null,
+  stats: RegimeStats4Q[],
+): RegimeCoherenceResult {
+  const styleKey = style || 'hybrid'
+  const coherence = REGIME_COHERENCE[styleKey] || REGIME_COHERENCE.hybrid
+
+  const favorablePerf = stats
+    .filter(s => coherence.favorable.includes(s.regime))
+    .map(s => ({ regime: REGIME_4Q_LABELS[s.regime], pl: s.totalPl, trades: s.trades }))
+
+  const unfavorablePerf = stats
+    .filter(s => coherence.unfavorable.includes(s.regime))
+    .map(s => ({ regime: REGIME_4Q_LABELS[s.regime], pl: s.totalPl, trades: s.trades }))
+
+  const insights: string[] = []
+  let score = 50 // start neutral
+
+  // Favorable regime analysis
+  const favTotal = favorablePerf.reduce((s, f) => s + f.pl, 0)
+  const unfavTotal = unfavorablePerf.reduce((s, f) => s + f.pl, 0)
+  const totalPl = stats.reduce((s, r) => s + r.totalPl, 0)
+
+  if (favorablePerf.length > 0 && favTotal > 0) {
+    score += 25
+    const pct = totalPl > 0 ? Math.round((favTotal / totalPl) * 100) : 0
+    insights.push(`✅ ${pct}% del profitto in regimi favorevoli (${favorablePerf.map(f => f.regime).join(', ')})`)
+  } else if (favorablePerf.length > 0 && favTotal <= 0) {
+    score -= 15
+    insights.push(`⚠️ Negativa nei regimi favorevoli — la strategia potrebbe non funzionare come atteso`)
+  }
+
+  if (unfavorablePerf.length > 0 && unfavTotal > 0) {
+    score -= 10
+    insights.push(`🔍 Profitto inatteso in regimi sfavorevoli (${unfavorablePerf.map(f => f.regime).join(', ')}) — possibile overfitting o logica diversa dal dichiarato`)
+  } else if (unfavorablePerf.length > 0 && unfavTotal < 0) {
+    score += 15
+    insights.push(`✅ Perdita nei regimi sfavorevoli — coerente con la logica ${REGIME_4Q_LABELS[coherence.unfavorable[0]] || styleKey}`)
+  }
+
+  // Best and worst regime
+  if (stats.length >= 2) {
+    const best = stats.reduce((a, b) => a.avgTrade > b.avgTrade ? a : b)
+    const worst = stats.reduce((a, b) => a.avgTrade < b.avgTrade ? a : b)
+
+    if (coherence.favorable.includes(best.regime)) {
+      score += 10
+      insights.push(`💡 Best regime: ${REGIME_4Q_LABELS[best.regime]} (avg $${best.avgTrade.toFixed(0)}/trade) — coerente`)
+    } else {
+      score -= 5
+      insights.push(`💡 Best regime: ${REGIME_4Q_LABELS[best.regime]} (avg $${best.avgTrade.toFixed(0)}/trade) — non previsto per ${styleKey}`)
+    }
+
+    if (worst.avgTrade < 0) {
+      insights.push(`⛔ Worst regime: ${REGIME_4Q_LABELS[worst.regime]} (avg $${worst.avgTrade.toFixed(0)}/trade)${coherence.unfavorable.includes(worst.regime) ? ' — atteso' : ' — da investigare'}`)
+    }
+  }
+
+  // Logic explanation
+  insights.push(`📐 ${coherence.logic}`)
+
+  // Clamp score
+  score = Math.max(0, Math.min(100, score))
+
+  const verdict: 'coherent' | 'mixed' | 'incoherent' = score >= 65 ? 'coherent' : score >= 40 ? 'mixed' : 'incoherent'
+
+  return { verdict, score, favorablePerf, unfavorablePerf, insights }
 }
 
 export function timeAgo(dateStr: string | null): string {

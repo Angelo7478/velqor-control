@@ -6,7 +6,10 @@ import { QelStrategy, QelAccount } from '@/types/database'
 import {
   fmt, fmtUsd, fmtPct, timeAgo, statusBadge, groupColor, plColor, ddBarColor, fmtAlpha, alphaColor,
   buildStrategyVsBenchmark, detectMarketRegimes, calcPerRegimeStats,
-  BenchmarkPoint, RegimeZone, RegimeStats, ASSET_BENCHMARK_LABEL,
+  detectMarketRegimes4Q, calcPerRegimeStats4Q, analyzeRegimeCoherence,
+  BenchmarkPoint, RegimeZone, RegimeStats, RegimeZone4Q, RegimeStats4Q, RegimeCoherenceResult,
+  REGIME_4Q_LABELS, REGIME_4Q_COLORS, REGIME_4Q_BG,
+  ASSET_BENCHMARK_LABEL,
 } from '@/lib/quant-utils'
 import {
   ComposedChart, Line, Area, XAxis, YAxis, CartesianGrid, Tooltip,
@@ -36,6 +39,9 @@ export default function QuantPage() {
   const [stratBenchData, setStratBenchData] = useState<BenchmarkPoint[]>([])
   const [stratRegimes, setStratRegimes] = useState<RegimeZone[]>([])
   const [stratRegimeStats, setStratRegimeStats] = useState<RegimeStats[]>([])
+  const [stratRegimes4Q, setStratRegimes4Q] = useState<RegimeZone4Q[]>([])
+  const [stratRegimeStats4Q, setStratRegimeStats4Q] = useState<RegimeStats4Q[]>([])
+  const [regimeCoherence, setRegimeCoherence] = useState<RegimeCoherenceResult | null>(null)
   const [chartLoading, setChartLoading] = useState(false)
 
   useEffect(() => { loadInitial() }, [])
@@ -115,6 +121,9 @@ export default function QuantPage() {
     setStratBenchData([])
     setStratRegimes([])
     setStratRegimeStats([])
+    setStratRegimes4Q([])
+    setStratRegimeStats4Q([])
+    setRegimeCoherence(null)
 
     const supabase = createClient()
     const acc = accounts.find(a => a.id === selectedAccountId)
@@ -135,13 +144,13 @@ export default function QuantPage() {
     const firstDate = trades[0].close_time.slice(0, 10)
     const lastDate = trades[trades.length - 1].close_time.slice(0, 10)
 
-    // Load benchmark data for this asset (with extra history for SMA200)
+    // Load benchmark data with OHLC for this asset (extra history for SMA200 + ATR)
     const extraStart = new Date(firstDate)
     extraStart.setDate(extraStart.getDate() - 250) // 250 days before for SMA200
 
     const { data: benchFull } = await supabase
       .from('qel_benchmarks')
-      .select('ts, close_price')
+      .select('ts, close_price, high, low')
       .eq('symbol', strat.asset)
       .gte('ts', extraStart.toISOString().slice(0, 10))
       .lte('ts', lastDate)
@@ -149,25 +158,34 @@ export default function QuantPage() {
 
     if (!benchFull || benchFull.length === 0) { setChartLoading(false); return }
 
-    // Detect regimes on full history (including pre-trade period for SMA)
+    const tradePnls = trades.map(t => ({ net_profit: Number(t.net_profit), close_time: t.close_time }))
+
+    // Legacy 3-regime detection (for backward compat with chart)
     const regimes = detectMarketRegimes(benchFull)
     setStratRegimes(regimes)
 
+    // 4-Quadrant regime detection (Direction + Volatility)
+    const regimes4Q = detectMarketRegimes4Q(benchFull)
+    setStratRegimes4Q(regimes4Q)
+
     // Build dual curve only for the trading period
     const benchTradingPeriod = benchFull.filter(b => b.ts >= firstDate)
-    const dualCurve = buildStrategyVsBenchmark(
-      trades.map(t => ({ net_profit: Number(t.net_profit), close_time: t.close_time })),
-      benchTradingPeriod,
-      accSize,
-    )
+    const dualCurve = buildStrategyVsBenchmark(tradePnls, benchTradingPeriod, accSize)
     setStratBenchData(dualCurve)
 
-    // Regime stats
-    const regimeStats = calcPerRegimeStats(
-      trades.map(t => ({ net_profit: Number(t.net_profit), close_time: t.close_time })),
-      regimes,
-    )
+    // Legacy regime stats (kept for export)
+    const regimeStats = calcPerRegimeStats(tradePnls, regimes)
     setStratRegimeStats(regimeStats)
+
+    // 4Q regime stats
+    const stats4Q = calcPerRegimeStats4Q(tradePnls, regimes4Q)
+    setStratRegimeStats4Q(stats4Q)
+
+    // Coherence analysis
+    if (stats4Q.length > 0) {
+      const coherence = analyzeRegimeCoherence(strat.strategy_style, stats4Q)
+      setRegimeCoherence(coherence)
+    }
 
     setChartLoading(false)
   }
@@ -199,15 +217,15 @@ export default function QuantPage() {
       const scX = (i: number) => pad + (i / (stratBenchData.length - 1)) * (w - pad - padR)
       const scY = (v: number) => h - pad - ((v - minV) / (maxV - minV)) * (h - pad - padTop)
 
-      // Regime zones
-      const zoneRects = stratRegimes
+      // 4Q Regime zones
+      const zoneRects = stratRegimes4Q
         .filter(z => z.startDate >= stratBenchData[0]?.date)
         .map(z => {
           const i1 = stratBenchData.findIndex(d => d.date >= z.startDate)
           const i2 = stratBenchData.findIndex(d => d.date > z.endDate)
           const x1 = i1 >= 0 ? scX(i1) : pad
           const x2 = i2 >= 0 ? scX(i2) : w - padR
-          const fill = z.regime === 'up' ? '#22c55e' : z.regime === 'down' ? '#ef4444' : '#f59e0b'
+          const fill = REGIME_4Q_COLORS[z.regime]
           return `<rect x="${x1}" y="${padTop}" width="${Math.max(0, x2 - x1)}" height="${h - pad - padTop}" fill="${fill}" opacity="0.07" rx="2" />`
         }).join('')
 
@@ -254,19 +272,21 @@ export default function QuantPage() {
             <polyline points="${stratPts}" fill="none" stroke="#7c3aed" stroke-width="2.5" />
             ${finalLabels}
           </svg>
-          <div style="display:flex;gap:20px;justify-content:center;font-size:9px;color:#64748b;margin-top:6px;padding-top:6px;border-top:1px solid #f1f5f9">
+          <div style="display:flex;gap:14px;justify-content:center;font-size:9px;color:#64748b;margin-top:6px;padding-top:6px;border-top:1px solid #f1f5f9;flex-wrap:wrap">
             <span style="display:flex;align-items:center;gap:4px"><span style="width:14px;height:2.5px;background:#7c3aed;border-radius:1px"></span>Strategia</span>
             <span style="display:flex;align-items:center;gap:4px"><span style="width:14px;height:1.5px;background:#94a3b8;border-radius:1px;border-top:1px dashed #94a3b8"></span>Buy &amp; Hold</span>
-            <span style="display:flex;align-items:center;gap:4px"><span style="width:8px;height:8px;background:#22c55e15;border:1px solid #22c55e40;border-radius:2px"></span>Trend Up</span>
-            <span style="display:flex;align-items:center;gap:4px"><span style="width:8px;height:8px;background:#ef444415;border:1px solid #ef444440;border-radius:2px"></span>Trend Down</span>
-            <span style="display:flex;align-items:center;gap:4px"><span style="width:8px;height:8px;background:#f59e0b15;border:1px solid #f59e0b40;border-radius:2px"></span>Range</span>
+            <span style="display:flex;align-items:center;gap:4px"><span style="width:8px;height:8px;background:#22c55e15;border:1px solid #22c55e40;border-radius:2px"></span>Bull Vol</span>
+            <span style="display:flex;align-items:center;gap:4px"><span style="width:8px;height:8px;background:#0d948815;border:1px solid #0d948840;border-radius:2px"></span>Bull Quiet</span>
+            <span style="display:flex;align-items:center;gap:4px"><span style="width:8px;height:8px;background:#ef444415;border:1px solid #ef444440;border-radius:2px"></span>Bear Vol</span>
+            <span style="display:flex;align-items:center;gap:4px"><span style="width:8px;height:8px;background:#f9731615;border:1px solid #f9731640;border-radius:2px"></span>Bear Quiet</span>
           </div>
+          <div style="text-align:center;font-size:8px;color:#cbd5e1;margin-top:4px">Direzione: SMA(34)/SMA(144) &middot; Volatilità: ATR(13)/ATR(55)</div>
         </div>`
     }
 
-    // Regime table
-    const regimeRows = stratRegimeStats.map(rs => {
-      const dotColor = rs.regime === 'up' ? '#22c55e' : rs.regime === 'down' ? '#ef4444' : '#f59e0b'
+    // 4Q Regime table
+    const regimeRows = stratRegimeStats4Q.map(rs => {
+      const dotColor = REGIME_4Q_COLORS[rs.regime]
       return `
       <tr>
         <td><span style="display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:8px;background:${dotColor}20;border:1.5px solid ${dotColor}60"></span>${rs.label}</td>
@@ -276,6 +296,24 @@ export default function QuantPage() {
         <td class="r bold" style="color:${plC(rs.totalPl)}">${fmtM(rs.totalPl)}</td>
       </tr>`
     }).join('')
+
+    // Coherence section for export
+    const coherenceHtml = regimeCoherence ? `
+      <div style="margin-top:14px;padding:12px 16px;border-radius:10px;border:1px solid ${
+        regimeCoherence.verdict === 'coherent' ? '#bbf7d0' : regimeCoherence.verdict === 'mixed' ? '#fde68a' : '#fecaca'
+      };background:${
+        regimeCoherence.verdict === 'coherent' ? '#f0fdf4' : regimeCoherence.verdict === 'mixed' ? '#fffbeb' : '#fef2f2'
+      }">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+          <span style="font-size:11px;font-weight:700;color:#334155">Analisi Coerenza Strategia–Regime</span>
+          <span style="font-size:10px;font-weight:600;padding:2px 10px;border-radius:20px;background:${
+            regimeCoherence.verdict === 'coherent' ? '#dcfce7' : regimeCoherence.verdict === 'mixed' ? '#fef3c7' : '#fee2e2'
+          };color:${
+            regimeCoherence.verdict === 'coherent' ? '#15803d' : regimeCoherence.verdict === 'mixed' ? '#b45309' : '#dc2626'
+          }">${regimeCoherence.verdict === 'coherent' ? '✓ Coerente' : regimeCoherence.verdict === 'mixed' ? '~ Mista' : '✗ Incoerente'} ${regimeCoherence.score}/100</span>
+        </div>
+        ${regimeCoherence.insights.map(ins => `<div style="font-size:10px;color:#475569;margin-bottom:3px;line-height:1.5">${ins}</div>`).join('')}
+      </div>` : ''
 
     // Test vs Real rows
     const tvr = [
@@ -400,12 +438,12 @@ export default function QuantPage() {
   <div class="two-col">
     ${regimeRows ? `
     <div>
-      <h2>Performance per Regime</h2>
+      <h2>Performance per Regime (4Q)</h2>
       <table>
         <thead><tr><th>Regime</th><th class="r">Trade</th><th class="r">Win Rate</th><th class="r">Avg</th><th class="r">P/L</th></tr></thead>
         <tbody>${regimeRows}</tbody>
       </table>
-      <div style="font-size:8px;color:#cbd5e1;margin-top:4px">Regime detection: SMA50/SMA200 su close daily</div>
+      <div style="font-size:8px;color:#cbd5e1;margin-top:4px">Dir: SMA(34)/SMA(144) &middot; Vol: ATR(13)/ATR(55)</div>
     </div>` : '<div></div>'}
 
     <div>
@@ -416,6 +454,8 @@ export default function QuantPage() {
       </table>
     </div>
   </div>
+
+  ${coherenceHtml}
 
   <h2>Metriche Backtest (SQX)</h2>
   <div class="kpi-grid">
@@ -1042,10 +1082,10 @@ export default function QuantPage() {
                           name === 'stratReturn' ? 'Strategia' : name === 'benchReturn' ? 'Buy & Hold' : 'Alpha',
                         ]}
                       />
-                      {/* Regime background zones */}
-                      {stratRegimes.filter(z => z.startDate >= stratBenchData[0]?.date).map((z, i) => (
+                      {/* 4-Quadrant regime background zones */}
+                      {stratRegimes4Q.filter(z => z.startDate >= stratBenchData[0]?.date).map((z, i) => (
                         <ReferenceArea key={i} x1={z.startDate} x2={z.endDate}
-                          fill={z.regime === 'up' ? '#22c55e' : z.regime === 'down' ? '#ef4444' : '#f59e0b'}
+                          fill={REGIME_4Q_COLORS[z.regime]}
                           fillOpacity={0.06} />
                       ))}
                       <ReferenceLine y={0} stroke="#94a3b8" strokeDasharray="4 4" />
@@ -1056,20 +1096,24 @@ export default function QuantPage() {
                     </ComposedChart>
                   </ResponsiveContainer>
 
-                  {/* Legend */}
-                  <div className="flex gap-4 mt-2 text-[10px] text-slate-500 justify-center">
+                  {/* Legend — 4 Quadrant Regime */}
+                  <div className="flex flex-wrap gap-3 mt-2 text-[10px] text-slate-500 justify-center">
                     <span className="flex items-center gap-1"><span className="w-3 h-0.5 bg-violet-600 inline-block"></span> Strategia</span>
                     <span className="flex items-center gap-1"><span className="w-3 h-0.5 bg-slate-400 inline-block border-dashed"></span> Buy &amp; Hold</span>
-                    <span className="flex items-center gap-1"><span className="w-2 h-2 bg-green-500/20 inline-block rounded-sm"></span> Trend Up</span>
-                    <span className="flex items-center gap-1"><span className="w-2 h-2 bg-red-500/20 inline-block rounded-sm"></span> Trend Down</span>
-                    <span className="flex items-center gap-1"><span className="w-2 h-2 bg-amber-500/20 inline-block rounded-sm"></span> Range</span>
+                    <span className="flex items-center gap-1"><span className="w-2 h-2 inline-block rounded-sm" style={{ background: '#22c55e20', border: '1px solid #22c55e50' }}></span> Bull Vol</span>
+                    <span className="flex items-center gap-1"><span className="w-2 h-2 inline-block rounded-sm" style={{ background: '#0d948820', border: '1px solid #0d948850' }}></span> Bull Quiet</span>
+                    <span className="flex items-center gap-1"><span className="w-2 h-2 inline-block rounded-sm" style={{ background: '#ef444420', border: '1px solid #ef444450' }}></span> Bear Vol</span>
+                    <span className="flex items-center gap-1"><span className="w-2 h-2 inline-block rounded-sm" style={{ background: '#f9731620', border: '1px solid #f9731650' }}></span> Bear Quiet</span>
+                  </div>
+                  <div className="text-[9px] text-slate-400 text-center mt-1">
+                    Direzione: SMA(34)/SMA(144) · Volatilità: ATR(13)/ATR(55) · Ispirato a StatOasis
                   </div>
                 </div>
 
-                {/* Regime performance table */}
-                {stratRegimeStats.length > 0 && (
+                {/* 4-Quadrant Regime Performance Table */}
+                {stratRegimeStats4Q.length > 0 && (
                   <div className="mt-3 bg-white rounded-xl border border-slate-200 p-4">
-                    <h4 className="text-xs font-semibold text-slate-600 mb-2">Performance per regime di mercato</h4>
+                    <h4 className="text-xs font-semibold text-slate-600 mb-2">Performance per Regime di Mercato <span className="text-slate-400 font-normal">(4 Quadranti)</span></h4>
                     <table className="w-full text-xs">
                       <thead>
                         <tr className="text-slate-400 border-b border-slate-200">
@@ -1081,10 +1125,10 @@ export default function QuantPage() {
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-slate-100">
-                        {stratRegimeStats.map(rs => (
+                        {stratRegimeStats4Q.map(rs => (
                           <tr key={rs.regime}>
                             <td className="py-1.5 font-medium">
-                              <span className={`inline-block w-2 h-2 rounded-sm mr-1.5 ${rs.regime === 'up' ? 'bg-green-500/30' : rs.regime === 'down' ? 'bg-red-500/30' : 'bg-amber-500/30'}`}></span>
+                              <span className="inline-block w-2.5 h-2.5 rounded-sm mr-1.5" style={{ background: REGIME_4Q_BG[rs.regime], border: `1.5px solid ${REGIME_4Q_COLORS[rs.regime]}60` }}></span>
                               {rs.label}
                             </td>
                             <td className="text-right py-1.5">{rs.trades}</td>
@@ -1095,6 +1139,35 @@ export default function QuantPage() {
                         ))}
                       </tbody>
                     </table>
+                  </div>
+                )}
+
+                {/* Regime Coherence Analysis */}
+                {regimeCoherence && (
+                  <div className={`mt-3 rounded-xl border p-4 ${
+                    regimeCoherence.verdict === 'coherent' ? 'bg-green-50/50 border-green-200' :
+                    regimeCoherence.verdict === 'mixed' ? 'bg-amber-50/50 border-amber-200' :
+                    'bg-red-50/50 border-red-200'
+                  }`}>
+                    <div className="flex items-center justify-between mb-2">
+                      <h4 className="text-xs font-semibold text-slate-600">
+                        Analisi Coerenza Strategia–Regime
+                      </h4>
+                      <span className={`text-xs px-2 py-0.5 rounded-full font-semibold ${
+                        regimeCoherence.verdict === 'coherent' ? 'bg-green-100 text-green-700' :
+                        regimeCoherence.verdict === 'mixed' ? 'bg-amber-100 text-amber-700' :
+                        'bg-red-100 text-red-700'
+                      }`}>
+                        {regimeCoherence.verdict === 'coherent' ? '✓ Coerente' :
+                         regimeCoherence.verdict === 'mixed' ? '~ Mista' : '✗ Incoerente'}
+                        {' '}{regimeCoherence.score}/100
+                      </span>
+                    </div>
+                    <div className="space-y-1">
+                      {regimeCoherence.insights.map((insight, i) => (
+                        <p key={i} className="text-[11px] text-slate-600 leading-relaxed">{insight}</p>
+                      ))}
+                    </div>
                   </div>
                 )}
               </div>
