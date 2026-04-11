@@ -456,8 +456,9 @@ export default function MonthlyPage() {
     const fmtM = (n: number) => { const p = n >= 0 ? '' : '-'; return `${p}$${Math.abs(n).toLocaleString('it-IT', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}` }
     const plC = (n: number) => n > 0 ? '#16a34a' : n < 0 ? '#dc2626' : '#475569'
 
-    // Build strategy rows
-    const stratRows = enrichedStats.map(s => `
+    // Build strategy rows — only strategies with trades in the period
+    const activeStats = enrichedStats.filter(s => s.monthlyTrades > 0)
+    const stratRows = activeStats.map(s => `
       <tr${s.inBestPortfolio ? ' style="border-left:3px solid #16a34a"' : ''}>
         <td class="bold">M${s.magic}</td>
         <td>${s.name}</td>
@@ -1144,7 +1145,7 @@ export default function MonthlyPage() {
                 </tr>
               </thead>
               <tbody>
-                {enrichedStats.map(s => (
+                {enrichedStats.filter(s => s.monthlyTrades > 0).map(s => (
                   <tr
                     key={s.strategyId}
                     className={`border-b border-slate-100 hover:bg-slate-50 ${s.inBestPortfolio ? 'border-l-[3px] border-l-green-500 bg-green-50/30' : ''}`}
