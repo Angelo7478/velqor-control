@@ -3,10 +3,17 @@
   "configurations": [
     {
       "name": "velqor-control",
-      "runtimeExecutable": "npx",
-      "runtimeArgs": ["next", "dev"],
-      "env": {"PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"},
-      "port": 3000
+      "runtimeExecutable": "/opt/homebrew/Cellar/node/25.8.1_1/bin/node",
+      "runtimeArgs": ["/Users/angelopasian/Desktop/VELQOR/velqor-control/node_modules/.bin/next", "dev", "-p", "3001"],
+      "cwd": "/Users/angelopasian/Desktop/VELQOR/velqor-control",
+      "port": 3001
+    },
+    {
+      "name": "fatture",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": ["-m", "http.server", "8765"],
+      "cwd": "/Users/angelopasian/Documents/Claude/Projects/Velqor - Azienda",
+      "port": 8765
     }
   ]
 }

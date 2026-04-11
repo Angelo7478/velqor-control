@@ -183,15 +183,21 @@ export default function QuantPage() {
     const fmtM = (n: number) => { const p = n >= 0 ? '' : '-'; return `${p}$${Math.abs(n).toLocaleString('it-IT', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}` }
     const plC = (n: number) => n > 0 ? '#16a34a' : n < 0 ? '#dc2626' : '#475569'
 
+    // Style labels
+    const styleLabels: Record<string, string> = {
+      mean_reversion: 'Mean Reversion', trend_following: 'Trend Following',
+      breakout: 'Breakout', seasonal: 'Seasonal', hybrid: 'Hybrid',
+    }
+
     // Build SVG chart
     let chartSvg = ''
     if (stratBenchData.length > 1) {
-      const w = 750, h = 220, pad = 40
+      const w = 750, h = 240, pad = 45, padR = 20, padTop = 20
       const vals = stratBenchData.map(d => [d.stratReturn, d.benchReturn]).flat()
       const minV = Math.min(...vals) - 0.5
       const maxV = Math.max(...vals) + 0.5
-      const scX = (i: number) => pad + (i / (stratBenchData.length - 1)) * (w - 2 * pad)
-      const scY = (v: number) => h - pad - ((v - minV) / (maxV - minV)) * (h - 2 * pad)
+      const scX = (i: number) => pad + (i / (stratBenchData.length - 1)) * (w - pad - padR)
+      const scY = (v: number) => h - pad - ((v - minV) / (maxV - minV)) * (h - pad - padTop)
 
       // Regime zones
       const zoneRects = stratRegimes
@@ -200,57 +206,76 @@ export default function QuantPage() {
           const i1 = stratBenchData.findIndex(d => d.date >= z.startDate)
           const i2 = stratBenchData.findIndex(d => d.date > z.endDate)
           const x1 = i1 >= 0 ? scX(i1) : pad
-          const x2 = i2 >= 0 ? scX(i2) : w - pad
+          const x2 = i2 >= 0 ? scX(i2) : w - padR
           const fill = z.regime === 'up' ? '#22c55e' : z.regime === 'down' ? '#ef4444' : '#f59e0b'
-          return `<rect x="${x1}" y="${pad / 2}" width="${x2 - x1}" height="${h - pad * 1.5}" fill="${fill}" opacity="0.08" />`
+          return `<rect x="${x1}" y="${padTop}" width="${Math.max(0, x2 - x1)}" height="${h - pad - padTop}" fill="${fill}" opacity="0.07" rx="2" />`
         }).join('')
+
+      // Grid lines + Y-axis labels
+      const ySteps = 6
+      const yGridLabels = Array.from({ length: ySteps + 1 }, (_, i) => {
+        const v = minV + (maxV - minV) * (i / ySteps)
+        const y = scY(v)
+        return `<line x1="${pad}" y1="${y}" x2="${w - padR}" y2="${y}" stroke="#f1f5f9" />
+                <text x="${pad - 6}" y="${y}" font-size="9" fill="#94a3b8" text-anchor="end" dominant-baseline="middle">${v > 0 ? '+' : ''}${v.toFixed(1)}%</text>`
+      }).join('')
 
       // Zero line
       const zeroY = scY(0)
-      const zeroLine = `<line x1="${pad}" y1="${zeroY}" x2="${w - pad}" y2="${zeroY}" stroke="#94a3b8" stroke-dasharray="4 4" />`
+      const zeroLine = `<line x1="${pad}" y1="${zeroY}" x2="${w - padR}" y2="${zeroY}" stroke="#cbd5e1" stroke-width="1" />`
 
-      // Strategy line
+      // Strategy line with area fill
       const stratPts = stratBenchData.map((d, i) => `${scX(i).toFixed(1)},${scY(d.stratReturn).toFixed(1)}`).join(' ')
+      const stratAreaPts = `${scX(0).toFixed(1)},${scY(0).toFixed(1)} ${stratPts} ${scX(stratBenchData.length - 1).toFixed(1)},${scY(0).toFixed(1)}`
       // Benchmark line
       const benchPts = stratBenchData.map((d, i) => `${scX(i).toFixed(1)},${scY(d.benchReturn).toFixed(1)}`).join(' ')
 
-      // Y-axis labels
-      const ySteps = 5
-      const yLabels = Array.from({ length: ySteps + 1 }, (_, i) => {
-        const v = minV + (maxV - minV) * (i / ySteps)
-        return `<text x="${pad - 4}" y="${scY(v)}" font-size="8" fill="#94a3b8" text-anchor="end" dominant-baseline="middle">${v > 0 ? '+' : ''}${v.toFixed(1)}%</text>`
-      }).join('')
-
       // X-axis labels
-      const xInterval = Math.max(1, Math.floor(stratBenchData.length / 7))
-      const xLabels = stratBenchData.filter((_, i) => i % xInterval === 0).map((d, i) =>
-        `<text x="${scX(i * xInterval)}" y="${h - 6}" font-size="8" fill="#94a3b8" text-anchor="middle">${d.date.slice(5)}</text>`
+      const xInterval = Math.max(1, Math.floor(stratBenchData.length / 8))
+      const xLabels = stratBenchData.filter((_, i) => i % xInterval === 0).map((d, idx) =>
+        `<text x="${scX(idx * xInterval)}" y="${h - 8}" font-size="9" fill="#94a3b8" text-anchor="middle">${d.date.slice(2, 7).replace('-', '/')}</text>`
       ).join('')
 
+      // Final values
+      const lastStrat = stratBenchData[stratBenchData.length - 1]
+      const finalLabels = `
+        <text x="${w - padR + 4}" y="${scY(lastStrat.stratReturn)}" font-size="9" fill="#7c3aed" font-weight="600" dominant-baseline="middle">${lastStrat.stratReturn > 0 ? '+' : ''}${lastStrat.stratReturn.toFixed(1)}%</text>
+        <text x="${w - padR + 4}" y="${scY(lastStrat.benchReturn)}" font-size="9" fill="#94a3b8" dominant-baseline="middle">${lastStrat.benchReturn > 0 ? '+' : ''}${lastStrat.benchReturn.toFixed(1)}%</text>`
+
       chartSvg = `
-        <svg viewBox="0 0 ${w} ${h}" style="width:100%;max-height:220px;margin:10px 0">
-          ${zoneRects}
-          ${zeroLine}
-          ${yLabels}
-          ${xLabels}
-          <polyline points="${benchPts}" fill="none" stroke="#94a3b8" stroke-width="1.5" stroke-dasharray="6 3" />
-          <polyline points="${stratPts}" fill="none" stroke="#7c3aed" stroke-width="2" />
-        </svg>
-        <div style="display:flex;gap:16px;justify-content:center;font-size:9px;color:#64748b;margin-top:4px">
-          <span>━ Strategia</span><span style="opacity:0.6">╌╌ Buy &amp; Hold</span>
-          <span>🟢 Trend Up</span><span>🔴 Trend Down</span><span>🟡 Range</span>
+        <div style="background:#fafbfc;border:1px solid #e2e8f0;border-radius:10px;padding:16px 12px 8px;margin:8px 0 14px">
+          <svg viewBox="0 0 ${w} ${h}" style="width:100%">
+            ${yGridLabels}
+            ${zoneRects}
+            ${zeroLine}
+            ${xLabels}
+            <polygon points="${stratAreaPts}" fill="#7c3aed" opacity="0.06" />
+            <polyline points="${benchPts}" fill="none" stroke="#94a3b8" stroke-width="1.5" stroke-dasharray="6 3" />
+            <polyline points="${stratPts}" fill="none" stroke="#7c3aed" stroke-width="2.5" />
+            ${finalLabels}
+          </svg>
+          <div style="display:flex;gap:20px;justify-content:center;font-size:9px;color:#64748b;margin-top:6px;padding-top:6px;border-top:1px solid #f1f5f9">
+            <span style="display:flex;align-items:center;gap:4px"><span style="width:14px;height:2.5px;background:#7c3aed;border-radius:1px"></span>Strategia</span>
+            <span style="display:flex;align-items:center;gap:4px"><span style="width:14px;height:1.5px;background:#94a3b8;border-radius:1px;border-top:1px dashed #94a3b8"></span>Buy &amp; Hold</span>
+            <span style="display:flex;align-items:center;gap:4px"><span style="width:8px;height:8px;background:#22c55e15;border:1px solid #22c55e40;border-radius:2px"></span>Trend Up</span>
+            <span style="display:flex;align-items:center;gap:4px"><span style="width:8px;height:8px;background:#ef444415;border:1px solid #ef444440;border-radius:2px"></span>Trend Down</span>
+            <span style="display:flex;align-items:center;gap:4px"><span style="width:8px;height:8px;background:#f59e0b15;border:1px solid #f59e0b40;border-radius:2px"></span>Range</span>
+          </div>
         </div>`
     }
 
     // Regime table
-    const regimeRows = stratRegimeStats.map(rs => `
+    const regimeRows = stratRegimeStats.map(rs => {
+      const dotColor = rs.regime === 'up' ? '#22c55e' : rs.regime === 'down' ? '#ef4444' : '#f59e0b'
+      return `
       <tr>
-        <td style="padding:6px 8px;font-weight:500"><span style="display:inline-block;width:8px;height:8px;border-radius:2px;margin-right:6px;background:${rs.regime === 'up' ? '#22c55e40' : rs.regime === 'down' ? '#ef444440' : '#f59e0b40'}"></span>${rs.label}</td>
-        <td style="text-align:right;padding:6px 8px">${rs.trades}</td>
-        <td style="text-align:right;padding:6px 8px">${fmtR(rs.winRate, 1)}%</td>
-        <td style="text-align:right;padding:6px 8px;color:${plC(rs.avgTrade)}">${fmtM(rs.avgTrade)}</td>
-        <td style="text-align:right;padding:6px 8px;font-weight:700;color:${plC(rs.totalPl)}">${fmtM(rs.totalPl)}</td>
-      </tr>`).join('')
+        <td><span style="display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:8px;background:${dotColor}20;border:1.5px solid ${dotColor}60"></span>${rs.label}</td>
+        <td class="r">${rs.trades}</td>
+        <td class="r">${fmtR(rs.winRate, 1)}%</td>
+        <td class="r" style="color:${plC(rs.avgTrade)}">${fmtM(rs.avgTrade)}</td>
+        <td class="r bold" style="color:${plC(rs.totalPl)}">${fmtM(rs.totalPl)}</td>
+      </tr>`
+    }).join('')
 
     // Test vs Real rows
     const tvr = [
@@ -271,11 +296,11 @@ export default function QuantPage() {
       const suf = (r as { suffix?: string }).suffix || ''
       const hl = (r as { highlight?: boolean }).highlight
       return `
-        <tr${hl ? ' style="background:#f5f3ff"' : ''}>
-          <td style="padding:6px 8px;${hl ? 'font-weight:700;color:#6d28d9' : ''}">${r.label}</td>
-          <td style="text-align:right;padding:6px 8px;color:#475569">${t !== null ? `${pre}${fmtR(t)}${suf}` : '—'}</td>
-          <td style="text-align:right;padding:6px 8px;font-weight:600">${rv !== null ? `${pre}${fmtR(rv)}${suf}` : '—'}</td>
-          <td style="text-align:right;padding:6px 8px;font-size:11px;color:${delta !== null ? plC(delta) : '#94a3b8'}">${delta !== null ? `${delta >= 0 ? '+' : ''}${fmtR(delta)}${suf}` : '—'}</td>
+        <tr${hl ? ' class="hl"' : ''}>
+          <td${hl ? ' class="bold"' : ''}>${r.label}</td>
+          <td class="r dim">${t !== null ? `${pre}${fmtR(t)}${suf}` : '—'}</td>
+          <td class="r bold">${rv !== null ? `${pre}${fmtR(rv)}${suf}` : '<span class="dim">—</span>'}</td>
+          <td class="r" style="font-size:10px;color:${delta !== null ? plC(delta) : '#cbd5e1'}">${delta !== null ? `${delta >= 0 ? '+' : ''}${fmtR(delta)}${suf}` : '—'}</td>
         </tr>`
     }).join('')
 
@@ -285,99 +310,165 @@ export default function QuantPage() {
 <meta charset="UTF-8">
 <title>VELQOR Quant — ${s.name}</title>
 <style>
-  @page { size: A4; margin: 15mm; }
+  @page { size: A4; margin: 14mm 16mm; }
   * { margin: 0; padding: 0; box-sizing: border-box; }
-  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; color: #1e293b; background: #fff; max-width: 800px; margin: 0 auto; padding: 20px; font-size: 12px; }
-  h2 { font-size: 14px; color: #334155; margin: 18px 0 8px; border-bottom: 1px solid #e2e8f0; padding-bottom: 4px; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', sans-serif; color: #1e293b; background: #fff; max-width: 780px; margin: 0 auto; padding: 24px; font-size: 12px; line-height: 1.5; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  h2 { font-size: 11px; font-weight: 700; color: #7c3aed; text-transform: uppercase; letter-spacing: 0.8px; margin: 22px 0 10px; padding-bottom: 5px; border-bottom: 2px solid #f1f5f9; }
   table { width: 100%; border-collapse: collapse; font-size: 11px; }
-  th { text-align: left; padding: 6px 8px; color: #64748b; font-weight: 500; border-bottom: 1px solid #e2e8f0; font-size: 10px; }
-  td { padding: 6px 8px; border-bottom: 1px solid #f1f5f9; }
-  .header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 16px; padding-bottom: 12px; border-bottom: 2px solid #7c3aed; }
-  .kpi-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin: 12px 0; }
-  .kpi { background: #f8fafc; border-radius: 8px; padding: 10px; text-align: center; }
-  .kpi-value { font-size: 16px; font-weight: 700; }
-  .kpi-label { font-size: 9px; color: #64748b; margin-top: 2px; }
-  .logic-box { background: #f8fafc; border-radius: 8px; padding: 10px; margin-bottom: 14px; }
-  @media print { body { padding: 0; } }
+  th { text-align: left; padding: 8px 10px; color: #94a3b8; font-weight: 600; font-size: 9px; text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 2px solid #e2e8f0; }
+  td { padding: 7px 10px; border-bottom: 1px solid #f1f5f9; }
+  .r { text-align: right; }
+  .bold { font-weight: 700; }
+  .dim { color: #94a3b8; }
+  .hl { background: #f5f3ff; }
+  .hl td { border-bottom-color: #ede9fe; }
+
+  .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; padding: 16px 20px; background: linear-gradient(135deg, #0f0a1a 0%, #1e1533 100%); border-radius: 12px; color: #fff; }
+  .header-left { display: flex; align-items: center; gap: 14px; }
+  .header-info h1 { font-size: 18px; font-weight: 800; letter-spacing: -0.3px; }
+  .header-meta { font-size: 10px; color: #a5a0b8; margin-top: 3px; }
+  .header-badge { display: inline-block; font-size: 9px; padding: 2px 8px; border-radius: 4px; background: rgba(124,58,237,0.25); color: #c4b5fd; font-weight: 600; margin-right: 6px; }
+  .pl-box { text-align: right; padding: 10px 18px; border-radius: 10px; }
+
+  .info-strip { display: flex; gap: 0; margin-bottom: 18px; border-radius: 10px; overflow: hidden; border: 1px solid #e2e8f0; }
+  .info-cell { flex: 1; padding: 10px 14px; background: #fafbfc; border-right: 1px solid #e2e8f0; }
+  .info-cell:last-child { border-right: none; }
+  .info-label { font-size: 9px; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.5px; font-weight: 600; }
+  .info-value { font-size: 14px; font-weight: 700; color: #1e293b; margin-top: 2px; }
+
+  .kpi-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; margin: 10px 0 16px; }
+  .kpi { background: #f8fafc; border: 1px solid #f1f5f9; border-radius: 8px; padding: 10px 8px; text-align: center; }
+  .kpi-value { font-size: 15px; font-weight: 700; color: #1e293b; }
+  .kpi-label { font-size: 8px; color: #94a3b8; margin-top: 3px; text-transform: uppercase; letter-spacing: 0.3px; }
+  .kpi-hl { background: #f5f3ff; border-color: #ede9fe; }
+  .kpi-hl .kpi-value { color: #7c3aed; }
+
+  .sizing-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; margin: 10px 0; }
+  .sizing-cell { border-radius: 8px; padding: 12px 8px; text-align: center; }
+  .sizing-value { font-size: 16px; font-weight: 800; }
+  .sizing-label { font-size: 8px; margin-top: 3px; text-transform: uppercase; letter-spacing: 0.3px; }
+
+  .footer { margin-top: 24px; padding-top: 10px; border-top: 2px solid #f1f5f9; display: flex; justify-content: space-between; align-items: center; }
+  .footer-logo { display: flex; align-items: center; gap: 8px; }
+
+  .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media print { body { padding: 0; } .header { -webkit-print-color-adjust: exact; } }
 </style>
 </head>
 <body>
+
+  <!-- HEADER -->
   <div class="header">
-    <div>
-      <div style="display:flex;align-items:center;gap:10px;margin-bottom:4px">
-        <img src="${VELQOR_LOGO_BASE64}" style="height:28px" alt="Velqor" />
-        <span style="font-size:9px;color:#94a3b8">Strategy Report</span>
+    <div class="header-left">
+      <img src="data:image/png;base64,${VELQOR_LOGO_BASE64}" style="height:40px;filter:brightness(1.1)" alt="Velqor" />
+      <div class="header-info">
+        <h1>${s.name || s.strategy_id}</h1>
+        <div class="header-meta">
+          <span class="header-badge">${styleLabels[s.strategy_style || ''] || s.strategy_style || ''}</span>
+          Magic #${s.magic} &middot; ${s.asset} &middot; ${s.timeframe} &middot; ${accName}
+        </div>
       </div>
-      <h1 style="font-size:20px;font-weight:800;color:#0f172a;margin:4px 0">${s.name || s.strategy_id}</h1>
-      <div style="font-size:11px;color:#64748b">
-        Magic #${s.magic} · ${s.asset} · ${s.timeframe} · ${s.strategy_style || ''} · ${accName}
-      </div>
-      <div style="font-size:10px;color:#94a3b8;margin-top:2px">${dateNow}</div>
     </div>
     ${s.real_trades > 0 ? `
-    <div style="text-align:right;padding:10px 16px;border-radius:10px;background:${Number(s.real_pl) >= 0 ? '#f0fdf4' : '#fef2f2'}">
-      <div style="font-size:22px;font-weight:800;color:${plC(Number(s.real_pl))}">${fmtM(Number(s.real_pl))}</div>
-      <div style="font-size:10px;color:#64748b">${s.real_trades} trade live</div>
+    <div class="pl-box" style="background:${Number(s.real_pl) >= 0 ? 'rgba(34,197,94,0.12)' : 'rgba(239,68,68,0.12)'}">
+      <div style="font-size:24px;font-weight:800;color:${Number(s.real_pl) >= 0 ? '#4ade80' : '#f87171'};letter-spacing:-0.5px">${fmtM(Number(s.real_pl))}</div>
+      <div style="font-size:10px;color:#a5a0b8;margin-top:2px">${s.real_trades} trade live</div>
     </div>` : ''}
   </div>
 
   ${s.logic_summary ? `
-  <div class="logic-box">
-    <div style="font-size:10px;color:#64748b;margin-bottom:2px">Logica</div>
-    <div style="font-size:12px">${s.logic_summary}</div>
-    ${s.parameters ? `<div style="font-size:10px;color:#94a3b8;margin-top:2px">Parametri: ${s.parameters}</div>` : ''}
+  <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:10px 14px;margin-bottom:16px;font-size:11px">
+    <span style="font-size:9px;color:#94a3b8;text-transform:uppercase;letter-spacing:0.5px;font-weight:600">Logica</span>
+    <div style="margin-top:3px;color:#334155">${s.logic_summary}</div>
+    ${s.parameters ? `<div style="color:#94a3b8;font-size:10px;margin-top:2px">Parametri: ${s.parameters}</div>` : ''}
   </div>` : ''}
+
+  <!-- KEY METRICS STRIP -->
+  <div class="info-strip">
+    <div class="info-cell"><div class="info-label">Win Rate</div><div class="info-value">${fmtR(s.real_win_pct ?? s.test_win_pct, 1)}%</div></div>
+    <div class="info-cell"><div class="info-label">Payoff</div><div class="info-value">${fmtR(s.real_payoff ?? s.test_payoff)}</div></div>
+    <div class="info-cell"><div class="info-label">Profit Factor</div><div class="info-value">${fmtR(s.real_profit_factor)}</div></div>
+    <div class="info-cell"><div class="info-label">Max DD</div><div class="info-value" style="color:${plC(-(s.real_max_dd || 0))}">${fmtM(Number(s.real_max_dd || s.test_max_dd || 0))}</div></div>
+    <div class="info-cell"><div class="info-label">Ret/DD</div><div class="info-value" style="color:#7c3aed">${fmtR(s.real_ret_dd ?? s.test_ret_dd)}</div></div>
+  </div>
 
   ${chartSvg ? `
   <h2>Strategia vs ${ASSET_BENCHMARK_LABEL[s.asset] || s.asset} (Buy &amp; Hold)</h2>
   ${chartSvg}` : ''}
 
-  ${regimeRows ? `
-  <h2>Performance per regime di mercato (Daily SMA50/SMA200)</h2>
-  <table>
-    <thead><tr><th>Regime</th><th style="text-align:right">Trade</th><th style="text-align:right">Win Rate</th><th style="text-align:right">Media trade</th><th style="text-align:right">P/L</th></tr></thead>
-    <tbody>${regimeRows}</tbody>
-  </table>` : ''}
+  <!-- REGIME + TEST VS REAL side by side -->
+  <div class="two-col">
+    ${regimeRows ? `
+    <div>
+      <h2>Performance per Regime</h2>
+      <table>
+        <thead><tr><th>Regime</th><th class="r">Trade</th><th class="r">Win Rate</th><th class="r">Avg</th><th class="r">P/L</th></tr></thead>
+        <tbody>${regimeRows}</tbody>
+      </table>
+      <div style="font-size:8px;color:#cbd5e1;margin-top:4px">Regime detection: SMA50/SMA200 su close daily</div>
+    </div>` : '<div></div>'}
 
-  <h2>Test vs Real</h2>
-  <table>
-    <thead><tr><th>Metrica</th><th style="text-align:right">Test (SQX)</th><th style="text-align:right">Real (Live)</th><th style="text-align:right">Delta</th></tr></thead>
-    <tbody>${tvrRows}</tbody>
-  </table>
+    <div>
+      <h2>Test vs Real</h2>
+      <table>
+        <thead><tr><th>Metrica</th><th class="r">Test</th><th class="r">Real</th><th class="r">Delta</th></tr></thead>
+        <tbody>${tvrRows}</tbody>
+      </table>
+    </div>
+  </div>
 
-  <h2>Metriche Test (SQX)</h2>
+  <h2>Metriche Backtest (SQX)</h2>
   <div class="kpi-grid">
     ${[
-      ['Trades', s.test_trades],
-      ['Win Rate', `${fmtR(s.test_win_pct, 1)}%`],
-      ['Payoff', fmtR(s.test_payoff)],
-      ['Expectancy', `$${fmtR(s.test_expectancy)}`],
-      ['Max Consec Loss', s.test_max_consec_loss],
-      ['Worst Trade', `$${fmtR(s.test_worst_trade)}`],
-      ['Max DD', `$${fmtR(s.test_max_dd)}`],
-      ['MC 95% DD', `$${fmtR(s.test_mc95_dd)}`],
-      ['Return/DD', fmtR(s.test_ret_dd)],
-      ['Stability R²', fmtR(s.test_stability)],
-      ['Ulcer Index', `${fmtR(s.test_ulcer_index)}%`],
-      ['Exposure', `${fmtR(s.test_exposure_pct, 1)}%`],
-    ].map(([label, value]) => `
-      <div class="kpi">
-        <div class="kpi-value">${value ?? '—'}</div>
-        <div class="kpi-label">${label}</div>
+      { label: 'Trades', value: s.test_trades },
+      { label: 'Win Rate', value: `${fmtR(s.test_win_pct, 1)}%` },
+      { label: 'Payoff', value: fmtR(s.test_payoff) },
+      { label: 'Expectancy', value: `$${fmtR(s.test_expectancy)}` },
+      { label: 'Max Consec Loss', value: s.test_max_consec_loss },
+      { label: 'Worst Trade', value: `$${fmtR(s.test_worst_trade)}` },
+      { label: 'Max DD', value: `$${fmtR(s.test_max_dd)}` },
+      { label: 'MC 95% DD', value: `$${fmtR(s.test_mc95_dd)}` },
+      { label: 'Return/DD', value: fmtR(s.test_ret_dd), hl: true },
+      { label: 'Stability R\u00B2', value: fmtR(s.test_stability), hl: true },
+      { label: 'Ulcer Index', value: `${fmtR(s.test_ulcer_index)}%` },
+      { label: 'Exposure', value: `${fmtR(s.test_exposure_pct, 1)}%` },
+    ].map(m => `
+      <div class="kpi${(m as { hl?: boolean }).hl ? ' kpi-hl' : ''}">
+        <div class="kpi-value">${m.value ?? '—'}</div>
+        <div class="kpi-label">${m.label}</div>
       </div>`).join('')}
   </div>
 
   <h2>Sizing (per 10K equity)</h2>
-  <div class="kpi-grid">
-    <div class="kpi"><div class="kpi-value">${s.lot_static ?? '—'}</div><div class="kpi-label">Lot Test</div></div>
-    <div class="kpi" style="background:#f0fdf4"><div class="kpi-value" style="color:#16a34a">${s.lot_neutral ?? '—'}</div><div class="kpi-label">Neutrale</div></div>
-    <div class="kpi" style="background:#fffbeb"><div class="kpi-value" style="color:#d97706">${s.lot_aggressive ?? '—'}</div><div class="kpi-label">Aggressivo</div></div>
-    <div class="kpi" style="background:#eff6ff"><div class="kpi-value" style="color:#2563eb">${s.lot_conservative ?? '—'}</div><div class="kpi-label">Conservativo</div></div>
+  <div class="sizing-grid">
+    <div class="sizing-cell" style="background:#f8fafc;border:1px solid #e2e8f0">
+      <div class="sizing-value" style="color:#475569">${s.lot_static ?? '—'}</div>
+      <div class="sizing-label" style="color:#94a3b8">Lot Test</div>
+    </div>
+    <div class="sizing-cell" style="background:#f0fdf4;border:1px solid #bbf7d0">
+      <div class="sizing-value" style="color:#16a34a">${s.lot_neutral ?? '—'}</div>
+      <div class="sizing-label" style="color:#4ade80">Neutrale</div>
+    </div>
+    <div class="sizing-cell" style="background:#fffbeb;border:1px solid #fde68a">
+      <div class="sizing-value" style="color:#d97706">${s.lot_aggressive ?? '—'}</div>
+      <div class="sizing-label" style="color:#fbbf24">Aggressivo</div>
+    </div>
+    <div class="sizing-cell" style="background:#eff6ff;border:1px solid #bfdbfe">
+      <div class="sizing-value" style="color:#2563eb">${s.lot_conservative ?? '—'}</div>
+      <div class="sizing-label" style="color:#60a5fa">Conservativo</div>
+    </div>
   </div>
 
-  <div style="margin-top:20px;padding-top:10px;border-top:1px solid #e2e8f0;display:flex;justify-content:space-between;font-size:9px;color:#94a3b8">
-    <span>VELQOR Quant · Strategy Report</span>
-    <span>${dateNow}</span>
+  ${s.real_avg_duration_hours ? `<div style="font-size:10px;color:#64748b;margin-top:8px">Durata media trade: <strong>${fmtR(s.real_avg_duration_hours, 1)} ore</strong></div>` : ''}
+  ${s.notes ? `<div style="font-size:10px;color:#94a3b8;margin-top:4px">Note: ${s.notes}</div>` : ''}
+
+  <!-- FOOTER -->
+  <div class="footer">
+    <div class="footer-logo">
+      <img src="data:image/png;base64,${VELQOR_LOGO_BASE64}" style="height:18px;opacity:0.4" alt="" />
+      <span style="font-size:9px;color:#cbd5e1;font-weight:600;letter-spacing:1px">VELQOR QUANT</span>
+    </div>
+    <div style="font-size:9px;color:#cbd5e1">${dateNow} &middot; Confidenziale</div>
   </div>
 </body>
 </html>`
