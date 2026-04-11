@@ -41,6 +41,20 @@ export default function QuantPage() {
   useEffect(() => { if (selectedAccountId) loadAccountPerf() }, [selectedAccountId])
   useEffect(() => { if (selectedStrat && selectedAccountId) loadStratBenchmark(selectedStrat) }, [selectedStrat, selectedAccountId])
 
+  // Sync selectedStrat when strategies updates (e.g. after account switch)
+  // Without this, selectedStrat keeps stale real_* from the previous account
+  useEffect(() => {
+    if (!selectedStrat) return
+    const updated = strategies.find(s => s.id === selectedStrat.id)
+    if (!updated) return
+    // Only sync if real data actually changed — prevents infinite loop
+    if (updated.real_trades !== selectedStrat.real_trades ||
+        Number(updated.real_pl) !== Number(selectedStrat.real_pl) ||
+        Number(updated.real_max_dd) !== Number(selectedStrat.real_max_dd)) {
+      setSelectedStrat(updated)
+    }
+  }, [strategies])
+
   async function loadInitial() {
     const supabase = createClient()
     const [stratRes, accRes] = await Promise.all([
