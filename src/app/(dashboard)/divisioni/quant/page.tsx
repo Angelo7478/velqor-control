@@ -361,11 +361,11 @@ export default function QuantPage() {
   .hl { background: #f5f3ff; }
   .hl td { border-bottom-color: #ede9fe; }
 
-  .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; padding: 16px 20px; background: linear-gradient(135deg, #0f0a1a 0%, #1e1533 100%); border-radius: 12px; color: #fff; }
+  .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; padding: 16px 20px; background: #fff; border: 1px solid #e2e8f0; border-radius: 12px; color: #1e293b; }
   .header-left { display: flex; align-items: center; gap: 14px; }
-  .header-info h1 { font-size: 18px; font-weight: 800; letter-spacing: -0.3px; }
-  .header-meta { font-size: 10px; color: #a5a0b8; margin-top: 3px; }
-  .header-badge { display: inline-block; font-size: 9px; padding: 2px 8px; border-radius: 4px; background: rgba(124,58,237,0.25); color: #c4b5fd; font-weight: 600; margin-right: 6px; }
+  .header-info h1 { font-size: 18px; font-weight: 800; letter-spacing: -0.3px; color: #1e293b; }
+  .header-meta { font-size: 10px; color: #64748b; margin-top: 3px; }
+  .header-badge { display: inline-block; font-size: 9px; padding: 2px 8px; border-radius: 4px; background: #f5f3ff; color: #7c3aed; font-weight: 600; margin-right: 6px; border: 1px solid #ede9fe; }
   .pl-box { text-align: right; padding: 10px 18px; border-radius: 10px; }
 
   .info-strip { display: flex; gap: 0; margin-bottom: 18px; border-radius: 10px; overflow: hidden; border: 1px solid #e2e8f0; }
@@ -398,7 +398,7 @@ export default function QuantPage() {
   <!-- HEADER -->
   <div class="header">
     <div class="header-left">
-      <img src="data:image/png;base64,${VELQOR_LOGO_BASE64}" style="height:40px;filter:brightness(1.1)" alt="Velqor" />
+      <img src="data:image/png;base64,${VELQOR_LOGO_BASE64}" style="height:40px" alt="Velqor" />
       <div class="header-info">
         <h1>${s.name || s.strategy_id}</h1>
         <div class="header-meta">
@@ -408,9 +408,9 @@ export default function QuantPage() {
       </div>
     </div>
     ${s.real_trades > 0 ? `
-    <div class="pl-box" style="background:${Number(s.real_pl) >= 0 ? 'rgba(34,197,94,0.12)' : 'rgba(239,68,68,0.12)'}">
-      <div style="font-size:24px;font-weight:800;color:${Number(s.real_pl) >= 0 ? '#4ade80' : '#f87171'};letter-spacing:-0.5px">${fmtM(Number(s.real_pl))}</div>
-      <div style="font-size:10px;color:#a5a0b8;margin-top:2px">${s.real_trades} trade live</div>
+    <div class="pl-box" style="background:${Number(s.real_pl) >= 0 ? '#f0fdf4' : '#fef2f2'};border:1px solid ${Number(s.real_pl) >= 0 ? '#bbf7d0' : '#fecaca'}">
+      <div style="font-size:24px;font-weight:800;color:${Number(s.real_pl) >= 0 ? '#16a34a' : '#dc2626'};letter-spacing:-0.5px">${fmtM(Number(s.real_pl))}</div>
+      <div style="font-size:10px;color:#64748b;margin-top:2px">${s.real_trades} trade live</div>
     </div>` : ''}
   </div>
 
