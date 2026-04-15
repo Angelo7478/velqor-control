@@ -69,6 +69,13 @@ export default function BuilderPage() {
   const [safetyFactor, setSafetyFactor] = useState(0.5)
   const [sizingOutput, setSizingOutput] = useState<PortfolioSizingOutput | null>(null)
 
+  // v4 rolling windows: null = all time, number = days to look back.
+  // The window filters the per-strategy aggregates (tradeCount, P/L, avgLots,
+  // Kelly inputs) so sizing reflects the recent regime instead of lifetime
+  // averages. Thresholds: 30 = aggressive recency, 90 = quarterly, 120 = mid,
+  // null = institutional baseline.
+  const [windowDays, setWindowDays] = useState<number | null>(null)
+
   // PTF state
   const [savedPortfolios, setSavedPortfolios] = useState<SavedPortfolio[]>([])
   const [ptfName, setPtfName] = useState('')
@@ -234,18 +241,59 @@ export default function BuilderPage() {
     }))
   }, [equityBase, sourceAccountSize])
 
+  // ---- v4 rolling window: trades filtered by time ----
+  // When windowDays is null the full trade history is used (baseline).
+  // When set to N, only trades with close_time in the last N days survive.
+  // All downstream calculations (tradeCount, realPnlOnAccount, realAvgLots,
+  // calcPerAccountStats for Kelly, equity curves, margin) derive from this.
+  const effectiveTrades = useMemo(() => {
+    if (windowDays == null) return trades
+    const cutoffMs = Date.now() - windowDays * 86_400_000
+    return trades.filter(t => {
+      const ts = Date.parse(t.close_time)
+      return Number.isFinite(ts) && ts >= cutoffMs
+    })
+  }, [trades, windowDays])
+
+  // Rebuild per-strategy aggregates whenever the window changes.
+  // Keeps tradeCount / realPnlOnAccount / realAvgLots in sync with the
+  // currently active window so the table columns and the sizing engine
+  // always agree on "what counts as real data right now".
+  useEffect(() => {
+    if (trades.length === 0 && windowDays == null) return
+    const stratStats = new Map<string, { total: number; count: number; lotsSum: number }>()
+    for (const t of effectiveTrades) {
+      if (!t.strategy_id) continue
+      if (!stratStats.has(t.strategy_id)) stratStats.set(t.strategy_id, { total: 0, count: 0, lotsSum: 0 })
+      const e = stratStats.get(t.strategy_id)!
+      e.total += Number(t.net_profit ?? 0)
+      e.count++
+      e.lotsSum += Number(t.lots ?? 0)
+    }
+    setStrategies(prev => prev.map(s => {
+      const stats = stratStats.get(s.id)
+      const realAvg = stats && stats.count > 0 ? stats.lotsSum / stats.count : 0
+      return {
+        ...s,
+        realAvgLots: realAvg,
+        tradeCount: stats?.count ?? 0,
+        realPnlOnAccount: stats?.total ?? 0,
+      }
+    }))
+  }, [effectiveTrades, windowDays])
+
   // ---- Equity curves (memoized) ----
   const curveData = useMemo(() => {
     const selected = strategies.filter(s => s.selected && s.tradeCount > 0)
-    if (selected.length === 0 || trades.length === 0) return null
+    if (selected.length === 0 || effectiveTrades.length === 0) return null
 
     const stratMap = new Map<string, { magic: number; name: string; userLots: number; color: string }>()
     for (const s of selected) {
       stratMap.set(s.id, { magic: s.magic, name: s.name || `M${s.magic}`, userLots: s.userLots, color: s.chartColor })
     }
 
-    return buildEquityCurves(trades, stratMap, equityBase)
-  }, [strategies, trades, equityBase])
+    return buildEquityCurves(effectiveTrades, stratMap, equityBase)
+  }, [strategies, effectiveTrades, equityBase])
 
   // ---- Margin calculation (memoized) ----
   const marginData = useMemo<PortfolioMarginResult | null>(() => {
@@ -264,11 +312,11 @@ export default function BuilderPage() {
   // ---- Sizing Advisor (memoized) — analyzes ALL active strategies independently ----
   const advisorData = useMemo<AdvisorSummary | null>(() => {
     const active = strategies.filter(s => s.status === 'active')
-    if (active.length === 0 || trades.length === 0) return null
+    if (active.length === 0 || effectiveTrades.length === 0) return null
 
     const inputs: AdvisorInput[] = active.map(s => {
-      // Compute per-strategy stats from trades
-      const stratTrades = trades.filter(t => t.strategy_id === s.id)
+      // Compute per-strategy stats from trades (v4: windowed)
+      const stratTrades = effectiveTrades.filter(t => t.strategy_id === s.id)
       const wins = stratTrades.filter(t => t.net_profit > 0)
       const losses = stratTrades.filter(t => t.net_profit <= 0)
       const totalPl = stratTrades.reduce((sum, t) => sum + t.net_profit, 0)
@@ -334,18 +382,18 @@ export default function BuilderPage() {
     })
 
     return generateSizingAdvice(inputs)
-  }, [strategies, trades])
+  }, [strategies, effectiveTrades])
 
   // ---- Sizing Efficiency + Equity Projection (memoized) ----
   const projectionData = useMemo<{ efficiency: SizingEfficiency; projection: EquityProjection } | null>(() => {
     const selected = strategies.filter(s => s.selected && s.tradeCount > 0)
-    if (selected.length === 0 || trades.length === 0) return null
+    if (selected.length === 0 || effectiveTrades.length === 0) return null
 
     // Build monthly P/L from combined portfolio trades, scaled to builder lots
     // Pre-compute lot scale per strategy (same logic as buildEquityCurves)
     const lotScaleMap = new Map<string, number>()
     for (const s of selected) {
-      const stratTrades = trades.filter(t => t.strategy_id === s.id)
+      const stratTrades = effectiveTrades.filter(t => t.strategy_id === s.id)
       const avgLots = stratTrades.length > 0
         ? stratTrades.reduce((sum, t) => sum + t.lots, 0) / stratTrades.length
         : 0
@@ -354,7 +402,7 @@ export default function BuilderPage() {
 
     const monthlyPnl = new Map<string, number>()
     let totalTradeCount = 0
-    for (const t of trades) {
+    for (const t of effectiveTrades) {
       if (!selected.some(s => s.id === t.strategy_id)) continue
       const scale = lotScaleMap.get(t.strategy_id) ?? 1
       const ym = t.close_time.slice(0, 7) // YYYY-MM
@@ -401,7 +449,7 @@ export default function BuilderPage() {
     const projection = calcEquityProjection(monthlyReturns, equityBase, tradesPerMonth)
 
     return { efficiency, projection }
-  }, [strategies, trades, equityBase, sizingOutput, curveData])
+  }, [strategies, effectiveTrades, equityBase, sizingOutput, curveData])
 
   // ---- Apply advisor portfolio: select/deselect strategies + set lots ----
   function applyAdvisorPortfolio() {
@@ -478,7 +526,8 @@ export default function BuilderPage() {
    * CRITICAL: never mix dollar metrics across different account sizes.
    */
   function calcPerAccountStats(stratId: string) {
-    const stratTrades = trades.filter(t => t.strategy_id === stratId)
+    // v4: use effectiveTrades so rolling windows propagate into Kelly inputs
+    const stratTrades = effectiveTrades.filter(t => t.strategy_id === stratId)
     if (stratTrades.length === 0) return null
     const wins = stratTrades.filter(t => t.net_profit > 0)
     const losses = stratTrades.filter(t => t.net_profit <= 0)
@@ -1323,6 +1372,30 @@ ${curveData.curves.sort((a, b) => a.magic - b.magic).map(c => `Magic ${String(c.
                   <span className="text-xs font-mono">{fmt(safetyFactor, 1)}</span>
                 </div>
               </div>
+              <div>
+                <label className="text-[10px] uppercase text-slate-400 block mb-1" title="Finestra temporale per calcolare stats reali (Kelly, P/L, trade count). Rolling = cattura regime shift, All = tutto lo storico.">Finestra</label>
+                <div className="flex gap-0.5">
+                  {([
+                    { label: 'All', value: null },
+                    { label: '120g', value: 120 },
+                    { label: '90g', value: 90 },
+                    { label: '30g', value: 30 },
+                  ] as const).map(opt => (
+                    <button
+                      key={opt.label}
+                      onClick={() => { setWindowDays(opt.value); if (sizingMode === 'optimized') setTimeout(optimizeLots, 50) }}
+                      className={`px-2 py-1.5 text-[11px] rounded border font-mono transition ${
+                        windowDays === opt.value
+                          ? 'bg-indigo-600 border-indigo-600 text-white'
+                          : 'border-slate-200 text-slate-500 hover:bg-indigo-50 hover:border-indigo-300'
+                      }`}
+                      title={opt.value == null ? 'Tutto lo storico' : `Ultimi ${opt.value} giorni`}
+                    >
+                      {opt.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
             </>
           )}
 
@@ -1373,6 +1446,27 @@ ${curveData.curves.sort((a, b) => a.magic - b.magic).map(c => `Magic ${String(c.
           </div>
         </div>
       </div>
+
+      {/* v4: Rolling-window banner — makes it impossible to forget which cut is active */}
+      {windowDays != null && (
+        <div className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-2.5 flex items-center justify-between text-xs">
+          <div className="flex items-center gap-2">
+            <span className="text-amber-600 font-semibold">⏱ Finestra rolling attiva:</span>
+            <span className="font-mono text-amber-800">ultimi {windowDays} giorni</span>
+            <span className="text-amber-500">·</span>
+            <span className="text-amber-700">
+              {effectiveTrades.length} trade su {trades.length} totali
+              {trades.length > 0 && ` (${Math.round((effectiveTrades.length / trades.length) * 100)}%)`}
+            </span>
+          </div>
+          <button
+            onClick={() => { setWindowDays(null); if (sizingMode === 'optimized') setTimeout(optimizeLots, 50) }}
+            className="text-amber-600 hover:text-amber-800 underline"
+          >
+            Torna a tutto lo storico
+          </button>
+        </div>
+      )}
 
       {/* Strategy table with lot inputs */}
       <div className="bg-white rounded-xl border border-slate-200 overflow-x-auto">
