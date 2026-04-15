@@ -1894,8 +1894,12 @@ ${curveData.curves.sort((a, b) => a.magic - b.magic).map(c => `Magic ${String(c.
         </div>
       )}
 
-      {/* Sizing Advisor — independent portfolio suggestion */}
-      {advisorData && (advisorData.included.length > 0 || advisorData.excluded.length > 0) && (
+      {/* Sizing Advisor — independent portfolio suggestion.
+          Hidden in Simple mode: the simple engine is already the single source
+          of truth for lot sizing, and the advisor's separate Kelly/fitness
+          logic would produce conflicting numbers (was causing 4x size drift
+          and re-adding deselected strategies on "Applica"). */}
+      {!simpleSizingActive && advisorData && (advisorData.included.length > 0 || advisorData.excluded.length > 0) && (
         <div className="bg-white rounded-xl border border-slate-200 p-4">
           <div className="flex items-center justify-between mb-3">
             <div className="flex items-center gap-2">
