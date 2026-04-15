@@ -7,7 +7,7 @@ import {
   fmt, fmtUsd, fmtPct, plColor, groupColor, styleColor, styleLabel,
   CHART_COLORS, PORTFOLIO_COLOR,
   buildEquityCurves, TradeForCurve, StrategyEquityCurve, CombinedCurvePoint, PortfolioStats, CurveStats,
-  runSizingEngine, SizingInput, PortfolioSizingOutput, KellyMode,
+  runSizingEngine, runSimpleSizingEngine, SizingInput, PortfolioSizingOutput, KellyMode,
   calcPortfolioMargin, PortfolioMarginResult, DEFAULT_REF_PRICES,
   calcFitnessScore, detectPendulumState,
   generateSizingAdvice, AdvisorInput, AdvisorSummary,
@@ -36,6 +36,11 @@ interface StrategyRow extends QelStrategy {
   visible: boolean
   tradeCount: number
   realPnlOnAccount: number
+  // Worst-case telemetry computed from the account's effective trades.
+  // Used by the simple sizing engine + info metrics (recovery / killswitch).
+  worstTradeAcc: number         // most negative net_profit seen on this account
+  maxConsLossesAcc: number      // longest losing streak on this account
+  monthsActiveAcc: number       // approx months between first and last trade
 }
 
 interface SavedPortfolio {
@@ -68,6 +73,12 @@ export default function BuilderPage() {
   const [maxDdPct, setMaxDdPct] = useState(10)
   const [safetyFactor, setSafetyFactor] = useState(0.5)
   const [sizingOutput, setSizingOutput] = useState<PortfolioSizingOutput | null>(null)
+  // simple = MC95+worst-trade budget split equally over N strategies with overlap
+  // correction. This is the default for swing/low-frequency portfolios.
+  // advanced = v3+v4 Kelly+HRP engine, useful when we move to intraday with
+  // larger per-strategy samples.
+  const [sizingEngineKind, setSizingEngineKind] = useState<'simple' | 'advanced'>('simple')
+  const simpleSizingActive = sizingEngineKind === 'simple'
 
   // v4 rolling windows: null = all time, number = days to look back.
   // The window filters the per-strategy aggregates (tradeCount, P/L, avgLots,
@@ -155,16 +166,48 @@ export default function BuilderPage() {
     }
     setSavedPortfolios(ptfList)
 
-    // Aggregate per-strategy stats from trades (P/L, count, avg lots)
-    const stratStats = new Map<string, { total: number; count: number; lotsSum: number }>()
-    const tradeRows = tradeData ?? []
+    // Aggregate per-strategy stats from trades (P/L, count, avg lots,
+    // worst trade, max consecutive losses, months active).
+    interface StratAgg {
+      total: number
+      count: number
+      lotsSum: number
+      worstTrade: number
+      maxConsLosses: number
+      curConsLosses: number
+      firstTs: number
+      lastTs: number
+    }
+    const stratStats = new Map<string, StratAgg>()
+    const tradeRows = (tradeData ?? []).slice().sort((a, b) => {
+      const ta = Date.parse(a.close_time || '') || 0
+      const tb = Date.parse(b.close_time || '') || 0
+      return ta - tb
+    })
     for (const t of tradeRows) {
       if (!t.strategy_id) continue
-      if (!stratStats.has(t.strategy_id)) stratStats.set(t.strategy_id, { total: 0, count: 0, lotsSum: 0 })
+      if (!stratStats.has(t.strategy_id)) stratStats.set(t.strategy_id, {
+        total: 0, count: 0, lotsSum: 0,
+        worstTrade: 0, maxConsLosses: 0, curConsLosses: 0,
+        firstTs: Number.POSITIVE_INFINITY, lastTs: 0,
+      })
       const e = stratStats.get(t.strategy_id)!
-      e.total += Number(t.net_profit ?? 0)
+      const pnl = Number(t.net_profit ?? 0)
+      e.total += pnl
       e.count++
       e.lotsSum += Number(t.lots ?? 0)
+      if (pnl < e.worstTrade) e.worstTrade = pnl
+      if (pnl < 0) {
+        e.curConsLosses++
+        if (e.curConsLosses > e.maxConsLosses) e.maxConsLosses = e.curConsLosses
+      } else {
+        e.curConsLosses = 0
+      }
+      const ts = Date.parse(t.close_time || '') || 0
+      if (ts > 0) {
+        if (ts < e.firstTs) e.firstTs = ts
+        if (ts > e.lastTs) e.lastTs = ts
+      }
     }
 
     // Remember source account size for auto-scaling
@@ -186,6 +229,9 @@ export default function BuilderPage() {
         // baseLots: real avg lots if available, else lot_neutral scaled to target equity
         const dbLots = s.lot_neutral ?? s.lot_static ?? 0.01
         const base = realAvg > 0 ? realAvg : dbLots
+        const monthsActive = stats && stats.firstTs < Number.POSITIVE_INFINITY && stats.lastTs > 0
+          ? Math.max(1, (stats.lastTs - stats.firstTs) / (1000 * 60 * 60 * 24 * 30.44))
+          : 0
         return {
           ...s,
           selected: s.include_in_portfolio && s.status === 'active',
@@ -197,6 +243,9 @@ export default function BuilderPage() {
           visible: true,
           tradeCount: stats?.count ?? 0,
           realPnlOnAccount: stats?.total ?? 0,
+          worstTradeAcc: stats?.worstTrade ?? 0,
+          maxConsLossesAcc: stats?.maxConsLosses ?? 0,
+          monthsActiveAcc: monthsActive,
         }
       }))
     }
@@ -261,26 +310,64 @@ export default function BuilderPage() {
   // always agree on "what counts as real data right now".
   useEffect(() => {
     if (trades.length === 0 && windowDays == null) return
-    const stratStats = new Map<string, { total: number; count: number; lotsSum: number }>()
-    for (const t of effectiveTrades) {
+    interface StratAgg2 {
+      total: number
+      count: number
+      lotsSum: number
+      worstTrade: number
+      maxConsLosses: number
+      curConsLosses: number
+      firstTs: number
+      lastTs: number
+    }
+    const stratStats = new Map<string, StratAgg2>()
+    const sortedTrades = [...effectiveTrades].sort((a, b) => {
+      const ta = Date.parse(a.close_time || '') || 0
+      const tb = Date.parse(b.close_time || '') || 0
+      return ta - tb
+    })
+    for (const t of sortedTrades) {
       if (!t.strategy_id) continue
-      if (!stratStats.has(t.strategy_id)) stratStats.set(t.strategy_id, { total: 0, count: 0, lotsSum: 0 })
+      if (!stratStats.has(t.strategy_id)) stratStats.set(t.strategy_id, {
+        total: 0, count: 0, lotsSum: 0,
+        worstTrade: 0, maxConsLosses: 0, curConsLosses: 0,
+        firstTs: Number.POSITIVE_INFINITY, lastTs: 0,
+      })
       const e = stratStats.get(t.strategy_id)!
-      e.total += Number(t.net_profit ?? 0)
+      const pnl = Number(t.net_profit ?? 0)
+      e.total += pnl
       e.count++
       e.lotsSum += Number(t.lots ?? 0)
+      if (pnl < e.worstTrade) e.worstTrade = pnl
+      if (pnl < 0) {
+        e.curConsLosses++
+        if (e.curConsLosses > e.maxConsLosses) e.maxConsLosses = e.curConsLosses
+      } else {
+        e.curConsLosses = 0
+      }
+      const ts = Date.parse(t.close_time || '') || 0
+      if (ts > 0) {
+        if (ts < e.firstTs) e.firstTs = ts
+        if (ts > e.lastTs) e.lastTs = ts
+      }
     }
     setStrategies(prev => prev.map(s => {
       const stats = stratStats.get(s.id)
       const realAvg = stats && stats.count > 0 ? stats.lotsSum / stats.count : 0
+      const monthsActive = stats && stats.firstTs < Number.POSITIVE_INFINITY && stats.lastTs > 0
+        ? Math.max(1, (stats.lastTs - stats.firstTs) / (1000 * 60 * 60 * 24 * 30.44))
+        : 0
       return {
         ...s,
         realAvgLots: realAvg,
         tradeCount: stats?.count ?? 0,
         realPnlOnAccount: stats?.total ?? 0,
+        worstTradeAcc: stats?.worstTrade ?? 0,
+        maxConsLossesAcc: stats?.maxConsLosses ?? 0,
+        monthsActiveAcc: monthsActive,
       }
     }))
-  }, [effectiveTrades, windowDays])
+  }, [effectiveTrades, windowDays, trades.length])
 
   // ---- Equity curves (memoized) ----
   const curveData = useMemo(() => {
@@ -491,9 +578,11 @@ export default function BuilderPage() {
     setStrategies(prev => prev.map(s => ({ ...s, selected: false })))
   }
   function selectProfitable() {
+    // Seleziona TUTTE le strategie attive profittevoli sul conto corrente,
+    // senza soglia minima di trade (le swing con pochi trade sono legittime).
     setStrategies(prev => prev.map(s => ({
       ...s,
-      selected: s.status === 'active' && s.tradeCount >= 5 && s.realPnlOnAccount > 0,
+      selected: s.status === 'active' && s.tradeCount > 0 && s.realPnlOnAccount > 0,
     })))
   }
 
@@ -547,7 +636,39 @@ export default function BuilderPage() {
       if (dd > maxDd) maxDd = dd
     }
 
-    return { trades: stratTrades.length, winPct, payoff, expectancy, maxDd, totalPl, hasLosses: losses.length > 0 }
+    // Worst single trade and max consecutive losing streak (chronological).
+    // Used by the Simple sizing engine as a concrete worst-case per-lot floor
+    // alongside MC95.
+    const sortedByTime = [...stratTrades].sort((a, b) => {
+      const ta = Date.parse(a.close_time || '') || 0
+      const tb = Date.parse(b.close_time || '') || 0
+      return ta - tb
+    })
+    let worstTrade = 0
+    let curLossStreak = 0
+    let maxConsLosses = 0
+    for (const t of sortedByTime) {
+      const pnl = Number(t.net_profit ?? 0)
+      if (pnl < worstTrade) worstTrade = pnl
+      if (pnl < 0) {
+        curLossStreak++
+        if (curLossStreak > maxConsLosses) maxConsLosses = curLossStreak
+      } else {
+        curLossStreak = 0
+      }
+    }
+
+    return {
+      trades: stratTrades.length,
+      winPct,
+      payoff,
+      expectancy,
+      maxDd,
+      totalPl,
+      hasLosses: losses.length > 0,
+      worstTrade,
+      maxConsLosses,
+    }
   }
 
   /** Run sizing engine: Kelly + HRP + DD budget → optimal lots */
@@ -582,10 +703,16 @@ export default function BuilderPage() {
         realHasLosses: acctStats?.hasLosses ?? false,
         lotNeutral: s.lot_neutral,
         overlapMed: s.test_overlap_med,
+        // Prefer the per-account-stats value (recomputed from effective trades
+        // under the current rolling window), fall back to the row cache.
+        realWorstTrade: acctStats?.worstTrade ?? s.worstTradeAcc ?? 0,
+        realMaxConsLosses: acctStats?.maxConsLosses ?? s.maxConsLossesAcc ?? 0,
       }
     })
 
-    const result = runSizingEngine(inputs, equityBase, maxDdPct, safetyFactor, kellyMode)
+    const result = simpleSizingActive
+      ? runSimpleSizingEngine(inputs, equityBase, maxDdPct, safetyFactor)
+      : runSizingEngine(inputs, equityBase, maxDdPct, safetyFactor, kellyMode)
     setSizingOutput(result)
     setSizingMode('optimized')
 
@@ -1174,6 +1301,46 @@ export default function BuilderPage() {
   <div class="section-note" style="font-family:monospace;font-size:10px;white-space:pre-wrap;line-height:1.8">
 ${curveData.curves.sort((a, b) => a.magic - b.magic).map(c => `Magic ${String(c.magic).padStart(2)} | ${c.name.padEnd(30)} | ${String(fmtR(c.userLots, 3)).padStart(6)} lotti | ${c.stats.totalTrades} trade`).join('\n')}</div>
 
+  ${(() => {
+    // Non-selected but active strategies — info section, NOT part of the portfolio
+    // totals or risk calculations. Serves as a snapshot of the whole strategy
+    // pool at the moment the report was generated, so the user can compare
+    // selected vs. parked strategies at a glance.
+    const nonSelected = strategies.filter(s => s.status === 'active' && !s.selected)
+    if (nonSelected.length === 0) return ''
+    const sorted = [...nonSelected].sort((a, b) => (b.realPnlOnAccount ?? 0) - (a.realPnlOnAccount ?? 0))
+    return `
+  <h2>Strategie non selezionate <span style="font-size:11px;color:#94a3b8;font-weight:normal">(info, escluse dai calcoli di portafoglio)</span></h2>
+  <div class="section-note" style="margin-bottom:8px">
+    Queste ${nonSelected.length} strategie sono attive ma non sono state scelte per questo portafoglio.
+    I numeri sono calcolati sui lotti reali dell'account (non sui lotti builder).
+  </div>
+  <table>
+    <tr>
+      <th>Magic</th>
+      <th>Strategia</th>
+      <th>Asset</th>
+      <th class="text-right">Trade</th>
+      <th class="text-right">P/L reale</th>
+      <th class="text-right">Lotti reali</th>
+      <th class="text-right">Worst trade</th>
+      <th class="text-right">Max cons loss</th>
+    </tr>
+    ${sorted.map(s => `
+      <tr>
+        <td style="font-family:monospace">${s.magic}</td>
+        <td>${s.name || 'M' + s.magic}</td>
+        <td><span style="font-size:9px;padding:1px 4px;border-radius:4px;background:#f1f5f9;color:#475569">${s.asset_group || s.asset || '—'}</span></td>
+        <td class="text-right">${s.tradeCount}</td>
+        <td class="text-right" style="color:${plC(s.realPnlOnAccount ?? 0)}">${fmtM(s.realPnlOnAccount ?? 0)}</td>
+        <td class="text-right">${fmtR(s.realAvgLots ?? 0, 3)}</td>
+        <td class="text-right negative">${fmtM(s.worstTradeAcc ?? 0)}</td>
+        <td class="text-right">${s.maxConsLossesAcc ?? 0}</td>
+      </tr>
+    `).join('')}
+  </table>`
+  })()}
+
   <!-- Proiezione & Efficienza -->
   ${projectionData ? `
   <h2>Sizing Reale vs Ottimale</h2>
@@ -1340,9 +1507,33 @@ ${curveData.curves.sort((a, b) => a.magic - b.magic).map(c => `Magic ${String(c.
               <button
                 onClick={optimizeLots}
                 disabled={strategies.filter(s => s.selected).length === 0}
-                className={`px-2.5 py-1.5 text-xs rounded-lg border transition ${sizingMode === 'optimized' ? 'bg-indigo-600 border-indigo-600 text-white' : 'border-indigo-300 text-indigo-600 hover:bg-indigo-50'} disabled:opacity-50`}
+                className={`px-2.5 py-1.5 text-xs rounded-lg border transition ${sizingMode === 'optimized' ? (simpleSizingActive ? 'bg-emerald-600 border-emerald-600 text-white' : 'bg-indigo-600 border-indigo-600 text-white') : (simpleSizingActive ? 'border-emerald-300 text-emerald-700 hover:bg-emerald-50' : 'border-indigo-300 text-indigo-600 hover:bg-indigo-50')} disabled:opacity-50`}
+                title={simpleSizingActive
+                  ? 'Motore Semplice: MC95 + worst_trade × max_cons_losses, peso 1/N × overlap correction'
+                  : 'Motore Avanzato: Kelly+HRP+guardrails v3+v4'}
               >
-                Ottimizza (Kelly+HRP)
+                Ottimizza {simpleSizingActive ? '(Semplice)' : '(Kelly+HRP)'}
+              </button>
+            </div>
+          </div>
+
+          {/* Sizing engine kind toggle */}
+          <div>
+            <label className="text-[10px] uppercase text-slate-400 block mb-1">Motore</label>
+            <div className="flex gap-1 items-center">
+              <button
+                onClick={() => setSizingEngineKind('simple')}
+                className={`px-2 py-1.5 text-[11px] rounded-lg border transition ${simpleSizingActive ? 'bg-emerald-50 border-emerald-400 text-emerald-700 font-semibold' : 'border-slate-200 text-slate-500 hover:bg-slate-50'}`}
+                title="Una formula sola: (equity × maxDd% × safety / N) / max(mc95, worst_trade × max_cons_losses). Pensato per strategie swing a basso sample."
+              >
+                Semplice
+              </button>
+              <button
+                onClick={() => setSizingEngineKind('advanced')}
+                className={`px-2 py-1.5 text-[11px] rounded-lg border transition ${!simpleSizingActive ? 'bg-indigo-50 border-indigo-400 text-indigo-700 font-semibold' : 'border-slate-200 text-slate-500 hover:bg-slate-50'}`}
+                title="Kelly + HRP family-aware + guardrails v3 (zero-loss cap, bayesian shrinkage, certified edge floor) + rolling windows v4. Utile con 100+ trade per strategia."
+              >
+                Avanzato
               </button>
             </div>
           </div>
@@ -1350,15 +1541,17 @@ ${curveData.curves.sort((a, b) => a.magic - b.magic).map(c => `Magic ${String(c.
           {/* Sizing params (show when optimized) */}
           {sizingMode === 'optimized' && (
             <>
-              <div>
-                <label className="text-[10px] uppercase text-slate-400 block mb-1">Kelly</label>
-                <select value={kellyMode} onChange={e => { setKellyMode(e.target.value as KellyMode); setTimeout(optimizeLots, 50) }}
-                  className="text-xs border border-slate-200 rounded px-2 py-1.5">
-                  <option value="half_kelly">1/2 Kelly</option>
-                  <option value="quarter_kelly">1/4 Kelly</option>
-                  <option value="full_kelly">Full Kelly</option>
-                </select>
-              </div>
+              {!simpleSizingActive && (
+                <div>
+                  <label className="text-[10px] uppercase text-slate-400 block mb-1">Kelly</label>
+                  <select value={kellyMode} onChange={e => { setKellyMode(e.target.value as KellyMode); setTimeout(optimizeLots, 50) }}
+                    className="text-xs border border-slate-200 rounded px-2 py-1.5">
+                    <option value="half_kelly">1/2 Kelly</option>
+                    <option value="quarter_kelly">1/4 Kelly</option>
+                    <option value="full_kelly">Full Kelly</option>
+                  </select>
+                </div>
+              )}
               <div>
                 <label className="text-[10px] uppercase text-slate-400 block mb-1">Max DD %</label>
                 <input type="number" value={maxDdPct} onChange={e => { setMaxDdPct(Number(e.target.value)) }}
@@ -1500,8 +1693,28 @@ ${curveData.curves.sort((a, b) => a.magic - b.magic).map(c => `Magic ${String(c.
               const warningsText = sizingRes?.sizingWarnings?.length
                 ? sizingRes.sizingWarnings.join('\n')
                 : null
+              // Info metrics: two at-a-glance numbers that answer
+              // "how fragile is this edge right now?" without touching sizing.
+              //   killswitch = MC95 DD (at equityBase) / |worstTrade_on_account|
+              //     → how many worst-trades in a row before we hit MC95 DD.
+              //   recovery   = MC95 DD / avg monthly P/L on this account
+              //     → how many months to recover a typical MC95 DD.
+              // Both are nullable: when the sample is too thin we show "—".
+              const lotNeutral = s.lot_neutral && s.lot_neutral > 0 ? s.lot_neutral : 1
+              const scaleToBuilder = s.userLots > 0 && lotNeutral > 0 ? s.userLots / lotNeutral : 1
+              const mc95AtBuilderLots = (s.mc95_dd_scaled ?? s.test_mc95_dd ?? 0) * scaleToBuilder
+              const worstTradeScaled = Math.abs(s.worstTradeAcc ?? 0) * scaleToBuilder
+              const killswitchTrades = worstTradeScaled > 0 && mc95AtBuilderLots > 0
+                ? Math.max(1, Math.round(mc95AtBuilderLots / worstTradeScaled))
+                : null
+              const monthlyPnlScaled = s.monthsActiveAcc > 0 && s.tradeCount > 0
+                ? (s.realPnlOnAccount * scaleToBuilder) / s.monthsActiveAcc
+                : 0
+              const recoveryMonths = monthlyPnlScaled > 0 && mc95AtBuilderLots > 0
+                ? Math.max(1, Math.round(mc95AtBuilderLots / monthlyPnlScaled))
+                : null
               return (
-                <tr key={s.id} className={`border-b border-slate-50 ${s.selected ? 'bg-indigo-50/30' : 'opacity-50'} hover:bg-slate-50`}>
+                <tr key={s.id} className={`border-b border-slate-50 ${s.selected ? 'bg-indigo-50/30' : 'bg-slate-50/40 text-slate-500'} hover:bg-slate-50`}>
                   <td className="px-2 py-1.5">
                     <input type="checkbox" checked={s.selected} onChange={() => toggleStrategy(s.id)}
                       className="w-4 h-4 rounded border-slate-300 text-indigo-600 cursor-pointer" />
@@ -1520,7 +1733,19 @@ ${curveData.curves.sort((a, b) => a.magic - b.magic).map(c => `Magic ${String(c.
                     )}
                   </td>
                   <td className="px-2 py-1.5 font-mono text-slate-600 text-xs">{s.magic}</td>
-                  <td className="px-2 py-1.5 font-medium text-slate-800 text-xs max-w-[180px] truncate">{s.name}</td>
+                  <td className="px-2 py-1.5 max-w-[220px]">
+                    <div className={`font-medium text-xs truncate ${s.selected ? 'text-slate-800' : 'text-slate-500'}`}>{s.name}</div>
+                    {(killswitchTrades != null || recoveryMonths != null) && (
+                      <div
+                        className="text-[9px] text-slate-400 font-mono truncate"
+                        title={`Killswitch: ${killswitchTrades ?? '—'} worst trade consecutivi prima di sfondare il MC95 (${fmtUsd(mc95AtBuilderLots)})\nRecovery: ~${recoveryMonths ?? '—'} mesi per recuperare un MC95 DD al ritmo attuale`}
+                      >
+                        {killswitchTrades != null ? `KS ${killswitchTrades}t` : 'KS —'}
+                        {' · '}
+                        {recoveryMonths != null ? `Rec ${recoveryMonths}m` : 'Rec —'}
+                      </div>
+                    )}
+                  </td>
                   <td className="px-2 py-1.5">
                     <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${groupColor(s.asset_group)}`}>{s.asset_group}</span>
                   </td>

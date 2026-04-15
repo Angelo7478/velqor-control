@@ -1049,6 +1049,18 @@ export interface SizingInput {
   realHasLosses: boolean
   lotNeutral: number | null
   overlapMed: number | null
+  /**
+   * Worst single trade on the per-account sample (most negative net_profit).
+   * Always <= 0. Used by the simple sizing engine to cap per-lot risk at the
+   * realistic worst-case observed, independent of Kelly math.
+   */
+  realWorstTrade: number
+  /**
+   * Longest run of consecutive losing trades observed on the account sample.
+   * Combined with realWorstTrade gives a concrete worst-case drawdown
+   * estimate (worstTrade * maxConsLosses) that complements MC95.
+   */
+  realMaxConsLosses: number
 }
 
 export interface SizingResult {
@@ -1091,6 +1103,185 @@ export interface PortfolioSizingOutput {
   styleBalance: Record<string, number>
   familyBalance: Record<string, { weight: number; strategies: number }>
   results: SizingResult[]
+}
+
+/**
+ * Simple sizing engine (institutional, swing-friendly, 2026-04-15).
+ *
+ * Philosophy: one formula, no Kelly, no HRP, no Bayesian shrinkage, no floors.
+ * Built for low-frequency strategies where sample is small by design and the
+ * v2/v3 machinery overfits to noise.
+ *
+ * Per strategy:
+ *   worst_case_per_lot = MAX(mc95_per_lot, worstTrade × maxConsLosses)
+ *   per_strategy_weight = (1 / N) × overlap_correction
+ *   overlap_correction  = 1 / sqrt(1 + (N − 1) × avgOverlap)
+ *   budget_strategy     = equity × maxDd% × safety × per_strategy_weight
+ *   lots                = budget_strategy / worst_case_per_lot
+ *
+ * Guardrail (only one): hard veto when realTrades ≥ 20 and realPl < 0.
+ * Total DD budget rescale applied at the end if sum(lots × worst_case) exceeds
+ * the budget (same mechanism as v3).
+ */
+export function runSimpleSizingEngine(
+  strategies: SizingInput[],
+  equityBase: number,
+  maxDdTargetPct: number,
+  safetyFactor: number
+): PortfolioSizingOutput {
+  const NEGATIVE_PL_MIN_TRADES = 20
+
+  const ddBudgetUsd = equityBase * (maxDdTargetPct / 100) * safetyFactor
+
+  // Helper — worst_case_per_lot: the denominator for each strategy's sizing.
+  function worstCasePerLot(s: SizingInput): number {
+    // MC95 per lot, using the same normalization as v3.
+    let mc95PL = 0
+    if (s.mc95DdScaled && s.lotNeutral && s.lotNeutral > 0) {
+      mc95PL = s.mc95DdScaled / s.lotNeutral
+    } else if (s.testMc95Dd) {
+      mc95PL = s.lotNeutral && s.lotNeutral > 0 ? s.testMc95Dd / s.lotNeutral : s.testMc95Dd
+    } else if (s.testMaxDd && s.testMaxDd > 0) {
+      mc95PL = s.lotNeutral && s.lotNeutral > 0 ? s.testMaxDd / s.lotNeutral : s.testMaxDd
+    } else if (s.realMaxDd > 0 && s.realTrades >= 10) {
+      mc95PL = s.realMaxDd
+    }
+
+    // Concrete worst case from real sample: worst single trade × max consecutive losses.
+    // Both are at the real trade size, so we must normalize per-lot via lotNeutral.
+    // When lotNeutral is missing, we conservatively use the raw value.
+    const worstRun = Math.abs(s.realWorstTrade || 0) * (s.realMaxConsLosses || 0)
+    const worstRunPerLot = s.lotNeutral && s.lotNeutral > 0 && worstRun > 0
+      ? worstRun / s.lotNeutral
+      : worstRun
+
+    return Math.max(mc95PL, worstRunPerLot)
+  }
+
+  // Overlap correction — fewer effectively-independent bets when strategies overlap.
+  const overlaps = strategies
+    .map(s => (s.overlapMed ?? 0))
+    .filter(o => o > 0 && o <= 1)
+  const avgOverlap = overlaps.length > 0
+    ? overlaps.reduce((a, b) => a + b, 0) / overlaps.length
+    : 0
+  const N = strategies.length || 1
+  const overlapCorrection = 1 / Math.sqrt(1 + Math.max(0, N - 1) * avgOverlap)
+  const perStrategyWeight = (1 / N) * overlapCorrection
+
+  const results: SizingResult[] = []
+
+  for (const s of strategies) {
+    const r: SizingResult = {
+      strategyId: s.strategyId,
+      kellyF: null,
+      halfKelly: null,
+      quarterKelly: null,
+      rorPct: null,
+      ddBudgetPct: perStrategyWeight * 100,
+      ddBudgetUsd: ddBudgetUsd * perStrategyWeight,
+      hrpWeight: perStrategyWeight,
+      family: s.family,
+      recommendedLots: 0,
+      currentLots: s.lotNeutral,
+      lotsChangePct: null,
+      fitnessScore: 0,
+      fitnessDetails: {},
+      fractionMethod: 'simple_dd_budget',
+      skipReason: null,
+      sizingWarnings: [],
+      sampleConfidence: 1,
+    }
+
+    // Hard veto — negative P/L on meaningful sample.
+    if (s.realTrades >= NEGATIVE_PL_MIN_TRADES && s.realPl < 0) {
+      r.skipReason = 'negative_real_pl'
+      r.sizingWarnings.push(
+        `Real P/L negativo ($${s.realPl.toFixed(0)}) su ${s.realTrades} trade → esclusa`
+      )
+      results.push(r)
+      continue
+    }
+
+    const wcpl = worstCasePerLot(s)
+    if (wcpl > 0) {
+      r.recommendedLots = Math.floor((r.ddBudgetUsd / wcpl) * 100) / 100
+    } else if (s.lotNeutral && s.lotNeutral > 0) {
+      r.recommendedLots = s.lotNeutral
+      r.sizingWarnings.push('Nessun MC95/worst trade → fallback lot_neutral')
+    }
+
+    // Annotate which worst-case leg dominated, useful for tooltips.
+    const mc95PartRaw = (s.mc95DdScaled && s.lotNeutral) ? s.mc95DdScaled / s.lotNeutral : (s.testMc95Dd ?? 0)
+    const worstRunRaw = Math.abs(s.realWorstTrade || 0) * (s.realMaxConsLosses || 0)
+    const worstRunPL = s.lotNeutral && s.lotNeutral > 0 ? worstRunRaw / s.lotNeutral : worstRunRaw
+    if (worstRunPL > mc95PartRaw && worstRunPL > 0) {
+      r.sizingWarnings.push(
+        `Worst-case dominato da worst_trade×maxConsLosses ($${worstRunRaw.toFixed(0)})`
+      )
+    }
+
+    results.push(r)
+  }
+
+  // Final rescale — if the sum of actual DD (lots × worst_case) exceeds
+  // the total budget, shrink all non-vetoed strategies proportionally.
+  let totalDdUsed = 0
+  for (let i = 0; i < strategies.length; i++) {
+    const r = results[i]
+    if (r.skipReason) continue
+    const wcpl = worstCasePerLot(strategies[i])
+    totalDdUsed += r.recommendedLots * wcpl
+  }
+  if (totalDdUsed > ddBudgetUsd && totalDdUsed > 0) {
+    const rescale = ddBudgetUsd / totalDdUsed
+    for (let i = 0; i < strategies.length; i++) {
+      const r = results[i]
+      if (r.skipReason) continue
+      r.recommendedLots = Math.floor(r.recommendedLots * rescale * 100) / 100
+      r.sizingWarnings.push(`Rescale portafoglio ×${rescale.toFixed(2)} per rispettare DD budget`)
+    }
+  }
+
+  // Min lot clamp (0.01) for non-vetoed survivors.
+  for (const r of results) {
+    if (!r.skipReason && r.recommendedLots > 0 && r.recommendedLots < 0.01) {
+      r.recommendedLots = 0.01
+    }
+  }
+
+  // Recompute actual totals for the output summary.
+  let finalDdUsed = 0
+  const familyBalance: Record<string, { weight: number; strategies: number }> = {}
+  const styleBalance: Record<string, number> = {}
+  const familyIds = new Set<string>()
+  for (let i = 0; i < strategies.length; i++) {
+    const r = results[i]
+    const s = strategies[i]
+    if (!r.skipReason) {
+      const wcpl = worstCasePerLot(s)
+      finalDdUsed += r.recommendedLots * wcpl
+    }
+    const fam = s.family || `solo_${s.magic}`
+    familyIds.add(fam)
+    if (!familyBalance[fam]) familyBalance[fam] = { weight: 0, strategies: 0 }
+    familyBalance[fam].weight += r.ddBudgetPct
+    familyBalance[fam].strategies++
+    const style = s.style || 'unknown'
+    styleBalance[style] = (styleBalance[style] || 0) + r.ddBudgetPct
+  }
+
+  return {
+    totalDdBudgetUsedPct: ddBudgetUsd > 0 ? (finalDdUsed / ddBudgetUsd) * 100 : 0,
+    totalDdBudgetUsedUsd: finalDdUsed,
+    ddBudgetAvailableUsd: ddBudgetUsd,
+    strategyCount: strategies.length,
+    familyCount: familyIds.size,
+    avgRor: null,
+    styleBalance,
+    familyBalance,
+    results,
+  }
 }
 
 /**

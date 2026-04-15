@@ -188,6 +188,10 @@ export default function SizingPage() {
         realHasLosses: hasData && a._accountPayoff != null && a._accountPayoff > 0,
         lotNeutral: s.lot_neutral,
         overlapMed: s.test_overlap_med,
+        // Worst-case fields — this page doesn't compute trade-level telemetry,
+        // so we feed 0/0 and the engine falls back to MC95 alone (safe default).
+        realWorstTrade: 0,
+        realMaxConsLosses: 0,
       }
     })
 
