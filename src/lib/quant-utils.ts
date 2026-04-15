@@ -1113,14 +1113,26 @@ export interface PortfolioSizingOutput {
  * v2/v3 machinery overfits to noise.
  *
  * Per strategy:
- *   worst_case_per_lot = MAX(mc95_per_lot, worstTrade × maxConsLosses)
+ *   mc95_per_lot        = MC95 DD normalised per 1 lot (test data first,
+ *                         falls back to worst_trade × max_cons_losses, then
+ *                         to test_max_dd, then to real_max_dd).
  *   per_strategy_weight = (1 / N) × overlap_correction
  *   overlap_correction  = 1 / sqrt(1 + (N − 1) × avgOverlap)
  *   budget_strategy     = equity × maxDd% × safety × per_strategy_weight
- *   lots                = budget_strategy / worst_case_per_lot
+ *   lots                = budget_strategy / mc95_per_lot
+ *
+ * Design notes:
+ * - MC95 is already a stressed Monte Carlo percentile of drawdown, so using
+ *   it alone as the sizing denominator is the classical institutional move.
+ * - worstTrade × maxConsLosses used to be folded into the denominator via
+ *   a MAX(), but on swing samples that product explodes and collapses sizing
+ *   (it behaves like a Bayesian penalty under another name). It now only
+ *   acts as a FALLBACK when the backtest did not ship an MC95 number.
+ * - The two telemetry fields (realWorstTrade, realMaxConsLosses) are still
+ *   consumed by the builder UI for the "killswitch / recovery" info chips.
  *
  * Guardrail (only one): hard veto when realTrades ≥ 20 and realPl < 0.
- * Total DD budget rescale applied at the end if sum(lots × worst_case) exceeds
+ * Total DD budget rescale applied at the end if sum(lots × mc95) exceeds
  * the budget (same mechanism as v3).
  */
 export function runSimpleSizingEngine(
@@ -1134,28 +1146,31 @@ export function runSimpleSizingEngine(
   const ddBudgetUsd = equityBase * (maxDdTargetPct / 100) * safetyFactor
 
   // Helper — worst_case_per_lot: the denominator for each strategy's sizing.
+  // Priority chain:
+  //   1. mc95_dd_scaled / lot_neutral       (preferred, already per 1 lot)
+  //   2. test_mc95_dd normalised per lot    (from backtest)
+  //   3. worstTrade × maxConsLosses         (fallback: only when MC95 missing)
+  //   4. test_max_dd normalised per lot
+  //   5. real_max_dd (with enough sample)
   function worstCasePerLot(s: SizingInput): number {
-    // MC95 per lot, using the same normalization as v3.
-    let mc95PL = 0
     if (s.mc95DdScaled && s.lotNeutral && s.lotNeutral > 0) {
-      mc95PL = s.mc95DdScaled / s.lotNeutral
-    } else if (s.testMc95Dd) {
-      mc95PL = s.lotNeutral && s.lotNeutral > 0 ? s.testMc95Dd / s.lotNeutral : s.testMc95Dd
-    } else if (s.testMaxDd && s.testMaxDd > 0) {
-      mc95PL = s.lotNeutral && s.lotNeutral > 0 ? s.testMaxDd / s.lotNeutral : s.testMaxDd
-    } else if (s.realMaxDd > 0 && s.realTrades >= 10) {
-      mc95PL = s.realMaxDd
+      return s.mc95DdScaled / s.lotNeutral
     }
-
-    // Concrete worst case from real sample: worst single trade × max consecutive losses.
-    // Both are at the real trade size, so we must normalize per-lot via lotNeutral.
-    // When lotNeutral is missing, we conservatively use the raw value.
+    if (s.testMc95Dd) {
+      return s.lotNeutral && s.lotNeutral > 0 ? s.testMc95Dd / s.lotNeutral : s.testMc95Dd
+    }
+    // Fallback: concrete worst-case from real sample.
     const worstRun = Math.abs(s.realWorstTrade || 0) * (s.realMaxConsLosses || 0)
-    const worstRunPerLot = s.lotNeutral && s.lotNeutral > 0 && worstRun > 0
-      ? worstRun / s.lotNeutral
-      : worstRun
-
-    return Math.max(mc95PL, worstRunPerLot)
+    if (worstRun > 0) {
+      return s.lotNeutral && s.lotNeutral > 0 ? worstRun / s.lotNeutral : worstRun
+    }
+    if (s.testMaxDd && s.testMaxDd > 0) {
+      return s.lotNeutral && s.lotNeutral > 0 ? s.testMaxDd / s.lotNeutral : s.testMaxDd
+    }
+    if (s.realMaxDd > 0 && s.realTrades >= 10) {
+      return s.realMaxDd
+    }
+    return 0
   }
 
   // Overlap correction — fewer effectively-independent bets when strategies overlap.

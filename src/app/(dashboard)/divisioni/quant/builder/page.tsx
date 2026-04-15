@@ -396,12 +396,20 @@ export default function BuilderPage() {
     return calcPortfolioMargin(inputs, equityBase)
   }, [strategies, equityBase, refPrices])
 
-  // ---- Sizing Advisor (memoized) — analyzes ALL active strategies independently ----
+  // ---- Sizing Advisor (memoized) — analyses the strategies the user has
+  // SELECTED. If no selection is active yet it falls back to the full active
+  // pool so the first-time view still shows something useful, but as soon as
+  // a selection exists the advisor is scoped to it. This matches the mental
+  // model "the builder is a portfolio workbench — the advisor adjusts that
+  // portfolio, it does not redraw it from scratch". ----
   const advisorData = useMemo<AdvisorSummary | null>(() => {
-    const active = strategies.filter(s => s.status === 'active')
-    if (active.length === 0 || effectiveTrades.length === 0) return null
+    const selected = strategies.filter(s => s.selected && s.status === 'active')
+    const pool = selected.length > 0
+      ? selected
+      : strategies.filter(s => s.status === 'active')
+    if (pool.length === 0 || effectiveTrades.length === 0) return null
 
-    const inputs: AdvisorInput[] = active.map(s => {
+    const inputs: AdvisorInput[] = pool.map(s => {
       // Compute per-strategy stats from trades (v4: windowed)
       const stratTrades = effectiveTrades.filter(t => t.strategy_id === s.id)
       const wins = stratTrades.filter(t => t.net_profit > 0)
@@ -538,22 +546,28 @@ export default function BuilderPage() {
     return { efficiency, projection }
   }, [strategies, effectiveTrades, equityBase, sizingOutput, curveData])
 
-  // ---- Apply advisor portfolio: select/deselect strategies + set lots ----
+  // ---- Apply advisor portfolio: update lots on selected strategies only ----
+  // Rule: the advisor NEVER re-adds a strategy the user has deselected. It
+  // only touches strategies that are already part of the working set. Within
+  // that set, "included" rows get the advisor's suggested lots, "excluded"
+  // rows get deselected (so the user can see the advisor flagged them out),
+  // and rows the advisor didn't score are left exactly as they were.
   function applyAdvisorPortfolio() {
     if (!advisorData) return
-    const includedIds = new Set(advisorData.included.map(r => r.strategyId))
+    const hasSelection = strategies.some(s => s.selected)
     setStrategies(prev => prev.map(s => {
+      // If there was a user selection, the advisor is scoped to it: anything
+      // outside the selection must remain untouched (and stay deselected).
+      if (hasSelection && !s.selected) return s
+
       const inc = advisorData.included.find(r => r.strategyId === s.id)
       if (inc) {
-        // Include: select + set suggested lots
         return { ...s, selected: true, userLots: inc.suggestedLots, manualOverride: true }
       }
       const exc = advisorData.excluded.find(r => r.strategyId === s.id)
       if (exc) {
-        // Exclude: deselect
         return { ...s, selected: false }
       }
-      // Not analyzed (e.g. paused) — leave unchanged
       return s
     }))
   }
