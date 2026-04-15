@@ -1040,6 +1040,13 @@ export interface SizingInput {
   realMaxDd: number
   realExpectancy: number | null
   realPl: number
+  /**
+   * True if the per-account real sample has at least one losing trade.
+   * When false with realTrades > 0, Kelly is uncomputable (payoff = ∞)
+   * and the engine must fall back to a conservative cap instead of
+   * blindly using test_payoff.
+   */
+  realHasLosses: boolean
   lotNeutral: number | null
   overlapMed: number | null
 }
@@ -1060,6 +1067,18 @@ export interface SizingResult {
   fitnessScore: number
   fitnessDetails: Record<string, number>
   fractionMethod: string
+  /**
+   * Institutional sizing guardrails (v3, 2026-04-15).
+   * `skipReason` — when non-null the strategy has been hard-excluded from
+   * the portfolio (recommendedLots forced to 0). Reasons:
+   *   - "negative_real_pl"      → sample loss-making, no positive expectancy
+   *   - "insufficient_sample"   → too few trades to trust
+   * `sizingWarnings` — soft annotations (caps, shrinkage, floors applied).
+   * `sampleConfidence` — 0..1 Bayesian shrinkage factor from realTrades.
+   */
+  skipReason: string | null
+  sizingWarnings: string[]
+  sampleConfidence: number
 }
 
 export interface PortfolioSizingOutput {
@@ -1094,6 +1113,31 @@ export function runSizingEngine(
   const ddBudgetUsd = equityBase * (maxDdTargetPct / 100) * safetyFactor
   const results: SizingResult[] = []
   const styleCount: Record<string, number> = {}
+
+  // ── Institutional sizing guardrails (v3, 2026-04-15) ──────────────────
+  // Tuned after observing the builder allocate positive size to a losing
+  // strategy and inflate small-sample zero-loss strategies (see
+  // account_ftmo_100k_f.md → Lessons learned step1→step2).
+  //
+  //  A. NEGATIVE_PL_MIN_TRADES : once a strategy has enough live data to
+  //     be judged, a negative total P/L on the account sample is a hard
+  //     veto. Below the threshold the sample is still too small to trust.
+  //  B. ZERO_LOSS_CAP_FRAC     : when the real sample has zero losing
+  //     trades (Kelly uncomputable), cap lots to a fraction of lotNeutral
+  //     instead of falling back to test_payoff (which gets scaled up).
+  //  C. SAMPLE_CONFIDENCE_REF  : Bayesian shrinkage reference — below
+  //     this trade count the recommended lots are multiplied by
+  //     sqrt(realTrades / ref). 100 trades = full confidence.
+  //  D. CERTIFIED_EDGE_*       : strategies with robust live evidence
+  //     receive a minimum lot floor so that volatile-asset penalisation
+  //     cannot push a proven edge into irrelevance.
+  const NEGATIVE_PL_MIN_TRADES = 20
+  const ZERO_LOSS_MIN_TRADES = 30       // below this, zero-loss ⇒ cap
+  const ZERO_LOSS_CAP_FRAC = 0.5        // max 0.5 × lotNeutral
+  const SAMPLE_CONFIDENCE_REF = 100
+  const CERTIFIED_EDGE_MIN_TRADES = 100
+  const CERTIFIED_EDGE_MIN_KELLY = 0.3
+  const CERTIFIED_EDGE_FLOOR_FRAC = 0.3 // min 0.3 × lotNeutral
 
   // Step 1: Calculate Kelly and fitness per strategy
   for (const s of strategies) {
@@ -1144,6 +1188,9 @@ export function runSizingEngine(
       fitnessScore: fitnessResult.score,
       fitnessDetails: fitnessResult.details,
       fractionMethod: kellyMode,
+      skipReason: null,
+      sizingWarnings: [],
+      sampleConfidence: 1,
     })
   }
 
@@ -1208,13 +1255,92 @@ export function runSizingEngine(
       r.recommendedLots = s.lotNeutral
     }
 
-    // RoR cap
-    if (r.rorPct !== null && r.rorPct > 0.05) {
+    // ── Guardrail A: negative real P/L hard veto ──────────────────────
+    // Once a strategy has >= NEGATIVE_PL_MIN_TRADES on the account sample
+    // and the cumulative P/L is still negative, stop allocating capital.
+    // This prevents the HRP+Kelly engine from scaling a loser into the red.
+    if (s.realTrades >= NEGATIVE_PL_MIN_TRADES && s.realPl < 0) {
+      r.recommendedLots = 0
+      r.skipReason = 'negative_real_pl'
+      r.sizingWarnings.push(
+        `Real P/L negativo ($${s.realPl.toFixed(0)}) su ${s.realTrades} trade → esclusa dal portafoglio`
+      )
+    }
+
+    // ── Guardrail B: zero-loss small-sample cap ───────────────────────
+    // When the sample has no losing trades, Kelly is uncomputable. The
+    // engine was falling back to test_payoff (backtest) and inflating the
+    // size. Cap to ZERO_LOSS_CAP_FRAC × lotNeutral until enough losses
+    // appear to compute a live payoff.
+    if (
+      !r.skipReason &&
+      s.realTrades > 0 &&
+      !s.realHasLosses &&
+      s.realTrades < ZERO_LOSS_MIN_TRADES &&
+      s.lotNeutral &&
+      s.lotNeutral > 0
+    ) {
+      const cap = s.lotNeutral * ZERO_LOSS_CAP_FRAC
+      if (r.recommendedLots > cap) {
+        r.sizingWarnings.push(
+          `0 perdite in ${s.realTrades} trade → Kelly non calibrabile, cap a ${cap.toFixed(2)}`
+        )
+        r.recommendedLots = Math.floor(cap * 100) / 100
+      }
+    }
+
+    // ── Guardrail C: Bayesian sample-confidence shrinkage ─────────────
+    // Below SAMPLE_CONFIDENCE_REF trades, shrink lots by
+    // sqrt(realTrades / ref). This is a classic shrinkage estimator:
+    // small samples get pulled toward zero, 100+ trades pass through.
+    // Applied only if the strategy has at least some real data;
+    // pure-backtest strategies (realTrades == 0) keep their HRP lots.
+    if (!r.skipReason && s.realTrades > 0 && s.realTrades < SAMPLE_CONFIDENCE_REF) {
+      const confidence = Math.sqrt(s.realTrades / SAMPLE_CONFIDENCE_REF)
+      r.sampleConfidence = confidence
+      const before = r.recommendedLots
+      r.recommendedLots = Math.floor(r.recommendedLots * confidence * 100) / 100
+      if (before > 0 && r.recommendedLots < before) {
+        r.sizingWarnings.push(
+          `Sample confidence ${(confidence * 100).toFixed(0)}% (${s.realTrades}/${SAMPLE_CONFIDENCE_REF} trade) → lots ${before.toFixed(2)}→${r.recommendedLots.toFixed(2)}`
+        )
+      }
+    } else if (s.realTrades >= SAMPLE_CONFIDENCE_REF) {
+      r.sampleConfidence = 1
+    } else {
+      // realTrades === 0 → no live evidence, confidence undefined
+      r.sampleConfidence = 0
+    }
+
+    // ── Guardrail D: certified-edge minimum floor ─────────────────────
+    // Strategies with robust live evidence (>= CERTIFIED_EDGE_MIN_TRADES,
+    // positive P/L, Kelly above CERTIFIED_EDGE_MIN_KELLY) receive a floor
+    // at CERTIFIED_EDGE_FLOOR_FRAC × lotNeutral. Prevents volatile-asset
+    // max-loss normalisation from drowning a proven edge.
+    if (
+      !r.skipReason &&
+      s.realTrades >= CERTIFIED_EDGE_MIN_TRADES &&
+      s.realPl > 0 &&
+      (r.kellyF ?? 0) > CERTIFIED_EDGE_MIN_KELLY &&
+      s.lotNeutral &&
+      s.lotNeutral > 0
+    ) {
+      const floor = s.lotNeutral * CERTIFIED_EDGE_FLOOR_FRAC
+      if (r.recommendedLots < floor) {
+        r.sizingWarnings.push(
+          `Certified edge (${s.realTrades} trade, Kelly ${(r.kellyF ?? 0).toFixed(2)}) → floor a ${floor.toFixed(2)}`
+        )
+        r.recommendedLots = Math.floor(floor * 100) / 100
+      }
+    }
+
+    // RoR cap (skip if already vetoed)
+    if (!r.skipReason && r.rorPct !== null && r.rorPct > 0.05) {
       r.recommendedLots = Math.floor(r.recommendedLots * 0.9 * 100) / 100
     }
 
-    // Min lot
-    if (r.recommendedLots < 0.01) r.recommendedLots = 0.01
+    // Min lot — but never resurrect a skipped strategy
+    if (!r.skipReason && r.recommendedLots < 0.01) r.recommendedLots = 0.01
 
     // Change %
     if (r.currentLots && r.currentLots > 0) {
@@ -1236,6 +1362,7 @@ export function runSizingEngine(
   if (totalDdUsed > ddBudgetUsd && ddBudgetUsd > 0) {
     const scaleFactor = ddBudgetUsd / totalDdUsed
     for (const r of results) {
+      if (r.skipReason) continue // keep vetoed strategies at 0
       r.recommendedLots = Math.floor(r.recommendedLots * scaleFactor * 100) / 100
       if (r.recommendedLots < 0.01) r.recommendedLots = 0.01
     }

@@ -498,7 +498,7 @@ export default function BuilderPage() {
       if (dd > maxDd) maxDd = dd
     }
 
-    return { trades: stratTrades.length, winPct, payoff, expectancy, maxDd, totalPl }
+    return { trades: stratTrades.length, winPct, payoff, expectancy, maxDd, totalPl, hasLosses: losses.length > 0 }
   }
 
   /** Run sizing engine: Kelly + HRP + DD budget → optimal lots */
@@ -530,6 +530,7 @@ export default function BuilderPage() {
         realMaxDd: acctStats?.maxDd ?? 0,
         realExpectancy: acctStats?.expectancy ?? null,
         realPl: acctStats?.totalPl ?? 0,
+        realHasLosses: acctStats?.hasLosses ?? false,
         lotNeutral: s.lot_neutral,
         overlapMed: s.test_overlap_med,
       }
@@ -1396,6 +1397,15 @@ ${curveData.curves.sort((a, b) => a.magic - b.magic).map(c => `Magic ${String(c.
             {strategies.filter(s => s.status === 'active').map(s => {
               const curve = curveData?.curves.find(c => c.strategyId === s.id)
               const scaledPnl = curve?.stats.totalPnl ?? null
+              const sizingRes = sizingOutput?.results.find(r => r.strategyId === s.id) ?? null
+              const skipReasonLabel = sizingRes?.skipReason === 'negative_real_pl'
+                ? 'Esclusa: P/L reale negativo sul sample — nessuna allocazione finché non torna positiva'
+                : sizingRes?.skipReason
+                  ? `Esclusa: ${sizingRes.skipReason}`
+                  : null
+              const warningsText = sizingRes?.sizingWarnings?.length
+                ? sizingRes.sizingWarnings.join('\n')
+                : null
               return (
                 <tr key={s.id} className={`border-b border-slate-50 ${s.selected ? 'bg-indigo-50/30' : 'opacity-50'} hover:bg-slate-50`}>
                   <td className="px-2 py-1.5">
@@ -1436,12 +1446,30 @@ ${curveData.curves.sort((a, b) => a.magic - b.magic).map(c => `Magic ${String(c.
                         <input
                           type="number"
                           step="0.01"
-                          min="0.01"
+                          min="0"
                           value={s.userLots}
                           onChange={e => setLots(s.id, parseFloat(e.target.value) || 0.01)}
-                          className="w-16 text-xs text-center border border-slate-200 rounded px-1 py-1 font-mono"
+                          className={`w-16 text-xs text-center border rounded px-1 py-1 font-mono ${
+                            skipReasonLabel
+                              ? 'border-red-300 bg-red-50 text-red-700'
+                              : warningsText
+                                ? 'border-amber-300 bg-amber-50'
+                                : 'border-slate-200'
+                          }`}
                           onClick={e => e.stopPropagation()}
                         />
+                        {skipReasonLabel && (
+                          <span
+                            className="text-xs cursor-help"
+                            title={skipReasonLabel}
+                          >🚫</span>
+                        )}
+                        {!skipReasonLabel && warningsText && (
+                          <span
+                            className="text-xs cursor-help"
+                            title={warningsText}
+                          >⚠️</span>
+                        )}
                       </div>
                     ) : (
                       <span className="text-xs text-slate-400 text-center block">{fmt(s.lot_neutral ?? s.lot_static, 3)}</span>

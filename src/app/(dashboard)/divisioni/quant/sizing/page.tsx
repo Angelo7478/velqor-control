@@ -184,6 +184,8 @@ export default function SizingPage() {
         realMaxDd: hasData ? a._accountMaxDd : 0,
         realExpectancy: hasData ? a._accountAvgTrade : null,
         realPl: hasData ? a._accountPnl : 0,
+        // hasLosses derivata: payoff > 0 ⇒ avgLoss > 0 ⇒ almeno una perdita
+        realHasLosses: hasData && a._accountPayoff != null && a._accountPayoff > 0,
         lotNeutral: s.lot_neutral,
         overlapMed: s.test_overlap_med,
       }
