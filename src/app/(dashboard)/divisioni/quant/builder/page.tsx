@@ -2262,6 +2262,39 @@ ${curveData.curves.sort((a, b) => a.magic - b.magic).map(c => `Magic ${String(c.
             <div className="bg-white rounded-xl border border-slate-200 p-4">
               <h3 className="text-sm font-semibold text-slate-700 mb-3">Portfolio Combinato</h3>
               <StatsGrid stats={curveData.portfolioStats} equityBase={equityBase} />
+              {/* Temporal analysis — monthly averages */}
+              {(() => {
+                const allDates = curveData.combined.map(p => p.closeTime).sort()
+                if (allDates.length < 2) return null
+                const firstD = new Date(allDates[0])
+                const lastD = new Date(allDates[allDates.length - 1])
+                const durationDays = Math.max(1, Math.round((lastD.getTime() - firstD.getTime()) / 86400000))
+                const durationMonths = Math.max(0.1, durationDays / 30.44)
+                const totalPnl = curveData.portfolioStats.totalPnl
+                const returnPct = equityBase > 0 ? (totalPnl / equityBase) * 100 : 0
+                const pnlPerMonth = totalPnl / durationMonths
+                const rendMensile = returnPct / durationMonths
+                const annualPnl = pnlPerMonth * 12
+                const annualRet = rendMensile * 12
+                // Monthly P/L breakdown for profitable months count
+                const mPnl = new Map<string, number>()
+                for (const p of curveData.combined) {
+                  const k = p.closeTime.slice(0, 7)
+                  mPnl.set(k, (mPnl.get(k) || 0) + (p.pnl || 0))
+                }
+                const totalM = mPnl.size
+                const profitM = [...mPnl.values()].filter(v => v > 0).length
+                const trPerMonth = curveData.portfolioStats.totalTrades / durationMonths
+                return (
+                  <div className="mt-3 pt-3 border-t border-slate-100 grid grid-cols-3 sm:grid-cols-5 gap-3">
+                    <StatBox label="P/L Mensile" value={fmtUsd(pnlPerMonth)} color={plColor(pnlPerMonth)} sub={fmtPct(rendMensile, 2)} />
+                    <StatBox label="Proiezione Annua" value={fmtUsd(annualPnl)} color={plColor(annualPnl)} sub={fmtPct(annualRet, 1)} />
+                    <StatBox label="Mesi Profittevoli" value={`${profitM}/${totalM}`} color={profitM >= totalM * 0.7 ? 'text-green-600' : 'text-amber-600'} />
+                    <StatBox label="Trade/Mese" value={fmt(trPerMonth, 1)} />
+                    <StatBox label="Durata" value={`${fmt(durationMonths, 1)} mesi`} sub={`${durationDays}g`} />
+                  </div>
+                )
+              })()}
             </div>
 
             {/* Per-strategy stats */}
