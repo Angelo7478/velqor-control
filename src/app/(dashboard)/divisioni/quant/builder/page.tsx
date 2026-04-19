@@ -16,6 +16,7 @@ import {
 } from '@/lib/quant-utils'
 import QuantNav from '../quant-nav'
 import { VELQOR_LOGO_BASE64 } from '@/lib/velqor-logo'
+import { myfxbookUrlFor } from '@/lib/myfxbook'
 import InfoTooltip from '@/components/ui/InfoTooltip'
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend,
@@ -904,13 +905,6 @@ export default function BuilderPage() {
   }
 
   // ---- Generate full report ----
-  // Third-party verification: myfxbook public URLs keyed by MT5 login.
-  // Extend when new live-tracked accounts go public. Migrate to
-  // qel_accounts.myfxbook_url when the list grows past ~3 entries.
-  const MYFXBOOK_BY_LOGIN: Record<string, string> = {
-    '11531537': 'https://www.myfxbook.com/members/AngeloPasian/ftmo-challenge-10k/11531537',
-  }
-
   function generateReport(exportMode: 'internal' | 'external' = 'internal') {
     if (!curveData || curveData.curves.length === 0) return
     const isInternal = exportMode === 'internal'
@@ -918,7 +912,7 @@ export default function BuilderPage() {
     const ps = curveData.portfolioStats
     const returnPct = equityBase > 0 ? (ps.totalPnl / equityBase) * 100 : 0
     const dateNow = new Date().toLocaleDateString('it-IT', { day: '2-digit', month: 'long', year: 'numeric' })
-    const myfxbookUrl = acc?.login ? (MYFXBOOK_BY_LOGIN[acc.login] || null) : null
+    const myfxbookUrl = myfxbookUrlFor(acc?.login)
 
     // External mode: anonymise magic + real strategy names. Order by P/L desc
     // and label each strategy "{StyleLabel} {AssetGroup} #N" so investors can
