@@ -552,17 +552,23 @@ export default function BuilderPage() {
     return { efficiency, projection }
   }, [strategies, effectiveTrades, equityBase, sizingOutput, curveData])
 
-  // ---- Detect stale Kelly sizingOutput after selection/param change ----
-  // True when the optimizer was run on a selection/params that no longer match
-  // the current UI state. Report and Kelly columns should flag this.
+  // ---- Detect stale Kelly sizingOutput after SELECTION change ----
+  // True when the optimizer's selection set no longer matches the current UI.
+  // Param drifts (safety, maxDdPct, kellyMode, engineKind, equityBase) are
+  // NOT flagged here because the auto re-run effect below resolves them
+  // within 300 ms — flagging them would produce a misleading ~300 ms flash.
+  // Only selection toggles stay stale until the user manually re-optimizes.
   const sizingStale = useMemo<boolean>(() => {
     if (!sizingOutput || !optimizedSelectionSig) return false
-    const current = JSON.stringify({
-      ids: strategies.filter(s => s.selected).map(s => s.id).sort(),
-      eq: equityBase, dd: maxDdPct, sf: safetyFactor, km: kellyMode, simple: simpleSizingActive,
-    })
-    return current !== optimizedSelectionSig
-  }, [sizingOutput, optimizedSelectionSig, strategies, equityBase, maxDdPct, safetyFactor, kellyMode, simpleSizingActive])
+    const lastIds = (() => {
+      try { return JSON.parse(optimizedSelectionSig).ids as string[] } catch { return null }
+    })()
+    if (!lastIds) return false
+    const currentIds = strategies.filter(s => s.selected).map(s => s.id).sort()
+    if (lastIds.length !== currentIds.length) return true
+    for (let i = 0; i < lastIds.length; i++) if (lastIds[i] !== currentIds[i]) return true
+    return false
+  }, [sizingOutput, optimizedSelectionSig, strategies])
 
   // ---- Auto re-run optimizer on sizing-parameter changes ----
   // When in `optimized` mode, small parameter tweaks (safety, DD %, Kelly mode,
