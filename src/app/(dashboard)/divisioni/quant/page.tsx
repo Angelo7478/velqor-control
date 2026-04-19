@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { createClient } from '@/lib/supabase-browser'
 import { QelStrategy, QelAccount } from '@/types/database'
 import {
@@ -30,7 +30,7 @@ export default function QuantPage() {
   const [loading, setLoading] = useState(true)
   const [tab, setTab] = useState<Tab>('overview')
   const [stratView, setStratView] = useState<StrategyView>('list')
-  const [selectedStrat, setSelectedStrat] = useState<QelStrategy | null>(null)
+  const [selectedStratId, setSelectedStratId] = useState<string | null>(null)
   const [groupFilter, setGroupFilter] = useState<string>('all')
   const [expandedAcc, setExpandedAcc] = useState<string | null>(null)
   const [selectedAcc, setSelectedAcc] = useState<QelAccount | null>(null)
@@ -44,23 +44,17 @@ export default function QuantPage() {
   const [regimeCoherence, setRegimeCoherence] = useState<RegimeCoherenceResult | null>(null)
   const [chartLoading, setChartLoading] = useState(false)
 
+  // Derive selectedStrat from strategies array to guarantee it stays in sync
+  // with per-account real_* overrides applied by loadAccountPerf(). Using state
+  // here caused a stale-reference race after account switch.
+  const selectedStrat = useMemo<QelStrategy | null>(
+    () => selectedStratId ? strategies.find(s => s.id === selectedStratId) ?? null : null,
+    [selectedStratId, strategies]
+  )
+
   useEffect(() => { loadInitial() }, [])
   useEffect(() => { if (selectedAccountId) loadAccountPerf() }, [selectedAccountId])
   useEffect(() => { if (selectedStrat && selectedAccountId) loadStratBenchmark(selectedStrat) }, [selectedStrat, selectedAccountId])
-
-  // Sync selectedStrat when strategies updates (e.g. after account switch)
-  // Without this, selectedStrat keeps stale real_* from the previous account
-  useEffect(() => {
-    if (!selectedStrat) return
-    const updated = strategies.find(s => s.id === selectedStrat.id)
-    if (!updated) return
-    // Only sync if real data actually changed — prevents infinite loop
-    if (updated.real_trades !== selectedStrat.real_trades ||
-        Number(updated.real_pl) !== Number(selectedStrat.real_pl) ||
-        Number(updated.real_max_dd) !== Number(selectedStrat.real_max_dd)) {
-      setSelectedStrat(updated)
-    }
-  }, [strategies])
 
   async function loadInitial() {
     const supabase = createClient()
@@ -109,10 +103,6 @@ export default function QuantPage() {
         real_avg_duration_hours: Number(p.avg_duration_hours),
       }
     }))
-  }
-
-  async function loadData() {
-    await loadInitial()
   }
 
   /** Load strategy trades + benchmark data for the dual chart */
@@ -621,7 +611,7 @@ export default function QuantPage() {
       {/* Tabs */}
       <div className="flex gap-1 mb-6 bg-slate-100 rounded-lg p-1">
         {tabs.map(t => (
-          <button key={t.key} onClick={() => { setTab(t.key); setStratView('list'); setSelectedStrat(null) }}
+          <button key={t.key} onClick={() => { setTab(t.key); setStratView('list'); setSelectedStratId(null) }}
             className={`flex-1 py-2 px-3 rounded-md text-sm font-medium transition-colors ${tab === t.key ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>
             {t.label}
           </button>
@@ -869,7 +859,7 @@ export default function QuantPage() {
                           const consColor = s.consistency >= 1 ? 'text-green-700 bg-green-50' : s.consistency >= 0.5 ? 'text-amber-700 bg-amber-50' : s.consistency >= 0 ? 'text-orange-700 bg-orange-50' : 'text-red-700 bg-red-50'
                           const consLabel = s.consistency >= 1.5 ? 'Outperform' : s.consistency >= 0.8 ? 'Confermata' : s.consistency >= 0.3 ? 'Sotto test' : s.consistency >= 0 ? 'Debole' : 'Invertita'
                           return (
-                            <tr key={s.id} className="hover:bg-slate-50 cursor-pointer" onClick={() => { setTab('strategies'); setSelectedStrat(s); setStratView('detail') }}>
+                            <tr key={s.id} className="hover:bg-slate-50 cursor-pointer" onClick={() => { setTab('strategies'); setSelectedStratId(s.id); setStratView('detail') }}>
                               <td className="py-2 font-bold text-slate-400">{i + 1}</td>
                               <td className="py-2">
                                 <div className="flex items-center gap-2">
@@ -952,7 +942,7 @@ export default function QuantPage() {
               {filteredStrategies.map(s => {
                 const hasReal = s.real_trades > 0
                 return (
-                  <button key={s.id} onClick={() => { setSelectedStrat(s); setStratView('detail') }}
+                  <button key={s.id} onClick={() => { setSelectedStratId(s.id); setStratView('detail') }}
                     className="w-full text-left px-4 py-3 hover:bg-slate-50 transition-colors">
                     {/* Mobile */}
                     <div className="lg:hidden">
@@ -1011,7 +1001,7 @@ export default function QuantPage() {
       {tab === 'strategies' && stratView === 'detail' && selectedStrat && (
         <div className="space-y-4">
           <div className="flex items-center justify-between">
-            <button onClick={() => { setStratView('list'); setSelectedStrat(null) }}
+            <button onClick={() => { setStratView('list'); setSelectedStratId(null) }}
               className="text-sm text-violet-600 hover:text-violet-800 flex items-center gap-1">
               &larr; Torna alla lista
             </button>

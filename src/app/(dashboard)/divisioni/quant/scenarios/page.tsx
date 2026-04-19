@@ -121,7 +121,17 @@ export default function ScenariosPage() {
         </div>
       </div>
 
-      {scenarios.length > 0 && (
+      {scenarios.length > 0 && scenarios[0].mc.insufficientData && (
+        <div className="bg-amber-50 border border-amber-200 rounded-xl p-4">
+          <p className="text-sm font-semibold text-amber-800">Campione trade insufficiente</p>
+          <p className="text-xs text-amber-700 mt-1">
+            Il bootstrap Monte Carlo richiede almeno {scenarios[0].mc.minTradesRequired ?? 30} trade reali per produrre stime affidabili.
+            Il conto corrente ha {trades.length} trade. Importa piu&apos; storico o seleziona un portfolio con maggiore track record.
+          </p>
+        </div>
+      )}
+
+      {scenarios.length > 0 && !scenarios[0].mc.insufficientData && (
         <>
           {/* Confronto 3 scenari */}
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
