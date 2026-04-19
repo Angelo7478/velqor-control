@@ -549,7 +549,9 @@ export default function MonthlyPage() {
 <meta charset="UTF-8">
 <title>VELQOR Quant — ${title}</title>
 <style>
-  @page { size: A4; margin: 15mm; }
+  /* Margin 0 on @page suppresses Chrome's print header (title+date) and footer (URL+page). */
+  @page { size: A4; margin: 0; }
+  @media print { body { margin: 14mm 12mm; } }
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; color: #1e293b; font-size: 11px; line-height: 1.5; background: #fff; }
   .page { max-width: 800px; margin: 0 auto; padding: 20px; }
@@ -596,7 +598,8 @@ export default function MonthlyPage() {
         </div>
       </div>
       <h1>${title}</h1>
-      <div class="subtitle">${subtitle}</div>
+      <div class="subtitle">${acc?.name || 'N/A'}${accLogin}</div>
+      <div class="subtitle" style="margin-top:-8px;font-size:11px;color:#94a3b8">${mode === 'monthly' ? `${monthLabel} — ${dateNow}` : `Dall'inizio a ${monthLabel} — ${dateNow}`}</div>
       ${myfxbookUrl ? `<div class="subtitle" style="font-size:10px;margin-top:2px;color:#6366f1"><a href="${myfxbookUrl}" target="_blank" style="color:#6366f1;text-decoration:none">🔗 Verifica live su myfxbook.com →</a></div>` : ''}
     </div>
     <div class="meta">
@@ -827,7 +830,9 @@ export default function MonthlyPage() {
 <meta charset="UTF-8">
 <title>VELQOR Quant — ${title}</title>
 <style>
-  @page { size: A4; margin: 15mm; }
+  /* Margin 0 on @page suppresses Chrome's print header (title+date) and footer (URL+page). */
+  @page { size: A4; margin: 0; }
+  @media print { body { margin: 14mm 12mm; } }
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; color: #1e293b; font-size: 11px; line-height: 1.6; background: #fff; }
   .page { max-width: 800px; margin: 0 auto; padding: 20px; }
@@ -871,7 +876,8 @@ export default function MonthlyPage() {
         </div>
       </div>
       <h1>${title}</h1>
-      <div class="subtitle">${subtitle}</div>
+      <div class="subtitle">${acc?.name || 'Portafoglio'}${accLogin}</div>
+      <div class="subtitle" style="margin-top:-8px;font-size:11px;color:#94a3b8">${mode === 'monthly' ? `${monthLbl} — ${dateNow}` : `Dall'inizio a ${monthLbl} — ${dateNow}`}</div>
       ${myfxbookUrl ? `<div class="subtitle" style="font-size:10px;margin-top:2px;color:#6366f1"><a href="${myfxbookUrl}" target="_blank" style="color:#6366f1;text-decoration:none">🔗 Verifica live su myfxbook.com →</a></div>` : ''}
     </div>
     <div class="meta">
