@@ -620,6 +620,19 @@ export default function BuilderPage() {
     setStrategies(prev => prev.map(s => s.id === id ? { ...s, userLots: Math.max(0.01, lots), manualOverride: true } : s))
   }
 
+  // Proportional +/- step for fine calibration of a single strategy's lots.
+  // 1% by default, 5% with Shift, so users get both fine and coarse control
+  // without touching the numeric input.
+  function adjustLots(id: string, direction: 1 | -1, e?: React.MouseEvent) {
+    const magnitude = e?.shiftKey ? 0.05 : 0.01
+    const step = direction * magnitude
+    setStrategies(prev => prev.map(s => {
+      if (s.id !== id) return s
+      const next = Math.max(0.01, Math.round(s.userLots * (1 + step) * 1000) / 1000)
+      return { ...s, userLots: next, manualOverride: true }
+    }))
+  }
+
   function selectAll() {
     setStrategies(prev => prev.map(s => s.status === 'active' ? { ...s, selected: true } : s))
   }
@@ -1063,7 +1076,7 @@ export default function BuilderPage() {
     <div class="kpi">
       <div class="kpi-label">Max Drawdown</div>
       <div class="kpi-value" style="color:#dc2626">${fmtM(ps.maxDd)}</div>
-      <div class="kpi-sub">${fmtR(ps.maxDdPct, 1)}% dell'equity</div>
+      <div class="kpi-sub">${fmtR(ps.maxDdPct, 1)}% totale · daily ${fmtM(ps.maxDdDaily ?? 0)} (${fmtR(ps.maxDdDailyPct ?? 0, 2)}%)${ps.maxDdDailyDate ? ' · ' + fmtDate(ps.maxDdDailyDate) : ''}</div>
     </div>
     <div class="kpi">
       <div class="kpi-label">Profit Factor</div>
@@ -1095,6 +1108,8 @@ export default function BuilderPage() {
       <table>
         <tr><td>Max Drawdown $</td><td class="text-right negative">${fmtM(ps.maxDd)}</td></tr>
         <tr><td>Max Drawdown %</td><td class="text-right negative">${fmtR(ps.maxDdPct, 2)}%</td></tr>
+        <tr><td>Max DD Daily $${ps.maxDdDailyDate ? ' <span style="font-size:9px;color:#94a3b8">(' + fmtDate(ps.maxDdDailyDate) + ')</span>' : ''}</td><td class="text-right negative">${fmtM(ps.maxDdDaily ?? 0)}</td></tr>
+        <tr><td>DD Daily vs FTMO Limit (5%)</td><td class="text-right bold ${(ps.maxDdDailyPct ?? 0) > 4 ? 'negative' : (ps.maxDdDailyPct ?? 0) > 2.5 ? 'neutral' : 'positive'}">${fmtR(ps.maxDdDailyPct ?? 0, 2)}% / 5%</td></tr>
         <tr><td>Max perdite consecutive</td><td class="text-right bold">${ps.maxConsecLoss}</td></tr>
         <tr><td>Recovery Factor</td><td class="text-right">${fmtR(ps.recoveryFactor, 2)}</td></tr>
         <tr><td>DD vs FTMO Limit (10%)</td><td class="text-right bold ${ps.maxDdPct > 8 ? 'negative' : ps.maxDdPct > 5 ? 'neutral' : 'positive'}">${fmtR(ps.maxDdPct, 1)}% / 10%</td></tr>
@@ -1830,7 +1845,13 @@ ${curveData.curves.sort((a, b) => a.magic - b.magic).map(c => `Magic ${String(c.
                   </td>
                   <td className="px-2 py-1.5">
                     {s.selected ? (
-                      <div className="flex items-center gap-1 justify-center">
+                      <div className="flex items-center gap-0.5 justify-center">
+                        <button
+                          type="button"
+                          onClick={e => { e.stopPropagation(); adjustLots(s.id, -1, e) }}
+                          title="−1% (Shift: −5%)"
+                          className="w-5 h-6 text-xs text-slate-500 hover:text-indigo-600 hover:bg-indigo-50 border border-slate-200 rounded font-mono leading-none"
+                        >−</button>
                         <input
                           type="number"
                           step="0.01"
@@ -1846,6 +1867,12 @@ ${curveData.curves.sort((a, b) => a.magic - b.magic).map(c => `Magic ${String(c.
                           }`}
                           onClick={e => e.stopPropagation()}
                         />
+                        <button
+                          type="button"
+                          onClick={e => { e.stopPropagation(); adjustLots(s.id, +1, e) }}
+                          title="+1% (Shift: +5%)"
+                          className="w-5 h-6 text-xs text-slate-500 hover:text-indigo-600 hover:bg-indigo-50 border border-slate-200 rounded font-mono leading-none"
+                        >+</button>
                         {skipReasonLabel && (
                           <span
                             className="text-xs cursor-help"
