@@ -600,7 +600,7 @@ export default function MonthlyPage() {
       <h1>${title}</h1>
       <div class="subtitle">${acc?.name || 'N/A'}${accLogin}</div>
       <div class="subtitle" style="margin-top:-8px;font-size:11px;color:#94a3b8">${mode === 'monthly' ? `${monthLabel} — ${dateNow}` : `Dall'inizio a ${monthLabel} — ${dateNow}`}</div>
-      ${myfxbookUrl ? `<div class="subtitle" style="font-size:10px;margin-top:2px;color:#6366f1"><a href="${myfxbookUrl}" target="_blank" style="color:#6366f1;text-decoration:none">🔗 Verifica live su myfxbook.com →</a></div>` : ''}
+      ${myfxbookUrl ? `<div style="margin-top:8px"><a href="${myfxbookUrl}" target="_blank" style="display:inline-block;background:#eef2ff;color:#4338ca;padding:6px 12px;border-radius:999px;font-size:12px;font-weight:600;text-decoration:none;border:1px solid #c7d2fe">🔗 Verifica il track record live su myfxbook →</a></div>` : ''}
     </div>
     <div class="meta">
       <div>Account: <strong>${acc?.name || 'N/A'}</strong></div>
@@ -878,7 +878,7 @@ export default function MonthlyPage() {
       <h1>${title}</h1>
       <div class="subtitle">${acc?.name || 'Portafoglio'}${accLogin}</div>
       <div class="subtitle" style="margin-top:-8px;font-size:11px;color:#94a3b8">${mode === 'monthly' ? `${monthLbl} — ${dateNow}` : `Dall'inizio a ${monthLbl} — ${dateNow}`}</div>
-      ${myfxbookUrl ? `<div class="subtitle" style="font-size:10px;margin-top:2px;color:#6366f1"><a href="${myfxbookUrl}" target="_blank" style="color:#6366f1;text-decoration:none">🔗 Verifica live su myfxbook.com →</a></div>` : ''}
+      ${myfxbookUrl ? `<div style="margin-top:8px"><a href="${myfxbookUrl}" target="_blank" style="display:inline-block;background:#eef2ff;color:#4338ca;padding:6px 12px;border-radius:999px;font-size:12px;font-weight:600;text-decoration:none;border:1px solid #c7d2fe">🔗 Verifica il track record live su myfxbook →</a></div>` : ''}
     </div>
     <div class="meta">
       <div>Portafoglio Sistematico</div>

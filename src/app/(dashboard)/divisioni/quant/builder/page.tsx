@@ -1087,7 +1087,7 @@ export default function BuilderPage() {
       <h1>Portfolio Simulation Report</h1>
       <div class="subtitle">${ptfName || 'Simulazione'} — ${acc?.name || 'N/A'}${acc?.login ? ` · MT5 #${acc.login}` : ''}</div>
       <div class="subtitle" style="margin-top:-4px;font-size:11px;color:#94a3b8">${dateNow}${firstDate && lastDate ? ` · storico ${fmtDate(firstDate)} → ${fmtDate(lastDate)}` : ''}</div>
-      ${myfxbookUrl ? `<div class="subtitle" style="font-size:10px;margin-top:2px;color:#6366f1"><a href="${myfxbookUrl}" target="_blank" style="color:#6366f1;text-decoration:none">🔗 Verifica live su myfxbook.com →</a></div>` : ''}
+      ${myfxbookUrl ? `<div style="margin-top:8px"><a href="${myfxbookUrl}" target="_blank" style="display:inline-block;background:#eef2ff;color:#4338ca;padding:6px 12px;border-radius:999px;font-size:12px;font-weight:600;text-decoration:none;border:1px solid #c7d2fe">🔗 Verifica il track record live su myfxbook →</a></div>` : ''}
     </div>
     <div class="meta">
       <div>Equity Base: <strong>${fmtM(equityBase)}</strong></div>
