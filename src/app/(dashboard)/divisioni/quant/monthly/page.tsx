@@ -15,6 +15,7 @@ import {
   ASSET_BENCHMARK_LABEL,
 } from '@/lib/quant-utils'
 import { VELQOR_LOGO_BASE64 } from '@/lib/velqor-logo'
+import { myfxbookUrlFor } from '@/lib/myfxbook'
 import QuantNav from '../quant-nav'
 import {
   AreaChart, Area, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend,
@@ -448,9 +449,11 @@ export default function MonthlyPage() {
     const dateNow = new Date().toLocaleDateString('it-IT', { day: '2-digit', month: 'long', year: 'numeric' })
     const monthLabel = monthOptions.find(o => o.value === selectedMonth)?.label || selectedMonth
     const title = mode === 'monthly' ? 'Monthly Performance Report' : 'Cumulative Performance Report'
+    const accLogin = acc?.login ? ` · MT5 #${acc.login}` : ''
     const subtitle = mode === 'monthly'
-      ? `${monthLabel} — ${acc?.name || 'N/A'} — ${dateNow}`
-      : `Dall\'inizio a ${monthLabel} — ${acc?.name || 'N/A'} — ${dateNow}`
+      ? `${monthLabel} — ${acc?.name || 'N/A'}${accLogin} — ${dateNow}`
+      : `Dall\'inizio a ${monthLabel} — ${acc?.name || 'N/A'}${accLogin} — ${dateNow}`
+    const myfxbookUrl = myfxbookUrlFor(acc?.login)
 
     const fmtR = (n: number, d = 2) => Number(n).toLocaleString('it-IT', { minimumFractionDigits: d, maximumFractionDigits: d })
     const fmtM = (n: number) => { const p = n >= 0 ? '' : '-'; return `${p}$${Math.abs(n).toLocaleString('it-IT', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}` }
@@ -594,6 +597,7 @@ export default function MonthlyPage() {
       </div>
       <h1>${title}</h1>
       <div class="subtitle">${subtitle}</div>
+      ${myfxbookUrl ? `<div class="subtitle" style="font-size:10px;margin-top:2px;color:#6366f1"><a href="${myfxbookUrl}" target="_blank" style="color:#6366f1;text-decoration:none">🔗 Verifica live su myfxbook.com →</a></div>` : ''}
     </div>
     <div class="meta">
       <div>Account: <strong>${acc?.name || 'N/A'}</strong></div>
@@ -703,12 +707,15 @@ export default function MonthlyPage() {
   // ---- Public Report PDF ----
 
   function openPublicReport() {
+    const acc = accounts.find(a => a.id === selectedAccountId)
     const dateNow = new Date().toLocaleDateString('it-IT', { day: '2-digit', month: 'long', year: 'numeric' })
     const monthLbl = monthOptions.find(o => o.value === selectedMonth)?.label || selectedMonth
     const title = mode === 'monthly' ? 'Performance Report' : 'Cumulative Performance Report'
+    const accLogin = acc?.login ? ` · MT5 #${acc.login}` : ''
     const subtitle = mode === 'monthly'
-      ? `${monthLbl} — ${dateNow}`
-      : `Dall\'inizio a ${monthLbl} — ${dateNow}`
+      ? `${monthLbl}${accLogin} — ${dateNow}`
+      : `Dall\'inizio a ${monthLbl}${accLogin} — ${dateNow}`
+    const myfxbookUrl = myfxbookUrlFor(acc?.login)
 
     const fmtR = (n: number, d = 2) => Number(n).toLocaleString('it-IT', { minimumFractionDigits: d, maximumFractionDigits: d })
     const fmtM = (n: number) => { const p = n >= 0 ? '' : '-'; return `${p}$${Math.abs(n).toLocaleString('it-IT', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}` }
@@ -865,6 +872,7 @@ export default function MonthlyPage() {
       </div>
       <h1>${title}</h1>
       <div class="subtitle">${subtitle}</div>
+      ${myfxbookUrl ? `<div class="subtitle" style="font-size:10px;margin-top:2px;color:#6366f1"><a href="${myfxbookUrl}" target="_blank" style="color:#6366f1;text-decoration:none">🔗 Verifica live su myfxbook.com →</a></div>` : ''}
     </div>
     <div class="meta">
       <div>Portafoglio Sistematico</div>
