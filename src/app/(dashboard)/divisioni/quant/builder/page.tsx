@@ -575,9 +575,15 @@ export default function BuilderPage() {
   // engine kind, equity) should just flow into the lots without requiring the
   // user to hit "Ottimizza" every time. Selection toggles are excluded on
   // purpose — those can be accidental and the stale badge handles them.
-  // 300 ms debounce avoids re-running on every slider tick.
+  // 300 ms debounce avoids re-running on every slider tick. We also skip
+  // entirely while the user is actively dragging a slider: running
+  // optimizeLots mid-drag causes re-renders that make the slider thumb
+  // appear to jitter. The effect re-fires on pointer-up when paramDragging
+  // flips back to false.
+  const [paramDragging, setParamDragging] = useState(false)
   useEffect(() => {
     if (sizingMode !== 'optimized') return
+    if (paramDragging) return
     const t = setTimeout(() => {
       if (strategies.filter(s => s.selected).length > 0) {
         optimizeLots()
@@ -585,7 +591,7 @@ export default function BuilderPage() {
     }, 300)
     return () => clearTimeout(t)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [equityBase, maxDdPct, safetyFactor, kellyMode, sizingEngineKind])
+  }, [equityBase, maxDdPct, safetyFactor, kellyMode, sizingEngineKind, paramDragging])
 
   // ---- Apply advisor portfolio: update lots on selected strategies only ----
   // Rule: the advisor NEVER re-adds a strategy the user has deselected. It
@@ -1651,7 +1657,12 @@ ${curveData.curves.sort((a, b) => a.magic - b.magic).map(c => `Magic ${String(c.
                 <label className="text-[10px] uppercase text-slate-400 block mb-1">Safety</label>
                 <div className="flex items-center gap-1">
                   <input type="range" min="0.3" max="1.0" step="0.1" value={safetyFactor}
-                    onChange={e => setSafetyFactor(parseFloat(e.target.value))} className="w-16" />
+                    onChange={e => setSafetyFactor(parseFloat(e.target.value))}
+                    onPointerDown={() => setParamDragging(true)}
+                    onPointerUp={() => setParamDragging(false)}
+                    onPointerCancel={() => setParamDragging(false)}
+                    onBlur={() => setParamDragging(false)}
+                    className="w-16" />
                   <span className="text-xs font-mono">{fmt(safetyFactor, 1)}</span>
                 </div>
               </div>
