@@ -17,6 +17,7 @@ export default function AccountDashboard({ account, onClose }: Props) {
   const [trades, setTrades] = useState<QelTrade[]>([])
   const [strategies, setStrategies] = useState<QelStrategy[]>([])
   const [loadingData, setLoadingData] = useState(true)
+  const [error, setError] = useState<string | null>(null)
   const [selectedMagic, setSelectedMagic] = useState<number | null>(null)
   const [equityRange, setEquityRange] = useState<string>('ALL')
   const [sortCol, setSortCol] = useState<string>('close_time')
@@ -40,16 +41,27 @@ export default function AccountDashboard({ account, onClose }: Props) {
 
   async function loadAccountData() {
     setLoadingData(true)
-    const supabase = createClient()
-    const [snapRes, tradeRes, stratRes] = await Promise.all([
-      supabase.from('qel_account_snapshots').select('*').eq('account_id', account.id).order('ts', { ascending: true }),
-      supabase.from('qel_trades').select('*').eq('account_id', account.id).order('open_time', { ascending: false }),
-      supabase.from('qel_strategies').select('*').order('magic'),
-    ])
-    setSnapshots(snapRes.data || [])
-    setTrades(tradeRes.data || [])
-    setStrategies(stratRes.data || [])
-    setLoadingData(false)
+    setError(null)
+    try {
+      const supabase = createClient()
+      const [snapRes, tradeRes, stratRes] = await Promise.all([
+        supabase.from('qel_account_snapshots').select('*').eq('account_id', account.id).order('ts', { ascending: true }),
+        supabase.from('qel_trades').select('*').eq('account_id', account.id).order('open_time', { ascending: false }),
+        supabase.from('qel_strategies').select('*').order('magic'),
+      ])
+      if (snapRes.error) throw snapRes.error
+      if (tradeRes.error) throw tradeRes.error
+      if (stratRes.error) throw stratRes.error
+      setSnapshots(snapRes.data || [])
+      setTrades(tradeRes.data || [])
+      setStrategies(stratRes.data || [])
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      console.error('loadAccountData failed:', err)
+      setError(msg)
+    } finally {
+      setLoadingData(false)
+    }
   }
 
   // Trade stats
@@ -222,6 +234,19 @@ export default function AccountDashboard({ account, onClose }: Props) {
       <button onClick={onClose} className="text-sm text-violet-600 hover:text-violet-800 flex items-center gap-1">
         &larr; Torna ai conti
       </button>
+
+      {error && (
+        <div className="bg-red-50 border border-red-200 rounded-xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div>
+            <p className="text-sm font-semibold text-red-800">Errore caricamento dati conto</p>
+            <p className="text-xs text-red-600 mt-1 break-all">{error}</p>
+          </div>
+          <button onClick={() => loadAccountData()}
+            className="text-xs px-3 py-1.5 bg-red-600 text-white rounded-md hover:bg-red-700 transition-colors self-start sm:self-auto">
+            Riprova
+          </button>
+        </div>
+      )}
 
       {/* Header */}
       <div className="bg-white rounded-xl border border-slate-200 p-6">

@@ -73,6 +73,11 @@ export default function BuilderPage() {
   const [maxDdPct, setMaxDdPct] = useState(10)
   const [safetyFactor, setSafetyFactor] = useState(0.5)
   const [sizingOutput, setSizingOutput] = useState<PortfolioSizingOutput | null>(null)
+  // Signature of the selection at the moment `optimizeLots` was last run. Used
+  // to detect when the current selection/params drifted from the optimizer's
+  // input — in that case the Kelly numbers shown are stale and must be
+  // flagged in the UI and report.
+  const [optimizedSelectionSig, setOptimizedSelectionSig] = useState<string | null>(null)
   // simple = MC95+worst-trade budget split equally over N strategies with overlap
   // correction. This is the default for swing/low-frequency portfolios.
   // advanced = v3+v4 Kelly+HRP engine, useful when we move to intraday with
@@ -540,11 +545,41 @@ export default function BuilderPage() {
 
     // Portfolio max DD at builder lots (from equity curves)
     const portfolioMaxDd = curveData?.portfolioStats?.maxDd ?? 0
-    const efficiency = calcSizingEfficiency(effInputs, portfolioMaxDd, equityBase)
+    const capitalScale = sourceAccountSize > 0 ? equityBase / sourceAccountSize : 1
+    const efficiency = calcSizingEfficiency(effInputs, portfolioMaxDd, equityBase, capitalScale)
     const projection = calcEquityProjection(monthlyReturns, equityBase, tradesPerMonth)
 
     return { efficiency, projection }
   }, [strategies, effectiveTrades, equityBase, sizingOutput, curveData])
+
+  // ---- Detect stale Kelly sizingOutput after selection/param change ----
+  // True when the optimizer was run on a selection/params that no longer match
+  // the current UI state. Report and Kelly columns should flag this.
+  const sizingStale = useMemo<boolean>(() => {
+    if (!sizingOutput || !optimizedSelectionSig) return false
+    const current = JSON.stringify({
+      ids: strategies.filter(s => s.selected).map(s => s.id).sort(),
+      eq: equityBase, dd: maxDdPct, sf: safetyFactor, km: kellyMode, simple: simpleSizingActive,
+    })
+    return current !== optimizedSelectionSig
+  }, [sizingOutput, optimizedSelectionSig, strategies, equityBase, maxDdPct, safetyFactor, kellyMode, simpleSizingActive])
+
+  // ---- Auto re-run optimizer on sizing-parameter changes ----
+  // When in `optimized` mode, small parameter tweaks (safety, DD %, Kelly mode,
+  // engine kind, equity) should just flow into the lots without requiring the
+  // user to hit "Ottimizza" every time. Selection toggles are excluded on
+  // purpose — those can be accidental and the stale badge handles them.
+  // 300 ms debounce avoids re-running on every slider tick.
+  useEffect(() => {
+    if (sizingMode !== 'optimized') return
+    const t = setTimeout(() => {
+      if (strategies.filter(s => s.selected).length > 0) {
+        optimizeLots()
+      }
+    }, 300)
+    return () => clearTimeout(t)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [equityBase, maxDdPct, safetyFactor, kellyMode, sizingEngineKind])
 
   // ---- Apply advisor portfolio: update lots on selected strategies only ----
   // Rule: the advisor NEVER re-adds a strategy the user has deselected. It
@@ -622,6 +657,7 @@ export default function BuilderPage() {
     })))
     setSizingMode('proportional')
     setSizingOutput(null)
+    setOptimizedSelectionSig(null)
   }
 
   /**
@@ -728,6 +764,10 @@ export default function BuilderPage() {
       ? runSimpleSizingEngine(inputs, equityBase, maxDdPct, safetyFactor)
       : runSizingEngine(inputs, equityBase, maxDdPct, safetyFactor, kellyMode)
     setSizingOutput(result)
+    setOptimizedSelectionSig(JSON.stringify({
+      ids: selected.map(s => s.id).sort(),
+      eq: equityBase, dd: maxDdPct, sf: safetyFactor, km: kellyMode, simple: simpleSizingActive,
+    }))
     setSizingMode('optimized')
 
     // Apply optimized lots to strategies
@@ -846,9 +886,14 @@ export default function BuilderPage() {
     const returnPct = equityBase > 0 ? (ps.totalPnl / equityBase) * 100 : 0
     const dateNow = new Date().toLocaleDateString('it-IT', { day: '2-digit', month: 'long', year: 'numeric' })
 
-    // Real P/L = raw sum of net_profit from trades (not scaled by builder lots)
+    // Real P/L = raw sum of net_profit from trades on the source account,
+    // then scaled to the target equity so it can be compared apples-to-apples
+    // with ps.totalPnl (which is already at target because it uses builder lots).
+    // capitalScale captures "same sizing % on target" (e.g. 10K->100K = 10x).
     const selected = strategies.filter(s => s.selected && s.tradeCount > 0)
-    const realTotalPnl = selected.reduce((sum, s) => sum + s.realPnlOnAccount, 0)
+    const realTotalPnlRaw = selected.reduce((sum, s) => sum + s.realPnlOnAccount, 0)
+    const capitalScale = sourceAccountSize > 0 ? equityBase / sourceAccountSize : 1
+    const realTotalPnl = realTotalPnlRaw * capitalScale
     const realReturnPct = equityBase > 0 ? (realTotalPnl / equityBase) * 100 : 0
 
     // Group by style and family
@@ -875,6 +920,19 @@ export default function BuilderPage() {
     const fmtR = (n: number, d = 2) => Number(n).toLocaleString('it-IT', { minimumFractionDigits: d, maximumFractionDigits: d })
     const fmtM = (n: number) => { const p = n >= 0 ? '' : '-'; return `${p}$${Math.abs(n).toLocaleString('it-IT', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}` }
     const plC = (n: number) => n > 0 ? '#16a34a' : n < 0 ? '#dc2626' : '#475569'
+
+    // Builder vs Kelly ratios for the "Sizing Builder vs Kelly puro" section.
+    // We compare what will actually be traded (builder lots / ps.maxDd) with
+    // the pure-Kelly reference (optimizedLots / optDdEstimate). The scaled
+    // historical ($14.953) stays only in the KPI top as baseline context.
+    const builderLotsTot = projectionData?.efficiency.perStrategy.reduce((sum, s) => {
+      const bl = strategies.find(st => st.id === s.strategyId)?.userLots ?? 0
+      return sum + bl
+    }, 0) ?? 0
+    const kellyLotsTot = projectionData?.efficiency.perStrategy.reduce((sum, s) => sum + s.optimizedLots, 0) ?? 0
+    const builderVsKellyLots = kellyLotsTot > 0 ? builderLotsTot / kellyLotsTot : 0
+    const kellyDdEst = projectionData?.efficiency.optDdEstimate ?? 0
+    const builderDdVsKelly = kellyDdEst > 0 ? ps.maxDd / kellyDdEst : 0
 
     // --- Temporal analysis ---
     const allDates = curveData.combined.map(p => p.closeTime).sort()
@@ -976,7 +1034,7 @@ export default function BuilderPage() {
         </div>
       </div>
       <h1>Portfolio Simulation Report</h1>
-      <div class="subtitle">${ptfName || 'Simulazione'} — ${acc?.name || 'N/A'} — ${dateNow}</div>
+      <div class="subtitle">${ptfName || 'Simulazione'} — ${acc?.name || 'N/A'} — ${dateNow}${firstDate && lastDate ? ` · storico ${fmtDate(firstDate)} → ${fmtDate(lastDate)}` : ''}</div>
     </div>
     <div class="meta">
       <div>Equity Base: <strong>${fmtM(equityBase)}</strong></div>
@@ -987,12 +1045,20 @@ export default function BuilderPage() {
     </div>
   </div>
 
+  <!-- Descrizione portafoglio -->
+  <div class="section-note" style="margin-top:16px;margin-bottom:12px">
+    <strong>Il portafoglio</strong><br/>
+    Raccoglie <strong>${curveData.curves.length} strategie sistematiche</strong> (${ps.totalTrades} trade) selezionate in due fasi: <strong>backtest robusto</strong> (walk-forward, Monte Carlo ≥10k iterazioni, out-of-sample, stress test di regime) e <strong>validazione in reale</strong> (track record live pluri-mensile su conto FTMO con capitale proprio).<br/>
+    <strong>Sizing istituzionale</strong>: ½ Kelly + Hierarchical Risk Parity (HRP), con shrinkage bayesiana sul campione, cap per famiglia di strategie, DD budget esplicito (${fmtR(maxDdPct * safetyFactor, 0)}% qui) e guardrail FTMO (10% total, 5% daily). Il Kelly puro teorico resta come riferimento; il sizing operativo è tarato sul DD osservato come limite concreto.<br/>
+    <strong>Scalato al target</strong>: i numeri proiettano lo storico ai lotti configurati per un capitale di <strong>${fmtM(equityBase)}</strong>. Performance passate non garantiscono risultati futuri.
+  </div>
+
   <!-- KPI principali -->
   <div class="kpi-grid">
     <div class="kpi">
-      <div class="kpi-label">P/L Reale (netto)</div>
-      <div class="kpi-value" style="color:${plC(realTotalPnl)}">${fmtM(realTotalPnl)}</div>
-      <div class="kpi-sub">${fmtR(realReturnPct, 1)}% rendimento | Scalato: ${fmtM(ps.totalPnl)}</div>
+      <div class="kpi-label">P/L Portafoglio (netto)</div>
+      <div class="kpi-value" style="color:${plC(ps.totalPnl)}">${fmtM(ps.totalPnl)}</div>
+      <div class="kpi-sub">${fmtR(returnPct, 1)}% rendimento · sizing builder${capitalScale !== 1 ? ` | baseline storico scalato (×${fmtR(capitalScale, 1)}): ${fmtM(realTotalPnl)}` : ''}</div>
     </div>
     <div class="kpi">
       <div class="kpi-label">Max Drawdown</div>
@@ -1108,9 +1174,7 @@ export default function BuilderPage() {
     <div>
       <h3>Periodo</h3>
       <table>
-        <tr><td>Primo trade</td><td class="text-right bold">${fmtDate(firstDate)}</td></tr>
-        <tr><td>Ultimo trade</td><td class="text-right bold">${fmtDate(lastDate)}</td></tr>
-        <tr><td>Durata</td><td class="text-right">${Math.round(durationMonths * 10) / 10} mesi (${durationDays} giorni)</td></tr>
+        <tr><td>Durata</td><td class="text-right bold">${Math.round(durationMonths * 10) / 10} mesi (${durationDays} giorni)</td></tr>
         <tr><td>Trade/mese</td><td class="text-right">${fmtR(tradesPerMonth, 1)}</td></tr>
       </table>
     </div>
@@ -1219,8 +1283,8 @@ export default function BuilderPage() {
         <th>Strategia</th>
         <th>Asset</th>
         <th>Stile</th>
-        <th class="text-center">Lotti Reali</th>
-        <th class="text-center">Lotti Builder</th>
+        <th class="text-center">Lotti reali<br/><span style="font-weight:normal;font-size:8px;color:#94a3b8">source ${fmtM(sourceAccountSize || 10000)}</span></th>
+        <th class="text-center">Lotti builder<br/><span style="font-weight:normal;font-size:8px;color:#94a3b8">target ${fmtM(equityBase)}</span></th>
         <th class="text-right">Trade</th>
         <th class="text-right">P/L</th>
         <th class="text-right">Win Rate</th>
@@ -1315,80 +1379,63 @@ export default function BuilderPage() {
   <div class="section-note" style="font-family:monospace;font-size:10px;white-space:pre-wrap;line-height:1.8">
 ${curveData.curves.sort((a, b) => a.magic - b.magic).map(c => `Magic ${String(c.magic).padStart(2)} | ${c.name.padEnd(30)} | ${String(fmtR(c.userLots, 3)).padStart(6)} lotti | ${c.stats.totalTrades} trade`).join('\n')}</div>
 
-  ${(() => {
-    // Non-selected but active strategies — info section, NOT part of the portfolio
-    // totals or risk calculations. Serves as a snapshot of the whole strategy
-    // pool at the moment the report was generated, so the user can compare
-    // selected vs. parked strategies at a glance.
-    const nonSelected = strategies.filter(s => s.status === 'active' && !s.selected)
-    if (nonSelected.length === 0) return ''
-    const sorted = [...nonSelected].sort((a, b) => (b.realPnlOnAccount ?? 0) - (a.realPnlOnAccount ?? 0))
-    return `
-  <h2>Strategie non selezionate <span style="font-size:11px;color:#94a3b8;font-weight:normal">(info, escluse dai calcoli di portafoglio)</span></h2>
-  <div class="section-note" style="margin-bottom:8px">
-    Queste ${nonSelected.length} strategie sono attive ma non sono state scelte per questo portafoglio.
-    I numeri sono calcolati sui lotti reali dell'account (non sui lotti builder).
-  </div>
-  <table>
-    <tr>
-      <th>Magic</th>
-      <th>Strategia</th>
-      <th>Asset</th>
-      <th class="text-right">Trade</th>
-      <th class="text-right">P/L reale</th>
-      <th class="text-right">Lotti reali</th>
-      <th class="text-right">Worst trade</th>
-      <th class="text-right">Max cons loss</th>
-    </tr>
-    ${sorted.map(s => `
-      <tr>
-        <td style="font-family:monospace">${s.magic}</td>
-        <td>${s.name || 'M' + s.magic}</td>
-        <td><span style="font-size:9px;padding:1px 4px;border-radius:4px;background:#f1f5f9;color:#475569">${s.asset_group || s.asset || '—'}</span></td>
-        <td class="text-right">${s.tradeCount}</td>
-        <td class="text-right" style="color:${plC(s.realPnlOnAccount ?? 0)}">${fmtM(s.realPnlOnAccount ?? 0)}</td>
-        <td class="text-right">${fmtR(s.realAvgLots ?? 0, 3)}</td>
-        <td class="text-right negative">${fmtM(s.worstTradeAcc ?? 0)}</td>
-        <td class="text-right">${s.maxConsLossesAcc ?? 0}</td>
-      </tr>
-    `).join('')}
-  </table>`
-  })()}
 
   <!-- Proiezione & Efficienza -->
   ${projectionData ? `
-  <h2>Sizing Reale vs Ottimale</h2>
+  <h2>Sizing Builder vs Kelly puro</h2>
+  ${sizingStale ? '<div class="section-risk"><strong>⚠ Sizing Kelly obsoleto</strong>: la selezione o i parametri sono cambiati dopo l\'ultima esecuzione dell\'ottimizzatore. I numeri "Kelly puro teorico" e la colonna "Lotti Kelly" riflettono la selezione precedente, non quella attuale. Rilancia "Ottimizza" nel Builder per ottenere valori coerenti.</div>' : ''}
   <div class="grid-2" style="margin-bottom:12px">
     <div>
-      <h3 style="color:#4f46e5">Il tuo sizing (reale dai trade)</h3>
+      <h3 style="color:#4f46e5">Il tuo sizing (builder)</h3>
       <table>
-        <tr><td>P/L reale</td><td class="text-right bold" style="color:${plC(projectionData.efficiency.currentPnl)}">${fmtM(projectionData.efficiency.currentPnl)}</td></tr>
-        <tr><td>Max DD reale</td><td class="text-right bold negative">${fmtM(-projectionData.efficiency.realDdEstimate)}</td></tr>
-        <tr><td>DD % equity</td><td class="text-right negative">${fmtR(projectionData.efficiency.realDdPct, 1)}%</td></tr>
-        <tr><td>Rapporto lotti vs ottimale</td><td class="text-right bold">${fmtR(projectionData.efficiency.avgLotRatio, 1)}x</td></tr>
+        <tr><td>P/L builder</td><td class="text-right bold" style="color:${plC(ps.totalPnl)}">${fmtM(ps.totalPnl)}</td></tr>
+        <tr><td>Max DD builder</td><td class="text-right bold negative">${fmtM(-ps.maxDd)}</td></tr>
+        <tr><td>DD % equity</td><td class="text-right negative">${fmtR(ps.maxDdPct, 1)}%</td></tr>
+        <tr><td>Rapporto lotti vs Kelly</td><td class="text-right bold">${fmtR(builderVsKellyLots, 1)}x</td></tr>
       </table>
     </div>
     <div>
-      <h3 style="color:#16a34a">Sizing ottimale (Kelly/HRP)</h3>
+      <h3 style="color:#16a34a">Kelly puro teorico</h3>
       <table>
         <tr><td>P/L stimato</td><td class="text-right bold" style="color:${plC(projectionData.efficiency.optimizedPnl)}">${fmtM(projectionData.efficiency.optimizedPnl)}</td></tr>
         <tr><td>Max DD stimato</td><td class="text-right bold negative">${fmtM(-projectionData.efficiency.optDdEstimate)}</td></tr>
         <tr><td>DD % equity</td><td class="text-right negative">${fmtR(projectionData.efficiency.optDdPct, 1)}%</td></tr>
-        <tr><td>Rischio relativo</td><td class="text-right">${fmtR(projectionData.efficiency.riskMultiplier, 1)}x meno rischio</td></tr>
+        <tr><td>Rischio relativo</td><td class="text-right" style="color:${builderDdVsKelly > 1.05 ? '#dc2626' : builderDdVsKelly < 0.95 ? '#16a34a' : '#475569'}">${builderDdVsKelly > 1.05 ? 'builder ' + fmtR(builderDdVsKelly, 1) + 'x pi\u00F9 rischioso' : builderDdVsKelly < 0.95 && builderDdVsKelly > 0 ? 'builder ' + fmtR(1 / builderDdVsKelly, 1) + 'x meno rischioso' : 'equivalente'}</td></tr>
       </table>
     </div>
   </div>
-  ${projectionData.efficiency.realDdPct > 5 ? '<div class="section-risk"><strong>' + (projectionData.efficiency.realDdPct > 8 ? 'ATTENZIONE' : 'NOTA') + ':</strong> Con il tuo sizing reale il DD storico è ' + fmtR(projectionData.efficiency.realDdPct, 1) + '% dell\'equity. ' + (projectionData.efficiency.realDdPct > 8 ? 'Vicino al limite FTMO 10%!' : 'Monitorare il budget DD.') + ' Il sizing ottimale ridurrebbe il rischio di ' + fmtR(projectionData.efficiency.riskMultiplier, 1) + 'x.</div>' : ''}
+  ${ps.maxDdPct > 5 ? '<div class="section-risk"><strong>' + (ps.maxDdPct > 8 ? 'ATTENZIONE' : 'NOTA') + ':</strong> Col tuo sizing builder il DD storico è ' + fmtR(ps.maxDdPct, 1) + '% dell\'equity. ' + (ps.maxDdPct > 8 ? 'Vicino al limite FTMO 10%!' : 'Monitorare il budget DD.') + (builderDdVsKelly > 1.05 ? ' Il sizing Kelly avrebbe un rischio ' + fmtR(builderDdVsKelly, 1) + 'x più basso.' : '') + '</div>' : ''}
+
+  <div class="section-note">
+    <strong>Come leggere il Kelly puro</strong><br/>
+    Il Kelly puro massimizza il rendimento geometrico atteso sul lunghissimo periodo, assumendo edge stabile e campione infinito. Con dati reali è aggressivo: piccoli scostamenti dell'edge portano a drawdown profondi. Il nostro sizing builder di partenza è <strong>½ Kelly + HRP con DD budget esplicito</strong> (qui ${fmtR(maxDdPct * safetyFactor, 0)}%), shrinkage Bayesiana sul sample e cap per famiglia.<br/>
+    <strong>Perché spingiamo oltre il Kelly puro</strong>: il Kelly è il "fondo scala" di riferimento. Operiamo più aggressivamente perché usiamo il <strong>Max DD reale e Daily come guardrail concreto</strong> invece del rischio teorico di ruin. Fin quando il DD osservato resta dentro il budget (qui DD ${fmtR(ps.maxDd / equityBase * 100, 1)}% su limit FTMO 10%), lo spazio di espansione esiste e il rapporto sizing vs Kelly non è un errore, è una scelta consapevole.
+  </div>
+
   <div>
       <h3>Dettaglio per Strategia</h3>
       <table>
-        <tr><th>Strategia</th><th class="text-right">Lotti Reali</th><th class="text-right">Lotti Ottim.</th><th class="text-right">Rapporto</th><th class="text-right">P/L Reale</th><th class="text-right">P/L Stimato</th></tr>
-        ${projectionData.efficiency.perStrategy.map(s =>
-          '<tr><td>M' + s.magic + ' ' + s.name + '</td><td class="text-right">' + fmtR(s.realAvgLots, 3) + '</td><td class="text-right" style="color:#4f46e5">' + fmtR(s.optimizedLots, 3) + '</td><td class="text-right"><span style="padding:1px 4px;border-radius:4px;font-size:9px;background:' + (s.ratio >= 0.8 && s.ratio <= 1.2 ? '#dcfce7;color:#16a34a' : s.ratio < 0.8 ? '#fee2e2;color:#dc2626' : '#fef3c7;color:#b45309') + '">' + fmtR(s.ratio * 100, 0) + '%</span></td><td class="text-right" style="color:' + plC(s.realPnl) + '">' + fmtM(s.realPnl) + '</td><td class="text-right" style="color:' + plC(s.estimatedPnl) + '">' + fmtM(s.estimatedPnl) + '</td></tr>'
-        ).join('')}
+        <tr><th>Strategia</th><th class="text-right">Lotti reali<br/><span style="font-weight:normal;font-size:8px;color:#94a3b8">al target ${fmtM(equityBase)}</span></th><th class="text-right">Lotti builder<br/><span style="font-weight:normal;font-size:8px;color:#94a3b8">al target ${fmtM(equityBase)}</span></th><th class="text-right">Lotti Kelly<br/><span style="font-weight:normal;font-size:8px;color:#94a3b8">al target ${fmtM(equityBase)}</span></th><th class="text-right">Rapporto<br/><span style="font-weight:normal;font-size:8px;color:#94a3b8">builder / Kelly</span></th><th class="text-right">P/L reale<br/><span style="font-weight:normal;font-size:8px;color:#94a3b8">al target</span></th><th class="text-right">P/L Kelly<br/><span style="font-weight:normal;font-size:8px;color:#94a3b8">al target</span></th></tr>
+        ${projectionData.efficiency.perStrategy.map(s => {
+          const builderLots = strategies.find(st => st.id === s.strategyId)?.userLots ?? 0
+          const bkRatio = s.optimizedLots > 0 ? builderLots / s.optimizedLots : 0
+          const bkPct = fmtR(bkRatio * 100, 0)
+          const bkBg = bkRatio >= 0.8 && bkRatio <= 1.2 ? '#dcfce7;color:#16a34a' : bkRatio < 0.8 ? '#fee2e2;color:#dc2626' : '#fef3c7;color:#b45309'
+          return '<tr><td>M' + s.magic + ' ' + s.name + '</td><td class="text-right">' + fmtR(s.realAvgLots, 3) + '</td><td class="text-right" style="color:#4f46e5">' + fmtR(builderLots, 3) + '</td><td class="text-right" style="color:#16a34a">' + fmtR(s.optimizedLots, 3) + '</td><td class="text-right"><span style="padding:1px 4px;border-radius:4px;font-size:9px;background:' + bkBg + '">' + bkPct + '%</span></td><td class="text-right" style="color:' + plC(s.realPnl) + '">' + fmtM(s.realPnl) + '</td><td class="text-right" style="color:' + plC(s.estimatedPnl) + '">' + fmtM(s.estimatedPnl) + '</td></tr>'
+        }).join('')}
       </table>
     </div>
     <div>
+      <div class="section-note">
+        <strong>Come leggere gli scenari Monte Carlo</strong><br/>
+        <strong>Fonte dati</strong>: i P/L mensili storici del tuo portafoglio simulato (${projectionData.projection.monthsOfData} mesi${firstDate && lastDate ? `, ${fmtDate(firstDate)} → ${fmtDate(lastDate)}` : ''}), calcolati applicando i <strong>lotti builder</strong> ai trade storici. Gli scenari riflettono il sizing che hai configurato, non il Kelly puro né i lotti reali originali.<br/>
+        <strong>Metodo</strong>: 1.000 traiettorie a 12 mesi simulate via <strong>bootstrap mensile</strong> — ogni mese del path futuro è un pescaggio casuale con ripetizione dai P/L mensili storici. Assume che la distribuzione dei rendimenti futuri sia come quella passata.<br/>
+        <strong>Percentili sui 1.000 path</strong>:<br/>
+        🟢 <strong>Ottimistico (P90)</strong>: il 10% dei path finisce sopra questo valore — raggiungibile ma raro.<br/>
+        🔵 <strong>Base (P50, mediana)</strong>: metà sopra, metà sotto — risultato centrale atteso, non una garanzia.<br/>
+        🔴 <strong>Pessimistico (P10)</strong>: il 90% dei path fa meglio di questo — caso sfavorevole ragionevole, utile per stress-test DD vs budget FTMO.<br/>
+        <strong>Limiti</strong>: il bootstrap ricampiona solo il passato; se il regime cambia (volatilità o edge diversi) la proiezione resta ancorata. Il pessimistico è indicativo del DD atteso in condizioni avverse, non un floor assoluto.
+      </div>
       <h3>Proiezione Monte Carlo (${projectionData.projection.monthsOfData} mesi dati)</h3>
       <table>
         <tr><th>Scenario</th><th class="text-right">P/L 6M</th><th class="text-right">P/L 12M</th><th class="text-right">Equity 12M</th><th class="text-right">Rend.</th></tr>
@@ -1528,6 +1575,14 @@ ${curveData.curves.sort((a, b) => a.magic - b.magic).map(c => `Magic ${String(c.
               >
                 Ottimizza {simpleSizingActive ? '(Semplice)' : '(Kelly+HRP)'}
               </button>
+              {sizingStale && (
+                <span
+                  className="px-2 py-1 text-[10px] rounded-md bg-amber-100 text-amber-800 border border-amber-300 font-medium cursor-help"
+                  title="La selezione o i parametri sono cambiati dopo l'ultima ottimizzazione. I lotti Kelly mostrati in report e Dettaglio per Strategia sono basati sulla selezione precedente. Re-ottimizza per numeri coerenti."
+                >
+                  ⚠ Sizing Kelly obsoleto — re-ottimizza
+                </span>
+              )}
             </div>
           </div>
 

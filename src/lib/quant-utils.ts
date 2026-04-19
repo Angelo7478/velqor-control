@@ -2127,7 +2127,17 @@ export interface MCResult {
     probRuin: number // probability of hitting max DD limit
     probProfit: number
   }
+  /** True when the input trade sample was too small for a meaningful bootstrap. */
+  insufficientData?: boolean
+  /** Minimum trade count required when insufficientData is true. */
+  minTradesRequired?: number
 }
+
+/**
+ * Minimum trade count required for a meaningful Monte Carlo bootstrap.
+ * Below this the resample distribution degenerates and results mislead.
+ */
+export const MIN_TRADES_FOR_MC = 30
 
 /**
  * Monte Carlo bootstrap simulation.
@@ -2152,8 +2162,12 @@ export function runMonteCarlo(
   lotMultiplier = 1.0,
 ): MCResult {
   const len = pathLength || trades.length
-  if (trades.length === 0) {
-    return emptyMCResult(len)
+  if (trades.length < MIN_TRADES_FOR_MC) {
+    return {
+      ...emptyMCResult(len),
+      insufficientData: true,
+      minTradesRequired: MIN_TRADES_FOR_MC,
+    }
   }
 
   const ruinUsd = equityBase * ruinPct / 100
@@ -2325,15 +2339,15 @@ export interface EquityProjection {
 }
 
 /**
- * Calculate sizing efficiency: how well current lots exploit the account capacity.
- * Compares actual P/L to what the P/L would have been with optimized (Kelly/HRP) lots.
- */
-/**
  * Calculate sizing efficiency using REAL lots from trades vs optimized lots.
  * Also estimates DD at real sizing vs DD at optimized sizing for risk comparison.
  *
  * @param portfolioMaxDd The max DD computed by the builder at the optimized lots
- * @param equityBase Current equity base for DD% calculation
+ * @param equityBase Current equity base for DD% calculation (target)
+ * @param capitalScale Ratio equityBase / sourceAccountSize. When >1 the real
+ *   lots, P/L, and DD (all in source-account space) are scaled up to the target
+ *   equity so the comparison with optimizedLots (already in target space) is
+ *   apples-to-apples. Default 1 preserves legacy behaviour.
  */
 export function calcSizingEfficiency(
   strategies: {
@@ -2344,6 +2358,7 @@ export function calcSizingEfficiency(
   }[],
   portfolioMaxDd: number,
   equityBase: number,
+  capitalScale: number = 1,
 ): SizingEfficiency {
   let currentPnl = 0
   let optimizedPnl = 0
@@ -2358,22 +2373,26 @@ export function calcSizingEfficiency(
   let optDdWeightedSum = 0
 
   for (const s of strategies) {
-    const real = s.realAvgLots
+    // Bring source-space real quantities into target space before comparing
+    // with optimized (already target-space) lots.
+    const realAtTarget = s.realAvgLots * capitalScale
+    const realPnlAtTarget = s.realPnl * capitalScale
+    const realDdAtTarget = s.realMaxDd * capitalScale
     const opt = s.optimizedLots
-    if (opt <= 0 || real <= 0) continue
+    if (opt <= 0 || realAtTarget <= 0) continue
 
-    const ratio = real / opt
+    const ratio = realAtTarget / opt
     lotRatioSum += ratio
     lotRatioCount++
 
-    currentPnl += s.realPnl
+    currentPnl += realPnlAtTarget
 
-    const estPnl = s.realPnl * (opt / real)
+    const estPnl = realPnlAtTarget * (opt / realAtTarget)
     optimizedPnl += estPnl
 
-    // DD at real lots (actual from trades), DD scaled to optimized lots
-    realDdWeightedSum += s.realMaxDd
-    optDdWeightedSum += s.realMaxDd * (opt / real)
+    // DD at real lots (target-space), DD scaled to optimized lots
+    realDdWeightedSum += realDdAtTarget
+    optDdWeightedSum += realDdAtTarget * (opt / realAtTarget)
 
     if (ratio < 0.8) underSized++
     else if (ratio > 1.2) overSized++
@@ -2382,10 +2401,10 @@ export function calcSizingEfficiency(
       strategyId: s.strategyId,
       magic: s.magic,
       name: s.name,
-      realAvgLots: real,
+      realAvgLots: realAtTarget,
       optimizedLots: opt,
       ratio,
-      realPnl: s.realPnl,
+      realPnl: Math.round(realPnlAtTarget),
       estimatedPnl: Math.round(estPnl),
       trades: s.trades,
     })
