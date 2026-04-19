@@ -1022,7 +1022,10 @@ export default function BuilderPage() {
 <meta charset="UTF-8">
 <title>VELQOR Quant — Portfolio Report</title>
 <style>
-  @page { size: A4; margin: 15mm; }
+  /* Margin 0 on @page suppresses Chrome's built-in print header (title + date)
+     and footer (URL + page). Body margin then recreates the safe print area. */
+  @page { size: A4; margin: 0; }
+  @media print { body { margin: 14mm 12mm; } }
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; color: #1e293b; font-size: 11px; line-height: 1.5; background: #fff; }
   .page { max-width: 800px; margin: 0 auto; padding: 20px; }
@@ -1082,7 +1085,8 @@ export default function BuilderPage() {
         </div>
       </div>
       <h1>Portfolio Simulation Report</h1>
-      <div class="subtitle">${ptfName || 'Simulazione'} — ${acc?.name || 'N/A'}${acc?.login ? ` · MT5 #${acc.login}` : ''} — ${dateNow}${firstDate && lastDate ? ` · storico ${fmtDate(firstDate)} → ${fmtDate(lastDate)}` : ''}</div>
+      <div class="subtitle">${ptfName || 'Simulazione'} — ${acc?.name || 'N/A'}${acc?.login ? ` · MT5 #${acc.login}` : ''}</div>
+      <div class="subtitle" style="margin-top:-4px;font-size:11px;color:#94a3b8">${dateNow}${firstDate && lastDate ? ` · storico ${fmtDate(firstDate)} → ${fmtDate(lastDate)}` : ''}</div>
       ${myfxbookUrl ? `<div class="subtitle" style="font-size:10px;margin-top:2px;color:#6366f1"><a href="${myfxbookUrl}" target="_blank" style="color:#6366f1;text-decoration:none">🔗 Verifica live su myfxbook.com →</a></div>` : ''}
     </div>
     <div class="meta">
