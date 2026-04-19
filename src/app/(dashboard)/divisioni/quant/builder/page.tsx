@@ -904,12 +904,33 @@ export default function BuilderPage() {
   }
 
   // ---- Generate full report ----
-  function generateReport() {
+  function generateReport(exportMode: 'internal' | 'external' = 'internal') {
     if (!curveData || curveData.curves.length === 0) return
+    const isInternal = exportMode === 'internal'
     const acc = accounts.find(a => a.id === selectedAccountId)
     const ps = curveData.portfolioStats
     const returnPct = equityBase > 0 ? (ps.totalPnl / equityBase) * 100 : 0
     const dateNow = new Date().toLocaleDateString('it-IT', { day: '2-digit', month: 'long', year: 'numeric' })
+
+    // External mode: anonymise magic + real strategy names. Order by P/L desc
+    // and label each strategy "{StyleLabel} {AssetGroup} #N" so investors can
+    // read composition without leaking the engineering detail (magic numbers,
+    // RSI2/KC/BB internals, family names).
+    const extLabelMap = new Map<string, string>()
+    if (!isInternal) {
+      const ordered = [...curveData.curves].sort((a, b) => b.stats.totalPnl - a.stats.totalPnl)
+      const counters: Record<string, number> = {}
+      for (const c of ordered) {
+        const strat = strategies.find(s => s.id === c.strategyId)
+        const styleText = styleLabel(strat?.strategy_style ?? null)
+        const asset = strat?.asset_group || strat?.asset || 'Other'
+        const key = `${styleText}|${asset}`
+        counters[key] = (counters[key] || 0) + 1
+        extLabelMap.set(c.strategyId, `${styleText} ${asset} #${counters[key]}`)
+      }
+    }
+    const labelFor = (strategyId: string, fallbackMagic: number, fallbackName: string) =>
+      isInternal ? `M${fallbackMagic} ${fallbackName}` : (extLabelMap.get(strategyId) || fallbackName)
 
     // Real P/L = raw sum of net_profit from trades on the source account,
     // then scaled to the target equity so it can be compared apples-to-apples
@@ -1083,7 +1104,7 @@ export default function BuilderPage() {
     <div class="kpi">
       <div class="kpi-label">P/L Portafoglio (netto)</div>
       <div class="kpi-value" style="color:${plC(ps.totalPnl)}">${fmtM(ps.totalPnl)}</div>
-      <div class="kpi-sub">${fmtR(returnPct, 1)}% rendimento · sizing builder${capitalScale !== 1 ? ` | baseline storico scalato (×${fmtR(capitalScale, 1)}): ${fmtM(realTotalPnl)}` : ''}</div>
+      <div class="kpi-sub">${fmtR(returnPct, 1)}% rendimento · sizing builder${isInternal && capitalScale !== 1 ? ` | baseline storico scalato (×${fmtR(capitalScale, 1)}): ${fmtM(realTotalPnl)}` : ''}</div>
     </div>
     <div class="kpi">
       <div class="kpi-label">Max Drawdown</div>
@@ -1306,12 +1327,12 @@ export default function BuilderPage() {
   <table>
     <thead>
       <tr>
-        <th>Magic</th>
-        <th>Strategia</th>
+        ${isInternal ? '<th>Magic</th>' : ''}
+        <th>${isInternal ? 'Strategia' : 'Componente'}</th>
         <th>Asset</th>
         <th>Stile</th>
-        <th class="text-center">Lotti reali<br/><span style="font-weight:normal;font-size:8px;color:#94a3b8">source ${fmtM(sourceAccountSize || 10000)}</span></th>
-        <th class="text-center">Lotti builder<br/><span style="font-weight:normal;font-size:8px;color:#94a3b8">target ${fmtM(equityBase)}</span></th>
+        ${isInternal ? `<th class="text-center">Lotti reali<br/><span style="font-weight:normal;font-size:8px;color:#94a3b8">source ${fmtM(sourceAccountSize || 10000)}</span></th>` : ''}
+        <th class="text-center">Lotti${isInternal ? ' builder' : ''}<br/><span style="font-weight:normal;font-size:8px;color:#94a3b8">target ${fmtM(equityBase)}</span></th>
         <th class="text-right">Trade</th>
         <th class="text-right">P/L</th>
         <th class="text-right">Win Rate</th>
@@ -1325,12 +1346,13 @@ export default function BuilderPage() {
         const st = strategies.find(s => s.id === c.strategyId)
         const styleBadge = st?.strategy_style === 'mean_reversion' ? 'badge-mr' : st?.strategy_style === 'trend_following' ? 'badge-tf' : st?.strategy_style === 'seasonal' ? 'badge-se' : 'badge-hy'
         const realLots = st?.realAvgLots ?? 0
+        const displayLabel = isInternal ? c.name : (extLabelMap.get(c.strategyId) || c.name)
         return `<tr>
-          <td>M${c.magic}</td>
-          <td style="font-family:sans-serif;max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${c.name}</td>
+          ${isInternal ? `<td>M${c.magic}</td>` : ''}
+          <td style="font-family:sans-serif;max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${displayLabel}</td>
           <td>${st?.asset_group || st?.asset || ''}</td>
           <td><span class="badge ${styleBadge}">${styleLabel(st?.strategy_style ?? null)}</span></td>
-          <td class="text-center bold">${realLots > 0 ? fmtR(realLots, 2) : '\u2014'}</td>
+          ${isInternal ? `<td class="text-center bold">${realLots > 0 ? fmtR(realLots, 2) : '\u2014'}</td>` : ''}
           <td class="text-center" style="color:#4f46e5">${fmtR(c.userLots, 3)}</td>
           <td class="text-right">${c.stats.totalTrades}</td>
           <td class="text-right bold" style="color:${plC(c.stats.totalPnl)}">${fmtM(c.stats.totalPnl)}</td>
@@ -1343,8 +1365,8 @@ export default function BuilderPage() {
     </tbody>
     <tfoot>
       <tr style="border-top:2px solid #e2e8f0;font-weight:700">
-        <td colspan="4">TOTALE</td>
-        <td class="text-center">${fmtR(strategies.filter(s => s.selected).reduce((s, st) => s + st.realAvgLots, 0), 2)}</td>
+        <td colspan="${isInternal ? 4 : 3}">TOTALE</td>
+        ${isInternal ? `<td class="text-center">${fmtR(strategies.filter(s => s.selected).reduce((s, st) => s + st.realAvgLots, 0), 2)}</td>` : ''}
         <td class="text-center" style="color:#4f46e5">${fmtR(curveData.curves.reduce((s, c) => s + c.userLots, 0), 3)}</td>
         <td class="text-right">${ps.totalTrades}</td>
         <td class="text-right" style="color:${plC(ps.totalPnl)}">${fmtM(ps.totalPnl)}</td>
@@ -1361,8 +1383,9 @@ export default function BuilderPage() {
   ${curveData.curves.sort((a, b) => b.stats.totalPnl - a.stats.totalPnl).map(c => {
     const maxAbs = Math.max(...curveData.curves.map(x => Math.abs(x.stats.totalPnl)), 1)
     const pct = Math.abs(c.stats.totalPnl / maxAbs) * 100
+    const barLabel = isInternal ? `M${c.magic}` : (extLabelMap.get(c.strategyId) || c.name)
     return `<div class="bar-container">
-      <div class="bar-label">M${c.magic}</div>
+      <div class="bar-label" style="${isInternal ? '' : 'width:170px;font-size:9px'}">${barLabel}</div>
       <div class="bar-track">
         <div class="bar-fill" style="width:${pct}%;background:${c.stats.totalPnl >= 0 ? '#22c55e' : '#ef4444'}"></div>
       </div>
@@ -1393,6 +1416,7 @@ export default function BuilderPage() {
     </div>
   </div>
 
+  ${isInternal ? `
   <h3>Per Famiglia</h3>
   <table>
     <tr><th>Famiglia</th><th class="text-right">Strat.</th><th class="text-right">Lotti tot.</th><th class="text-right">P/L</th></tr>
@@ -1405,10 +1429,10 @@ export default function BuilderPage() {
   <h2>Configurazione Lotti</h2>
   <div class="section-note" style="font-family:monospace;font-size:10px;white-space:pre-wrap;line-height:1.8">
 ${curveData.curves.sort((a, b) => a.magic - b.magic).map(c => `Magic ${String(c.magic).padStart(2)} | ${c.name.padEnd(30)} | ${String(fmtR(c.userLots, 3)).padStart(6)} lotti | ${c.stats.totalTrades} trade`).join('\n')}</div>
+  ` : ''}
 
-
-  <!-- Proiezione & Efficienza -->
-  ${projectionData ? `
+  <!-- Proiezione & Efficienza (INTERNO: operator-level analysis of sizing vs Kelly) -->
+  ${isInternal && projectionData ? `
   <h2>Sizing Builder vs Kelly puro</h2>
   ${sizingStale ? '<div class="section-risk"><strong>⚠ Sizing Kelly obsoleto</strong>: la selezione o i parametri sono cambiati dopo l\'ultima esecuzione dell\'ottimizzatore. I numeri "Kelly puro teorico" e la colonna "Lotti Kelly" riflettono la selezione precedente, non quella attuale. Rilancia "Ottimizza" nel Builder per ottenere valori coerenti.</div>' : ''}
   <div class="grid-2" style="margin-bottom:12px">
@@ -1452,6 +1476,10 @@ ${curveData.curves.sort((a, b) => a.magic - b.magic).map(c => `Magic ${String(c.
         }).join('')}
       </table>
     </div>
+  ` : ''}
+
+  ${projectionData ? `
+  <div>
     <div>
       <div class="section-note">
         <strong>Come leggere gli scenari Monte Carlo</strong><br/>
@@ -2471,11 +2499,20 @@ ${curveData.curves.sort((a, b) => a.magic - b.magic).map(c => `Magic ${String(c.
                 {saving ? 'Salvataggio...' : `Salva PTF (${selected.length} strat.)`}
               </button>
               <button
-                onClick={generateReport}
+                onClick={() => generateReport('internal')}
                 disabled={!curveData || curveData.curves.length === 0}
                 className="px-4 py-1.5 bg-slate-800 text-white text-xs font-medium rounded-lg hover:bg-slate-900 disabled:opacity-50 transition"
+                title="Versione operativa: magic number, nomi strategia reali, analisi Kelly, configurazione lotti"
               >
-                Report completo
+                Report interno
+              </button>
+              <button
+                onClick={() => generateReport('external')}
+                disabled={!curveData || curveData.curves.length === 0}
+                className="px-4 py-1.5 border border-slate-800 text-slate-800 text-xs font-medium rounded-lg hover:bg-slate-100 disabled:opacity-50 transition"
+                title="Versione investor-facing: strategie anonimizzate per stile+asset, niente magic, niente Kelly dettagliato, niente config lotti"
+              >
+                Report esterno
               </button>
               <button
                 onClick={exportConfig}
