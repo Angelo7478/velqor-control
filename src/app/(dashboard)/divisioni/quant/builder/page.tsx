@@ -904,6 +904,13 @@ export default function BuilderPage() {
   }
 
   // ---- Generate full report ----
+  // Third-party verification: myfxbook public URLs keyed by MT5 login.
+  // Extend when new live-tracked accounts go public. Migrate to
+  // qel_accounts.myfxbook_url when the list grows past ~3 entries.
+  const MYFXBOOK_BY_LOGIN: Record<string, string> = {
+    '11531537': 'https://www.myfxbook.com/members/AngeloPasian/ftmo-challenge-10k/11531537',
+  }
+
   function generateReport(exportMode: 'internal' | 'external' = 'internal') {
     if (!curveData || curveData.curves.length === 0) return
     const isInternal = exportMode === 'internal'
@@ -911,6 +918,7 @@ export default function BuilderPage() {
     const ps = curveData.portfolioStats
     const returnPct = equityBase > 0 ? (ps.totalPnl / equityBase) * 100 : 0
     const dateNow = new Date().toLocaleDateString('it-IT', { day: '2-digit', month: 'long', year: 'numeric' })
+    const myfxbookUrl = acc?.login ? (MYFXBOOK_BY_LOGIN[acc.login] || null) : null
 
     // External mode: anonymise magic + real strategy names. Order by P/L desc
     // and label each strategy "{StyleLabel} {AssetGroup} #N" so investors can
@@ -1080,7 +1088,8 @@ export default function BuilderPage() {
         </div>
       </div>
       <h1>Portfolio Simulation Report</h1>
-      <div class="subtitle">${ptfName || 'Simulazione'} — ${acc?.name || 'N/A'} — ${dateNow}${firstDate && lastDate ? ` · storico ${fmtDate(firstDate)} → ${fmtDate(lastDate)}` : ''}</div>
+      <div class="subtitle">${ptfName || 'Simulazione'} — ${acc?.name || 'N/A'}${acc?.login ? ` · MT5 #${acc.login}` : ''} — ${dateNow}${firstDate && lastDate ? ` · storico ${fmtDate(firstDate)} → ${fmtDate(lastDate)}` : ''}</div>
+      ${myfxbookUrl ? `<div class="subtitle" style="font-size:10px;margin-top:2px;color:#6366f1"><a href="${myfxbookUrl}" target="_blank" style="color:#6366f1;text-decoration:none">🔗 Verifica live su myfxbook.com →</a></div>` : ''}
     </div>
     <div class="meta">
       <div>Equity Base: <strong>${fmtM(equityBase)}</strong></div>
