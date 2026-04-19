@@ -1196,7 +1196,7 @@ export default function BuilderPage() {
       ${marginData.perStrategy.map((m, i) => {
         const st = strategies.filter(s => s.selected)[i]
         return `<tr>
-          <td>${st ? `M${st.magic} ${st.name || ''}` : '—'}</td>
+          <td>${st ? labelFor(st.id, st.magic, st.name || '') : '\u2014'}</td>
           <td>${m.symbol}</td>
           <td class="text-center bold">${fmtR(m.lots, 3)}</td>
           <td class="text-right">${fmtM(m.notionalValue)}</td>
