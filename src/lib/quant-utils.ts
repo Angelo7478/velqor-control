@@ -2595,6 +2595,13 @@ export interface CurveStats {
   avgLoss: number
   maxConsecLoss: number
   recoveryFactor: number // totalPnl / maxDd
+  // FTMO-style daily drawdown: worst intraday equity drop (peak-to-trough)
+  // measured from start-of-day equity, across all days in the sample.
+  // Populated only at the portfolio level (in PortfolioStats); strategy-level
+  // CurveStats from calcCurveStats leave these undefined.
+  maxDdDaily?: number
+  maxDdDailyPct?: number
+  maxDdDailyDate?: string  // YYYY-MM-DD of the worst day
 }
 
 export interface CombinedCurvePoint {
@@ -2708,10 +2715,43 @@ export function buildEquityCurves(
     combined.push(point)
   }
 
+  // FTMO-style daily drawdown: for each day, measure the worst equity drop
+  // from the start-of-day equity to the lowest intraday point. allScaledTrades
+  // is already sorted by closeTime so Map iteration preserves chronological
+  // order. Days with 0 closed trades are skipped (we don't track floating).
+  const tradesByDate = new Map<string, number[]>()
+  for (const t of allScaledTrades) {
+    if (!tradesByDate.has(t.date)) tradesByDate.set(t.date, [])
+    tradesByDate.get(t.date)!.push(t.pnl)
+  }
+  let maxDdDaily = 0
+  let maxDdDailyPct = 0
+  let maxDdDailyDate: string | undefined
+  let runningEquity = equityBase
+  for (const [date, dayPnls] of tradesByDate) {
+    const startOfDayEquity = runningEquity
+    let minIntraday = startOfDayEquity
+    let cur = startOfDayEquity
+    for (const pnl of dayPnls) {
+      cur += pnl
+      if (cur < minIntraday) minIntraday = cur
+    }
+    const dayDd = startOfDayEquity - minIntraday
+    if (dayDd > maxDdDaily) {
+      maxDdDaily = dayDd
+      maxDdDailyDate = date
+      maxDdDailyPct = startOfDayEquity > 0 ? (dayDd / startOfDayEquity) * 100 : 0
+    }
+    runningEquity = cur
+  }
+
   const portfolioStats: PortfolioStats = {
     ...calcCurveStats(allScaledTrades.map(t => t.pnl), equityBase),
     strategyCount: curves.length,
     correlationAvg: null, // can be computed separately
+    maxDdDaily: Math.round(maxDdDaily * 100) / 100,
+    maxDdDailyPct: Math.round(maxDdDailyPct * 100) / 100,
+    maxDdDailyDate,
   }
 
   return { curves, combined, portfolioStats }
