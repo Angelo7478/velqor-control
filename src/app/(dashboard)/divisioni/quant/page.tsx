@@ -52,6 +52,29 @@ export default function QuantPage() {
     [selectedStratId, strategies]
   )
 
+  // Resolve all account_ids in the same challenge lineage as the selected one.
+  // If the selected account has a lineage_id shared with other accounts (e.g. Step1+Step2),
+  // we return all of them so trades and metrics are aggregated as a single continuous challenge.
+  const lineageAccountIds = useMemo<string[]>(() => {
+    if (!selectedAccountId) return []
+    const selected = accounts.find(a => a.id === selectedAccountId)
+    if (!selected || !selected.lineage_id) return [selectedAccountId]
+    const ids = accounts.filter(a => a.lineage_id === selected.lineage_id).map(a => a.id)
+    return ids.length > 1 ? ids : [selectedAccountId]
+  }, [selectedAccountId, accounts])
+
+  // Lineage info for UI banner
+  const lineageInfo = useMemo(() => {
+    if (lineageAccountIds.length <= 1) return null
+    const linAccs = accounts.filter(a => lineageAccountIds.includes(a.id))
+      .sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime())
+    return {
+      accounts: linAccs,
+      phases: linAccs.map(a => a.challenge_phase || 'unknown'),
+      totalSize: linAccs.reduce((s, a) => s + Number(a.account_size || 0), 0),
+    }
+  }, [lineageAccountIds, accounts])
+
   useEffect(() => { loadInitial() }, [])
   useEffect(() => { if (selectedAccountId) loadAccountPerf() }, [selectedAccountId])
   useEffect(() => { if (selectedStrat && selectedAccountId) loadStratBenchmark(selectedStrat) }, [selectedStrat, selectedAccountId])
@@ -71,36 +94,82 @@ export default function QuantPage() {
     setLoading(false)
   }
 
-  /** Load per-account performance and OVERRIDE real_* fields */
+  /** Load per-account performance and OVERRIDE real_* fields.
+   *  When the selected account belongs to a multi-phase lineage (es. Step1+Step2),
+   *  we aggregate metrics across ALL accounts in the lineage so the challenge
+   *  is shown as a single continuous entity.
+   */
   async function loadAccountPerf() {
+    if (lineageAccountIds.length === 0) return
     const supabase = createClient()
     const { data: perfData } = await supabase
       .from('v_strategy_recent_performance')
       .select('*')
-      .eq('account_id', selectedAccountId)
+      .in('account_id', lineageAccountIds)
 
-    const perfMap = new Map(perfData?.map(p => [p.strategy_id, p]) || [])
+    // Aggregate per strategy_id across all lineage accounts
+    type PerfAgg = {
+      total_trades: number; wins: number; total_pnl: number;
+      sum_dur: number; n_dur: number; max_dd: number;
+      gross_profit: number; gross_loss: number;
+      sum_win: number; n_win: number; sum_loss: number; n_loss: number;
+    }
+    const aggMap = new Map<string, PerfAgg>()
+    for (const p of perfData || []) {
+      const cur = aggMap.get(p.strategy_id) || {
+        total_trades: 0, wins: 0, total_pnl: 0,
+        sum_dur: 0, n_dur: 0, max_dd: 0,
+        gross_profit: 0, gross_loss: 0,
+        sum_win: 0, n_win: 0, sum_loss: 0, n_loss: 0,
+      }
+      const trades = Number(p.total_trades) || 0
+      const wins = Number(p.wins) || 0
+      const losses = trades - wins
+      const totalPnl = Number(p.total_pnl) || 0
+      const avgWin = Number(p.payoff) > 0 && Number(p.profit_factor) > 0
+        ? (Number(p.profit_factor) * (losses > 0 ? Math.abs(totalPnl < 0 ? totalPnl : 0) / Math.max(losses, 1) : 0))
+        : 0  // approximation - we'll recompute from raw if needed
+      cur.total_trades += trades
+      cur.wins += wins
+      cur.total_pnl += totalPnl
+      cur.max_dd = Math.max(cur.max_dd, Number(p.max_dd) || 0)
+      cur.sum_dur += (Number(p.avg_duration_hours) || 0) * trades
+      cur.n_dur += trades
+      // Reconstruct gross profit/loss from profit_factor + total_pnl
+      const pf = Number(p.profit_factor) || 0
+      if (pf > 0 && totalPnl !== 0) {
+        // total_pnl = GP - GL ; pf = GP / GL  → GL = GP / pf ; GP - GP/pf = total_pnl ; GP (1 - 1/pf) = total_pnl
+        const gp = pf > 1 ? totalPnl / (1 - 1/pf) : 0
+        const gl = pf > 0 ? gp / pf : 0
+        cur.gross_profit += Math.max(0, gp)
+        cur.gross_loss += Math.max(0, gl)
+      }
+      aggMap.set(p.strategy_id, cur)
+    }
 
-    // Merge per-account data into strategies, replacing aggregated real_* fields
+    // Merge aggregated data into strategies
     setStrategies(baseStrategies.map(s => {
-      const p = perfMap.get(s.id)
-      if (!p) {
-        // No trades on this account → zero out all real metrics
+      const a = aggMap.get(s.id)
+      if (!a || a.total_trades === 0) {
         return { ...s, real_trades: 0, real_pl: 0, real_win_pct: null, real_payoff: null, real_expectancy: null, real_max_dd: 0, real_profit_factor: null, real_recovery_factor: null, real_ret_dd: 0, real_avg_duration_hours: null }
       }
-      const retDd = p.max_dd > 0 ? Number(p.total_pnl) / p.max_dd : 0
+      const winPct = (a.wins / a.total_trades) * 100
+      const avgTrade = a.total_pnl / a.total_trades
+      const profitFactor = a.gross_loss > 0 ? a.gross_profit / a.gross_loss : 0
+      const retDd = a.max_dd > 0 ? a.total_pnl / a.max_dd : 0
+      const avgDur = a.n_dur > 0 ? a.sum_dur / a.n_dur : 0
       return {
         ...s,
-        real_trades: p.total_trades,
-        real_pl: Number(p.total_pnl),
-        real_win_pct: Number(p.win_pct),
-        real_payoff: Number(p.payoff),
-        real_expectancy: Number(p.avg_trade),
-        real_max_dd: Number(p.max_dd),
-        real_profit_factor: Number(p.profit_factor),
-        real_recovery_factor: Number(p.recovery_factor),
-        real_ret_dd: retDd,
-        real_avg_duration_hours: Number(p.avg_duration_hours),
+        real_trades: a.total_trades,
+        real_pl: Number(a.total_pnl.toFixed(2)),
+        real_win_pct: Number(winPct.toFixed(2)),
+        real_payoff: null, // approximated with profit_factor below
+        real_expectancy: Number(avgTrade.toFixed(2)),
+        real_max_dd: Number(a.max_dd.toFixed(2)),
+        real_profit_factor: profitFactor > 0 ? Number(profitFactor.toFixed(2)) : null,
+        real_recovery_factor: a.max_dd > 0 ? Number((a.total_pnl / a.max_dd).toFixed(2)) : null,
+        real_ret_dd: Number(retDd.toFixed(2)),
+        real_avg_duration_hours: Number(avgDur.toFixed(1)),
       }
     }))
   }
@@ -119,11 +188,13 @@ export default function QuantPage() {
     const acc = accounts.find(a => a.id === selectedAccountId)
     const accSize = Number(acc?.account_size || 10000)
 
-    // Load trades for this strategy on this account
+    // Load trades for this strategy across the entire challenge lineage
+    // (so Step 1 + Step 2 trades are shown as a continuous equity curve)
+    const accountIds = lineageAccountIds.length > 0 ? lineageAccountIds : [selectedAccountId]
     const { data: trades } = await supabase
       .from('qel_trades')
       .select('net_profit, close_time')
-      .eq('account_id', selectedAccountId)
+      .in('account_id', accountIds)
       .eq('strategy_id', strat.id)
       .eq('is_open', false)
       .not('close_time', 'is', null)
@@ -574,10 +645,25 @@ export default function QuantPage() {
             value={selectedAccountId}
             onChange={e => setSelectedAccountId(e.target.value)}
           >
-            {accounts.map(a => (
-              <option key={a.id} value={a.id}>{a.name} (${Number(a.account_size).toLocaleString()})</option>
-            ))}
+            {accounts.map(a => {
+              const phaseTag = a.challenge_phase && a.challenge_phase !== 'unknown' ? ` · ${a.challenge_phase}` : ''
+              const statusTag = a.status === 'inactive' ? ' (archiviato)' : ''
+              return (
+                <option key={a.id} value={a.id}>{a.name}{phaseTag}{statusTag} (${Number(a.account_size).toLocaleString()})</option>
+              )
+            })}
           </select>
+          {lineageInfo && (
+            <div className="mt-2 px-3 py-2 bg-gradient-to-r from-violet-50 to-indigo-50 border border-violet-200 rounded-lg text-xs text-violet-800">
+              <div className="font-semibold flex items-center gap-1">
+                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
+                Vista Challenge Lineage
+              </div>
+              <div className="text-violet-600 mt-0.5">
+                Aggregati {lineageInfo.accounts.length} conti · fasi: {lineageInfo.phases.join(' → ')}
+              </div>
+            </div>
+          )}
         </div>
         <div className="flex flex-wrap gap-2">
           <a href="/divisioni/quant/sizing"

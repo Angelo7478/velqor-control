@@ -172,6 +172,8 @@ export interface QelAccount {
   notes: string | null
   mt5_terminal_path: string | null
   vps_name: string | null
+  lineage_id: string | null
+  challenge_phase: 'step1' | 'step2' | 'funded' | 'breached' | 'archived' | 'unknown' | null
   created_at: string
   updated_at: string
 }
