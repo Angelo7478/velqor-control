@@ -1360,9 +1360,21 @@ export default function QuantPage() {
       )}
 
       {/* ===== ACCOUNT DETAIL (MyFXBook-style) ===== */}
-      {tab === 'accounts' && selectedAcc && (
-        <AccountDashboard account={selectedAcc} onClose={() => setSelectedAcc(null)} />
-      )}
+      {tab === 'accounts' && selectedAcc && (() => {
+        // Build lineage accounts list if this account belongs to a multi-phase lineage
+        const linAccs = selectedAcc.lineage_id
+          ? accounts
+              .filter(a => a.lineage_id === selectedAcc.lineage_id)
+              .sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime())
+          : []
+        return (
+          <AccountDashboard
+            account={selectedAcc}
+            lineageAccounts={linAccs.length > 1 ? linAccs : undefined}
+            onClose={() => setSelectedAcc(null)}
+          />
+        )
+      })()}
 
       {/* ===== ACCOUNTS LIST ===== */}
       {tab === 'accounts' && !selectedAcc && (

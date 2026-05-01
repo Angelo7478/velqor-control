@@ -9,10 +9,20 @@ import InfoTooltip from '@/components/ui/InfoTooltip'
 
 interface Props {
   account: QelAccount
+  /** Optional: all accounts in the same challenge lineage (sorted by created_at).
+   *  When provided with length > 1, snapshots and trades are aggregated across
+   *  the entire lineage so the challenge is shown as a single continuous entity. */
+  lineageAccounts?: QelAccount[]
   onClose: () => void
 }
 
-export default function AccountDashboard({ account, onClose }: Props) {
+export default function AccountDashboard({ account, lineageAccounts, onClose }: Props) {
+  const isLineageView = (lineageAccounts?.length || 0) > 1
+  const lineageIds = isLineageView ? lineageAccounts!.map(a => a.id) : [account.id]
+  // Capitale iniziale di tutta la challenge = account_size del PRIMO conto della lineage (Step 1)
+  const initialAccount = isLineageView ? lineageAccounts![0] : account
+  // Lineage cumulative balance = balance del conto attivo corrente (ultimo)
+  // PL aggregato = balance corrente - capitale iniziale Step 1
   const [snapshots, setSnapshots] = useState<QelAccountSnapshot[]>([])
   const [trades, setTrades] = useState<QelTrade[]>([])
   const [strategies, setStrategies] = useState<QelStrategy[]>([])
@@ -26,8 +36,10 @@ export default function AccountDashboard({ account, onClose }: Props) {
 
   const bal = Number(account.balance || 0)
   const eq = Number(account.equity || 0)
-  const size = Number(account.account_size)
-  const pl = bal - size
+  // In lineage view, "size" = capitale iniziale Step 1 → mostra rendimento totale dalla challenge
+  const size = Number(initialAccount.account_size)
+  // PL: in lineage = balance Step corrente - balance iniziale Step 1; in single = balance - account_size
+  const pl = isLineageView ? bal - Number(initialAccount.account_size) : bal - size
   const plPct = size > 0 ? (pl / size) * 100 : 0
   const floating = Number(account.floating_pl || 0)
   const histMaxDDD = Number(account.max_daily_dd_pct || 0)
@@ -37,7 +49,7 @@ export default function AccountDashboard({ account, onClose }: Props) {
 
   useEffect(() => {
     loadAccountData()
-  }, [account.id])
+  }, [account.id, lineageIds.join(',')])
 
   async function loadAccountData() {
     setLoadingData(true)
@@ -45,8 +57,8 @@ export default function AccountDashboard({ account, onClose }: Props) {
     try {
       const supabase = createClient()
       const [snapRes, tradeRes, stratRes] = await Promise.all([
-        supabase.from('qel_account_snapshots').select('*').eq('account_id', account.id).order('ts', { ascending: true }),
-        supabase.from('qel_trades').select('*').eq('account_id', account.id).order('open_time', { ascending: false }),
+        supabase.from('qel_account_snapshots').select('*').in('account_id', lineageIds).order('ts', { ascending: true }),
+        supabase.from('qel_trades').select('*').in('account_id', lineageIds).order('open_time', { ascending: false }),
         supabase.from('qel_strategies').select('*').order('magic'),
       ])
       if (snapRes.error) throw snapRes.error
@@ -248,16 +260,52 @@ export default function AccountDashboard({ account, onClose }: Props) {
         </div>
       )}
 
+      {/* Lineage banner */}
+      {isLineageView && (
+        <div className="px-4 py-3 bg-gradient-to-r from-violet-50 to-indigo-50 border border-violet-200 rounded-xl">
+          <div className="flex items-center justify-between flex-wrap gap-2">
+            <div className="flex items-center gap-2">
+              <svg className="w-4 h-4 text-violet-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
+              <span className="text-sm font-semibold text-violet-800">Vista Challenge Lineage</span>
+            </div>
+            <div className="flex items-center gap-3 text-xs">
+              {lineageAccounts!.map((a, i) => (
+                <span key={a.id} className="flex items-center gap-1.5">
+                  <span className={`px-2 py-0.5 rounded-full font-medium ${
+                    a.status === 'active' ? 'bg-violet-600 text-white' :
+                    a.status === 'inactive' ? 'bg-slate-200 text-slate-600' :
+                    'bg-slate-100 text-slate-700'
+                  }`}>
+                    {a.challenge_phase || a.name.split('—')[1]?.trim() || a.name}
+                  </span>
+                  <span className="text-violet-600">{fmtUsd(Number(a.balance || a.account_size))}</span>
+                  {i < lineageAccounts!.length - 1 && <span className="text-violet-400">→</span>}
+                </span>
+              ))}
+            </div>
+          </div>
+          <p className="text-[11px] text-violet-600 mt-1">
+            Snapshot, trade ed equity curve aggregati su {lineageAccounts!.length} conti · capitale iniziale challenge: {fmtUsd(Number(initialAccount.account_size))}
+          </p>
+        </div>
+      )}
+
       {/* Header */}
       <div className="bg-white rounded-xl border border-slate-200 p-6">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
           <div>
             <div className="flex items-center gap-2">
               <div className="w-3 h-3 rounded-full bg-green-500 animate-pulse" />
-              <h2 className="text-xl font-bold text-slate-900">{account.name}</h2>
+              <h2 className="text-xl font-bold text-slate-900">{isLineageView ? lineageAccounts![0].name.replace(/—.*/,'').trim() + ' (Challenge)' : account.name}</h2>
               <span className="text-xs px-2 py-0.5 rounded bg-green-100 text-green-700">{account.status}</span>
+              {isLineageView && (
+                <span className="text-xs px-2 py-0.5 rounded bg-violet-100 text-violet-700 font-medium">{account.challenge_phase} attivo</span>
+              )}
             </div>
-            <p className="text-sm text-slate-500 mt-1">{account.broker} &middot; {account.server} &middot; Login {account.login}</p>
+            <p className="text-sm text-slate-500 mt-1">
+              {account.broker} &middot; {account.server} &middot; Login {account.login}
+              {isLineageView && <span className="ml-2 text-violet-500">· {lineageAccounts!.length} fasi aggregate</span>}
+            </p>
           </div>
           <div className="text-right">
             <p className="text-3xl font-bold text-slate-900">{fmtUsd(eq)}</p>
