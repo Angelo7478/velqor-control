@@ -624,6 +624,16 @@ export default function QuantPage() {
   // perdere la visibilita' del capitale durante un down momentaneo.
   const operationalAccounts = activeAccounts.filter(a => a.last_sync_at !== null)
 
+  // Separa gli "inactive" per significato:
+  //  - passedChallenges: Step 1 di una lineage che ha ancora un conto attivo (es. la nostra Phase 2 corrente)
+  //  - archivedAccounts: inactive senza lineage attiva (conti definitivamente chiusi/breached)
+  //  - pendingInitAccounts: status active ma mai sincronizzati (es. Dukas demo in attesa VPS)
+  const passedChallenges = inactiveAccounts.filter(a =>
+    a.lineage_id && accounts.some(b => b.lineage_id === a.lineage_id && b.id !== a.id && b.status !== 'inactive')
+  )
+  const archivedAccounts = inactiveAccounts.filter(a => !passedChallenges.includes(a))
+  const pendingInitAccounts = activeAccounts.filter(a => a.last_sync_at === null)
+
   // Real KPIs sui soli conti operativi
   const totalEquity = operationalAccounts.reduce((s, a) => s + Number(a.equity || 0), 0)
   const totalBalance = operationalAccounts.reduce((s, a) => s + Number(a.balance || 0), 0)
@@ -884,8 +894,12 @@ export default function QuantPage() {
                 )
               })}
             </div>
-            {inactiveAccounts.length > 0 && (
-              <p className="text-xs text-slate-400 mt-3">{inactiveAccounts.length} conti da inizializzare</p>
+            {(passedChallenges.length + pendingInitAccounts.length + archivedAccounts.length) > 0 && (
+              <p className="text-xs text-slate-400 mt-3 flex flex-wrap gap-x-3">
+                {passedChallenges.length > 0 && <span>✓ {passedChallenges.length} challenge passate</span>}
+                {pendingInitAccounts.length > 0 && <span>⧗ {pendingInitAccounts.length} da inizializzare</span>}
+                {archivedAccounts.length > 0 && <span>{archivedAccounts.length} archivio</span>}
+              </p>
             )}
           </div>
 
@@ -1494,14 +1508,77 @@ export default function QuantPage() {
             })}
           </div>
 
-          {inactiveAccounts.length > 0 && (
+          {/* Challenge Passate — Step 1 archiviate ma con lineage attiva (Phase 2 in corso) */}
+          {passedChallenges.length > 0 && (
             <>
-              <h3 className="text-sm font-semibold text-slate-700 mt-6">Da inizializzare ({inactiveAccounts.length})</h3>
-              <div className="bg-white rounded-xl border border-slate-200 divide-y divide-slate-100">
-                {inactiveAccounts.map(acc => (
+              <h3 className="text-sm font-semibold text-emerald-700 mt-6 flex items-center gap-2">
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+                Challenge Passed — Step 1 ({passedChallenges.length})
+              </h3>
+              <p className="text-xs text-slate-500 mb-2">Step 1 archiviate, lineage proseguita su Step 2 attiva.</p>
+              <div className="bg-emerald-50/30 rounded-xl border border-emerald-200 divide-y divide-emerald-100">
+                {passedChallenges.map(acc => {
+                  const linAcc = accounts.find(b => b.lineage_id === acc.lineage_id && b.id !== acc.id && b.status !== 'inactive')
+                  const finalBalance = Number(acc.balance || 0)
+                  const initialSize = Number(acc.account_size || 0)
+                  const profit = finalBalance - initialSize
+                  const profitPct = initialSize > 0 ? (profit / initialSize) * 100 : 0
+                  return (
+                    <div key={acc.id} className="px-4 py-3 flex flex-col sm:flex-row sm:justify-between sm:items-center gap-2">
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <p className="text-sm font-medium text-slate-900">{acc.name}</p>
+                          <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-700 font-semibold">PASSED</span>
+                        </div>
+                        <p className="text-xs text-slate-500">
+                          {acc.broker} &middot; {fmtUsd(initialSize)} &middot; Login {acc.login}
+                          {linAcc && <span className="ml-2 text-violet-600">→ Step 2 attiva: Login {linAcc.login}</span>}
+                        </p>
+                      </div>
+                      <div className="text-right">
+                        <p className={`text-sm font-semibold ${profit >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>
+                          {profit >= 0 ? '+' : ''}{fmtUsd(profit)} ({profit >= 0 ? '+' : ''}{profitPct.toFixed(2)}%)
+                        </p>
+                        <p className="text-[10px] text-slate-400">balance finale {fmtUsd(finalBalance)}</p>
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+            </>
+          )}
+
+          {/* Conti da inizializzare — active ma mai sincronizzati (es. Dukas demo) */}
+          {pendingInitAccounts.length > 0 && (
+            <>
+              <h3 className="text-sm font-semibold text-amber-700 mt-6 flex items-center gap-2">
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+                Da inizializzare ({pendingInitAccounts.length})
+              </h3>
+              <p className="text-xs text-slate-500 mb-2">Conti configurati ma in attesa di primo sync (bridge non ancora avviato).</p>
+              <div className="bg-amber-50/30 rounded-xl border border-amber-200 divide-y divide-amber-100">
+                {pendingInitAccounts.map(acc => (
                   <div key={acc.id} className="px-4 py-3 flex justify-between items-center">
                     <div>
                       <p className="text-sm font-medium text-slate-900">{acc.name}</p>
+                      <p className="text-xs text-slate-400">{acc.broker} &middot; {fmtUsd(Number(acc.account_size))} &middot; VPS: {acc.vps_name || '—'}</p>
+                    </div>
+                    <span className="text-xs px-2 py-0.5 rounded bg-amber-100 text-amber-700">in attesa</span>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+
+          {/* Archived — inactive senza lineage attiva (conti definitivamente chiusi/breached) */}
+          {archivedAccounts.length > 0 && (
+            <>
+              <h3 className="text-sm font-semibold text-slate-500 mt-6">Archivio ({archivedAccounts.length})</h3>
+              <div className="bg-white rounded-xl border border-slate-200 divide-y divide-slate-100">
+                {archivedAccounts.map(acc => (
+                  <div key={acc.id} className="px-4 py-3 flex justify-between items-center">
+                    <div>
+                      <p className="text-sm font-medium text-slate-700">{acc.name}</p>
                       <p className="text-xs text-slate-400">{acc.broker} &middot; {fmtUsd(Number(acc.account_size))}</p>
                     </div>
                     <span className={`text-xs px-2 py-0.5 rounded ${statusBadge(acc.status)}`}>{acc.status}</span>
