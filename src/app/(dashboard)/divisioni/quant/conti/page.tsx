@@ -248,8 +248,13 @@ export default function ContiConfigPage() {
         {accounts.map(acc => {
           const sync = timeAgo(acc.last_sync_at)
           const hasVps = !!acc.vps_name
-          const launchCmd = hasVps ? `cd C:\\mt5-bridge && python launcher.py --vps ${acc.vps_name}` : ''
-          const statusCmd = hasVps && acc.mt5_terminal_path ? `cd C:\\mt5-bridge && python bridge.py --mt5-path "${acc.mt5_terminal_path}" status` : ''
+          // Uso ';' (compatibile PowerShell + CMD) invece di '&&' (solo bash/CMD)
+          // Le VPS Velqor girano Windows Server con PowerShell, dove '&&' funziona solo da PS7+.
+          // PowerShell 5 (default Windows 10/Server 2019) non lo accetta. ';' va sempre.
+          // Wrappo il vps_name con quotes per gestire spazi (es. "100k ftmo Angelo")
+          const vpsArg = acc.vps_name?.includes(' ') ? `"${acc.vps_name}"` : acc.vps_name
+          const launchCmd = hasVps ? `cd C:\\mt5-bridge; python launcher.py --vps ${vpsArg}` : ''
+          const statusCmd = hasVps && acc.mt5_terminal_path ? `cd C:\\mt5-bridge; python bridge.py --mt5-path "${acc.mt5_terminal_path}" status` : ''
 
           return (
             <div key={acc.id} className="bg-white rounded-xl border border-slate-200 overflow-hidden">
@@ -453,10 +458,10 @@ export default function ContiConfigPage() {
                         <div className="flex items-center gap-2">
                           <span className="text-[10px] text-slate-400 w-12 shrink-0">Setup:</span>
                           <code className="text-[10px] font-mono text-slate-600 bg-white px-2 py-1 rounded border border-slate-200 flex-1 truncate">
-                            cd C:\mt5-bridge && python setup.py
+                            cd C:\mt5-bridge; python setup.py
                           </code>
                           <button
-                            onClick={() => copyCommand('cd C:\\mt5-bridge && python setup.py', `setup-${acc.id}`)}
+                            onClick={() => copyCommand('cd C:\\mt5-bridge; python setup.py', `setup-${acc.id}`)}
                             className="text-[10px] px-2 py-1 text-violet-600 hover:bg-violet-50 rounded border border-violet-200 shrink-0"
                           >
                             {copiedCmd === `setup-${acc.id}` ? 'Copiato!' : 'Copia'}
