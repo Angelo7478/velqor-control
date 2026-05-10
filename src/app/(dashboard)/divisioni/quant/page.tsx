@@ -617,14 +617,21 @@ export default function QuantPage() {
   const groups = [...new Set(strategies.map(s => s.asset_group).filter(Boolean))] as string[]
   const filteredStrategies = groupFilter === 'all' ? strategies : strategies.filter(s => s.asset_group === groupFilter)
 
-  // Real KPIs from synced data
-  const totalEquity = syncedAccounts.reduce((s, a) => s + Number(a.equity || 0), 0)
-  const totalBalance = syncedAccounts.reduce((s, a) => s + Number(a.balance || 0), 0)
-  const totalSize = syncedAccounts.reduce((s, a) => s + Number(a.account_size || 0), 0)
+  // KPI base: SOLO conti operativi (status active/challenge/verification/funded)
+  // E già almeno una volta sincronizzati (esclude Dukas demo finche bridge non parte
+  // ed esclude conti archived/inactive di lineage chiuse, es. Step 1 passata).
+  // Bridge offline temporaneo (last_sync vecchio) viene comunque incluso per non
+  // perdere la visibilita' del capitale durante un down momentaneo.
+  const operationalAccounts = activeAccounts.filter(a => a.last_sync_at !== null)
+
+  // Real KPIs sui soli conti operativi
+  const totalEquity = operationalAccounts.reduce((s, a) => s + Number(a.equity || 0), 0)
+  const totalBalance = operationalAccounts.reduce((s, a) => s + Number(a.balance || 0), 0)
+  const totalSize = operationalAccounts.reduce((s, a) => s + Number(a.account_size || 0), 0)
   const totalPL = totalBalance - totalSize
   const totalPLpct = totalSize > 0 ? (totalPL / totalSize) * 100 : 0
-  const totalFloating = syncedAccounts.reduce((s, a) => s + Number(a.floating_pl || 0), 0)
-  const maxDD = syncedAccounts.length > 0 ? Math.max(...syncedAccounts.map(a => Number(a.max_total_dd_pct || 0))) : 0
+  const totalFloating = operationalAccounts.reduce((s, a) => s + Number(a.floating_pl || 0), 0)
+  const maxDD = operationalAccounts.length > 0 ? Math.max(...operationalAccounts.map(a => Number(a.max_total_dd_pct || 0))) : 0
 
   const tabs = [
     { key: 'overview' as const, label: 'Overview' },
