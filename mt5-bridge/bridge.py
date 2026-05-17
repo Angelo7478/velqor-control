@@ -1,8 +1,11 @@
 """
-VELQOR MT5 BRIDGE v2.2
+VELQOR MT5 BRIDGE v2.4
 Un processo per terminale MT5. Non fa login — legge il conto già loggato.
 Lanciato dal launcher.py o manualmente con --mt5-path.
 
+v2.4: Riconciliazione posizioni — i trade is_open=true nel DB non piu' aperti
+      in MT5 vengono cercati nella history completa e chiusi correttamente.
+      Fix definitivo al bug "posizioni appese" (DEAL_ENTRY_OUT fuori finestra).
 v2.2: Auto-reconnect MT5, heartbeat file, consecutive failure self-exit
 
 Uso:
@@ -558,6 +561,46 @@ def sync_current_account(account, strategy_map):
                 trade.pop("open_price", None)
                 trade.pop("open_time", None)
         sb_upsert("qel_trades", trade, on_conflict="account_id,ticket")
+
+    # ── RICONCILIAZIONE POSIZIONI (v2.4) ──────────────────────────────────
+    # Trade marcati is_open=true nel DB ma NON piu' aperti in MT5: il loro
+    # deal di chiusura e' caduto fuori dalla finestra incrementale (bridge down,
+    # sync saltato, ecc). Li cerchiamo nella history completa e li chiudiamo.
+    # Conservativo: chiudiamo SOLO se troviamo il DEAL_ENTRY_OUT reale,
+    # altrimenti lasciamo il record com'e' (evita falsi positivi su glitch
+    # temporanei di positions_get).
+    open_tickets_mt5 = {int(p["ticket"]) for p in positions}
+    db_open = sb_get("qel_trades", {
+        "select": "ticket",
+        "account_id": f"eq.{acc_id}",
+        "is_open": "eq.true",
+    })
+    stale_tickets = [
+        int(t["ticket"]) for t in (db_open or [])
+        if int(t["ticket"]) not in open_tickets_mt5
+    ]
+    if stale_tickets:
+        log.info(f"  Riconciliazione: {len(stale_tickets)} posizioni da verificare")
+        reconcile_since = datetime.now(tz=timezone.utc) - timedelta(days=HISTORY_DAYS)
+        all_closed = get_closed_deals(reconcile_since)
+        closed_by_ticket = {c["ticket"]: c for c in all_closed if not c.get("is_open", True)}
+        reconciled = 0
+        for ticket in stale_tickets:
+            c = closed_by_ticket.get(ticket)
+            if not c:
+                continue  # nessun deal di chiusura: lascia com'e' (sicuro)
+            c["account_id"] = acc_id
+            nm, sid = resolve_strategy(c["magic"], strategy_map)
+            c["magic"] = nm
+            if sid:
+                c["strategy_id"] = sid
+            # Non sovrascrivere open data buona gia' in DB
+            if c.get("open_price") in (None, 0):
+                c.pop("open_price", None)
+                c.pop("open_time", None)
+            sb_upsert("qel_trades", c, on_conflict="account_id,ticket")
+            reconciled += 1
+        log.info(f"  Riconciliazione: {reconciled}/{len(stale_tickets)} chiusure recuperate")
 
     return True
 
