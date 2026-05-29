@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react'
 import { createClient } from '@/lib/supabase-browser'
 import { QelAccount, QelAccountSnapshot, QelTrade, QelStrategy } from '@/types/database'
-import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, AreaChart, Area } from 'recharts'
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, AreaChart, Area, ReferenceLine } from 'recharts'
 import { fmt, fmtUsd, plColor, ddBarColor, MONTHS } from '@/lib/quant-utils'
 import InfoTooltip from '@/components/ui/InfoTooltip'
 
@@ -101,13 +101,13 @@ export default function AccountDashboard({ account, lineageAccounts, onClose }: 
       (a.close_time || a.open_time || '').localeCompare(b.close_time || b.open_time || '')
     )
     let cumPL = 0
-    const points: { date: Date; equity: number; pl: number }[] = []
+    const points: { date: Date; equity: number; pl: number; accountId: string }[] = []
     if (sorted.length > 0) {
-      points.push({ date: new Date(sorted[0].open_time), equity: size, pl: 0 })
+      points.push({ date: new Date(sorted[0].open_time), equity: size, pl: 0, accountId: sorted[0].account_id })
     }
     sorted.forEach(t => {
       cumPL += Number(t.net_profit || t.profit || 0)
-      points.push({ date: new Date(t.close_time || t.open_time), equity: size + cumPL, pl: cumPL })
+      points.push({ date: new Date(t.close_time || t.open_time), equity: size + cumPL, pl: cumPL, accountId: t.account_id })
     })
     return points
   })()
@@ -135,7 +135,32 @@ export default function AccountDashboard({ account, lineageAccounts, onClose }: 
         : p.date.toLocaleDateString('it-IT', { day: '2-digit', month: '2-digit' }),
       equity: p.equity,
       pl: p.pl,
+      accountId: p.accountId,
     }))
+  })()
+
+  // Confini di fase per la equity lineage: punto in cui i trade passano da un conto
+  // all'altro (es. Challenge -> Verification). Una linea verticale per ogni passaggio.
+  const PHASE_LABEL: Record<string, string> = {
+    step1: 'Challenge', step2: 'Verification', funded: 'Funded',
+    breached: 'Breached', archived: 'Storico', unknown: '',
+  }
+  const phaseLabelById = new Map<string, string>()
+  ;(lineageAccounts || [account]).forEach(a => {
+    const lbl = (a.challenge_phase && PHASE_LABEL[a.challenge_phase]) || a.name.split('—')[1]?.trim() || ''
+    phaseLabelById.set(a.id, lbl)
+  })
+  const phaseBoundaries = (() => {
+    if (!isLineageView) return [] as { ts: string; label: string }[]
+    const out: { ts: string; label: string }[] = []
+    for (let i = 1; i < filteredEquity.length; i++) {
+      const prev = filteredEquity[i - 1].accountId
+      const cur = filteredEquity[i].accountId
+      if (cur && cur !== prev) {
+        out.push({ ts: filteredEquity[i].ts, label: phaseLabelById.get(cur) || '' })
+      }
+    }
+    return out
   })()
 
   // Monthly returns
@@ -440,6 +465,16 @@ export default function AccountDashboard({ account, lineageAccounts, onClose }: 
                   labelStyle={{ fontSize: 11, color: '#64748b' }}
                 />
                 <Area type="monotone" dataKey="equity" stroke="#7c3aed" strokeWidth={2} fill="url(#eqGrad)" dot={false} />
+                {phaseBoundaries.map((b, i) => (
+                  <ReferenceLine
+                    key={`phase-${i}`}
+                    x={b.ts}
+                    stroke="#f59e0b"
+                    strokeDasharray="4 4"
+                    strokeWidth={1.5}
+                    label={{ value: b.label, position: 'insideTopRight', fontSize: 10, fill: '#b45309', fontWeight: 600 }}
+                  />
+                ))}
               </AreaChart>
             </ResponsiveContainer>
           </>
