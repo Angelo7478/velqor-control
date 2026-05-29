@@ -699,6 +699,10 @@ export default function QuantPage() {
             className="px-3 py-2 bg-white border border-slate-200 text-slate-700 text-xs sm:text-sm font-medium rounded-lg hover:bg-slate-50 transition">
             Builder
           </a>
+          <a href="/divisioni/quant/research"
+            className="px-3 py-2 bg-white border border-violet-300 text-violet-700 text-xs sm:text-sm font-medium rounded-lg hover:bg-violet-50 transition">
+            🔬 Research
+          </a>
           <button onClick={refreshBenchmarks} disabled={benchLoading}
             className="px-3 py-2 bg-white border border-slate-200 text-slate-700 text-xs sm:text-sm font-medium rounded-lg hover:bg-slate-50 transition disabled:opacity-50">
             {benchLoading ? '...' : 'Benchmark'}
