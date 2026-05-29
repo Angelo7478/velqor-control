@@ -255,6 +255,12 @@ export default function ContiConfigPage() {
           const vpsArg = acc.vps_name?.includes(' ') ? `"${acc.vps_name}"` : acc.vps_name
           const launchCmd = hasVps ? `cd C:\\mt5-bridge; python launcher.py --vps ${vpsArg}` : ''
           const statusCmd = hasVps && acc.mt5_terminal_path ? `cd C:\\mt5-bridge; python bridge.py --mt5-path "${acc.mt5_terminal_path}" status` : ''
+          // Sequenza completa "Aggiorna bridge + riavvia": stop python, cd, fix progress bar
+          // PowerShell5 (Invoke-WebRequest che si blocca), scarica ultima versione bridge.py da GitHub,
+          // rilancia launcher. Un solo blocco copia-incolla pronto.
+          const updateCmd = hasVps
+            ? `Get-Process python -ErrorAction SilentlyContinue | Stop-Process -Force; cd C:\\mt5-bridge; $ProgressPreference = 'SilentlyContinue'; Invoke-WebRequest -Uri "https://raw.githubusercontent.com/Angelo7478/velqor-control/main/mt5-bridge/bridge.py" -OutFile bridge.py; python launcher.py --vps ${vpsArg}`
+            : ''
 
           return (
             <div key={acc.id} className="bg-white rounded-xl border border-slate-200 overflow-hidden">
@@ -427,9 +433,23 @@ export default function ContiConfigPage() {
 
                       {/* Comandi PowerShell */}
                       <div className="space-y-1.5">
+                        {updateCmd && (
+                          <div className="flex items-center gap-2">
+                            <span className="text-[10px] text-emerald-600 font-semibold w-20 shrink-0">Aggiorna+Avvio:</span>
+                            <code className="text-[10px] font-mono text-slate-600 bg-emerald-50 px-2 py-1 rounded border border-emerald-200 flex-1 truncate">
+                              {updateCmd}
+                            </code>
+                            <button
+                              onClick={() => copyCommand(updateCmd, `update-${acc.id}`)}
+                              className="text-[10px] px-2 py-1 text-emerald-700 hover:bg-emerald-100 rounded border border-emerald-300 shrink-0 font-medium"
+                            >
+                              {copiedCmd === `update-${acc.id}` ? 'Copiato!' : 'Copia'}
+                            </button>
+                          </div>
+                        )}
                         {launchCmd && (
                           <div className="flex items-center gap-2">
-                            <span className="text-[10px] text-slate-400 w-12 shrink-0">Avvio:</span>
+                            <span className="text-[10px] text-slate-400 w-20 shrink-0">Solo avvio:</span>
                             <code className="text-[10px] font-mono text-slate-600 bg-white px-2 py-1 rounded border border-slate-200 flex-1 truncate">
                               {launchCmd}
                             </code>
@@ -443,7 +463,7 @@ export default function ContiConfigPage() {
                         )}
                         {statusCmd && (
                           <div className="flex items-center gap-2">
-                            <span className="text-[10px] text-slate-400 w-12 shrink-0">Status:</span>
+                            <span className="text-[10px] text-slate-400 w-20 shrink-0">Status:</span>
                             <code className="text-[10px] font-mono text-slate-600 bg-white px-2 py-1 rounded border border-slate-200 flex-1 truncate">
                               {statusCmd}
                             </code>
@@ -456,7 +476,7 @@ export default function ContiConfigPage() {
                           </div>
                         )}
                         <div className="flex items-center gap-2">
-                          <span className="text-[10px] text-slate-400 w-12 shrink-0">Setup:</span>
+                          <span className="text-[10px] text-slate-400 w-20 shrink-0">Setup:</span>
                           <code className="text-[10px] font-mono text-slate-600 bg-white px-2 py-1 rounded border border-slate-200 flex-1 truncate">
                             cd C:\mt5-bridge; python setup.py
                           </code>
