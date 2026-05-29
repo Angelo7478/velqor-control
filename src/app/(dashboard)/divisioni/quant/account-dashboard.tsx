@@ -129,10 +129,11 @@ export default function AccountDashboard({ account, lineageAccounts, onClose }: 
     }
     // Format for chart
     const isShort = equityRange === '1W' || equityRange === '2W'
-    return data.map(p => ({
+    return data.map((p, i) => ({
+      i,
       ts: isShort
         ? p.date.toLocaleDateString('it-IT', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })
-        : p.date.toLocaleDateString('it-IT', { day: '2-digit', month: '2-digit' }),
+        : p.date.toLocaleDateString('it-IT', { day: '2-digit', month: '2-digit', year: '2-digit' }),
       equity: p.equity,
       pl: p.pl,
       accountId: p.accountId,
@@ -151,13 +152,13 @@ export default function AccountDashboard({ account, lineageAccounts, onClose }: 
     phaseLabelById.set(a.id, lbl)
   })
   const phaseBoundaries = (() => {
-    if (!isLineageView) return [] as { ts: string; label: string }[]
-    const out: { ts: string; label: string }[] = []
+    if (!isLineageView) return [] as { i: number; label: string }[]
+    const out: { i: number; label: string }[] = []
     for (let i = 1; i < filteredEquity.length; i++) {
       const prev = filteredEquity[i - 1].accountId
       const cur = filteredEquity[i].accountId
       if (cur && cur !== prev) {
-        out.push({ ts: filteredEquity[i].ts, label: phaseLabelById.get(cur) || '' })
+        out.push({ i: filteredEquity[i].i, label: phaseLabelById.get(cur) || '' })
       }
     }
     return out
@@ -455,20 +456,24 @@ export default function AccountDashboard({ account, lineageAccounts, onClose }: 
                   </linearGradient>
                 </defs>
                 <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
-                <XAxis dataKey="ts" tick={{ fontSize: 10 }} stroke="#94a3b8" interval="preserveStartEnd" />
+                <XAxis dataKey="i" type="number" allowDecimals={false}
+                  domain={[0, Math.max(0, filteredEquity.length - 1)]}
+                  tick={{ fontSize: 10 }} stroke="#94a3b8" interval="preserveStartEnd"
+                  tickFormatter={(v) => filteredEquity[Math.round(Number(v))]?.ts ?? ''} />
                 <YAxis tick={{ fontSize: 10 }} stroke="#94a3b8"
                   domain={[(dataMin: number) => Math.floor(dataMin * 0.998), (dataMax: number) => Math.ceil(dataMax * 1.002)]}
                   tickFormatter={(v) => `$${(v / 1000).toFixed(0)}k`} />
                 <Tooltip
                   contentStyle={{ fontSize: 12, borderRadius: 8, border: '1px solid #e2e8f0' }}
                   formatter={(val) => [fmtUsd(Number(val)), 'Equity']}
+                  labelFormatter={(v) => filteredEquity[Math.round(Number(v))]?.ts ?? ''}
                   labelStyle={{ fontSize: 11, color: '#64748b' }}
                 />
                 <Area type="monotone" dataKey="equity" stroke="#7c3aed" strokeWidth={2} fill="url(#eqGrad)" dot={false} />
                 {phaseBoundaries.map((b, i) => (
                   <ReferenceLine
                     key={`phase-${i}`}
-                    x={b.ts}
+                    x={b.i}
                     stroke="#f59e0b"
                     strokeDasharray="4 4"
                     strokeWidth={1.5}
