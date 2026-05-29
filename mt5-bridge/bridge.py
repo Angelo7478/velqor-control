@@ -456,16 +456,17 @@ def load_strategy_map():
 
 
 def resolve_strategy(raw_magic, strategy_map):
-    """Resolve raw MT5 magic to strategy_id. Tries exact match first,
-    then SQX-decoded magic (floor(magic/1000))."""
+    """Resolve MT5 magic to strategy_id.
+    Match esatto, poi base = magic % 100 (coerente con la colonna generata
+    qel_trades.base_magic). Gestisce sia i magic puri (7, 12) sia i compositi
+    con offset multiplo di 100 (es. 54403 -> base 3, 54412 -> base 12).
+    Il magic grezzo viene preservato cosi com'e; si risolve solo strategy_id."""
     m = int(raw_magic)
     if m in strategy_map:
         return m, strategy_map[m]
-    # SQX encoding: strategy_magic * 1000 + variant
-    if m >= 1000:
-        decoded = m // 1000
-        if decoded in strategy_map:
-            return decoded, strategy_map[decoded]
+    base = m % 100
+    if base != 0 and base in strategy_map:
+        return m, strategy_map[base]
     return m, None
 
 

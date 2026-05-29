@@ -184,13 +184,15 @@ export default function AccountDashboard({ account, lineageAccounts, onClose }: 
     symbolStats[t.symbol].pl += Number(t.net_profit || t.profit || 0)
   })
 
-  // Strategy performance breakdown via magic number
+  // Strategy performance breakdown via base_magic (= magic % 100).
+  // base_magic normalizza i magic compositi (es. 54403 -> 3) cosi i trade di
+  // conti che usano offset SQX vengono attribuiti alla strategia corretta.
   const strategyMap = new Map(strategies.map(s => [s.magic, s]))
-  const magicNumbers = [...new Set(trades.map(t => t.magic).filter((m): m is number => m !== null && m !== 0))]
+  const magicNumbers = [...new Set(trades.map(t => t.base_magic ?? t.magic).filter((m): m is number => m !== null && m !== 0))]
 
   function calcStratStats(magic: number) {
-    const stratTrades = closedTrades.filter(t => t.magic === magic)
-    const stratOpen = openTrades.filter(t => t.magic === magic)
+    const stratTrades = closedTrades.filter(t => (t.base_magic ?? t.magic) === magic)
+    const stratOpen = openTrades.filter(t => (t.base_magic ?? t.magic) === magic)
     const wins = stratTrades.filter(t => Number(t.net_profit || t.profit || 0) > 0)
     const losses = stratTrades.filter(t => Number(t.net_profit || t.profit || 0) < 0)
     const totalPL = stratTrades.reduce((s, t) => s + Number(t.net_profit || t.profit || 0), 0)
@@ -224,7 +226,7 @@ export default function AccountDashboard({ account, lineageAccounts, onClose }: 
   const selStrategy = selectedMagic !== null ? strategyMap.get(selectedMagic) : null
 
   // Show strategies that have trades on this account (any status) + active ones without trades
-  const accountMagics = new Set(trades.map(t => t.magic).filter((m): m is number => m !== null && m !== 0))
+  const accountMagics = new Set(trades.map(t => t.base_magic ?? t.magic).filter((m): m is number => m !== null && m !== 0))
   const visibleStrategies = strategies.filter(s => accountMagics.has(s.magic) || s.status === 'active')
     .sort((a, b) => a.magic - b.magic)
 

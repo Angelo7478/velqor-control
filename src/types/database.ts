@@ -270,6 +270,9 @@ export interface QelTrade {
   strategy_id: string | null
   ticket: number
   magic: number | null
+  /** Magic-strategia normalizzato (colonna generata = magic % 100).
+   *  Estrae il magic reale anche da magic compositi (es. 54403 -> 3). */
+  base_magic: number | null
   symbol: string
   direction: QelTradeDirection
   lots: number
