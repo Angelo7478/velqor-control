@@ -445,3 +445,89 @@ export interface QelUserAccess {
   created_at: string
   updated_at: string
 }
+
+// ============================================================
+// QRE — Quant Resource Engine (libreria della conoscenza, sola lettura UI)
+// Tabelle qre_* separate dalle qel_* LIVE. Mai scrivere da UI.
+// ============================================================
+
+export interface QreSource {
+  id: string
+  type: string // youtube_channel | youtube_video | personal_video | code_file | article | note
+  name: string
+  url: string | null
+  author: string | null
+  metadata: Record<string, any> | null
+  status: string // active | paused | archived
+  created_at: string
+  updated_at: string
+}
+
+export interface QreContent {
+  id: string
+  source_id: string
+  title: string
+  raw_text: string | null
+  content_type: string | null // transcript | code | note | article
+  language: string | null
+  duration_seconds: number | null
+  external_id: string | null // id video YouTube
+  publish_date: string | null
+  metadata: Record<string, any> | null
+  status: string // ingested | processing | processed | error
+  ingested_at: string | null
+  processed_at: string | null
+}
+
+export interface QreChunk {
+  id: string
+  content_id: string
+  chunk_text: string
+  topic: string | null
+  summary: string | null
+  sequence_order: number | null
+  token_count: number | null
+  metadata: Record<string, any> | null
+  created_at: string
+}
+
+export interface QreTaxonomy {
+  id: string
+  category: string // asset | indicator | logic_type | edge_type | timeframe | pattern | setup | concept | market_condition
+  name: string
+  slug: string
+  description: string | null
+  parent_id: string | null
+  metadata: Record<string, any> | null
+  created_at: string
+}
+
+export interface QreChunkEntity {
+  id: string
+  chunk_id: string
+  taxonomy_id: string
+  confidence: number | null
+  context_snippet: string | null
+  metadata: Record<string, any> | null
+  created_at: string
+}
+
+export interface QreStrategyCandidate {
+  id: string
+  name: string
+  description: string | null
+  logic_summary: string | null
+  logic_json: Record<string, any> | null
+  assets: string[] | null
+  timeframes: string[] | null
+  edge_type: string | null
+  confidence_score: number | null
+  source_chunk_ids: string[] | null
+  status: string // new | queued | testing | validated | rejected | parked
+  sqx_config: Record<string, any> | null
+  sqx_results: Record<string, any> | null
+  darwinex_status: string | null
+  notes: string | null
+  created_at: string
+  updated_at: string
+}
