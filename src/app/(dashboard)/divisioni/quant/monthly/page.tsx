@@ -173,15 +173,15 @@ export default function MonthlyPage() {
         .in('account_id', lineageIds),
     ]
 
-    // For general mode, also load all trades
-    if (mode === 'general') {
-      queries.push(
-        supabase.from('qel_trades').select('strategy_id, net_profit, close_time, lots, symbol')
-          .in('account_id', lineageIds).eq('is_open', false)
-          .not('close_time', 'is', null)
-          .order('close_time')
-      )
-    }
+    // Carica SEMPRE tutti i trade chiusi della lineage: servono per la equity
+    // curve trade-based (continua, senza il cap di 1000 righe degli snapshot)
+    // e per il trend mensile in general mode.
+    queries.push(
+      supabase.from('qel_trades').select('strategy_id, net_profit, close_time, lots, symbol')
+        .in('account_id', lineageIds).eq('is_open', false)
+        .not('close_time', 'is', null)
+        .order('close_time')
+    )
 
     const results = await Promise.all(queries)
 
@@ -222,7 +222,7 @@ export default function MonthlyPage() {
     }
     setPerfData(pMap)
 
-    if (mode === 'general' && results[6]) {
+    if (results[6]) {
       setAllTrades((results[6].data || []) as TradeRow[])
     }
 
@@ -464,23 +464,52 @@ export default function MonthlyPage() {
 
   // Equity curve chart data
   const equityChartData = useMemo(() => {
+    const base = lineageAccts.length
+      ? Number(lineageAccts[0].account_size)
+      : Number(accounts.find(a => a.id === selectedAccountId)?.account_size || 100000)
+
+    // PRIMARIO: equity trade-based (cumulativa dai net realizzati). Continua sulla
+    // lineage, senza il cap di 1000 righe che troncava gli snapshot.
+    const closed = [...allTrades]
+      .filter(t => t.close_time)
+      .sort((a, b) => (a.close_time as string).localeCompare(b.close_time as string))
+    if (closed.length > 0) {
+      let cum = base
+      const full: { ts: string; equity: number }[] = [{ ts: closed[0].close_time as string, equity: base }]
+      for (const t of closed) {
+        cum += Number(t.net_profit || 0)
+        full.push({ ts: t.close_time as string, equity: cum })
+      }
+      let pts = full
+      if (mode === 'monthly') {
+        const { start, end } = getMonthRange(selectedMonth)
+        const before = full.filter(p => p.ts < start)
+        const within = full.filter(p => p.ts >= start && p.ts < end)
+        const startEq = before.length ? before[before.length - 1].equity : base
+        pts = [{ ts: start, equity: startEq }, ...within]
+      }
+      const step = Math.max(1, Math.floor(pts.length / 200))
+      return pts.filter((_, i) => i % step === 0 || i === pts.length - 1).map(p => ({
+        ts: p.ts.slice(0, mode === 'monthly' ? 10 : 7),
+        equity: Math.round(p.equity * 100) / 100,
+      }))
+    }
+
+    // FALLBACK: snapshot con offset per fase (se non ci sono ancora trade)
     if (snapshots.length === 0) return []
-    // Offset per fase: rende la equity continua sulla lineage (no salto al cambio fase,
-    // ogni fase riparte dal capitale ma la curva prosegue dal guadagno cumulato precedente).
     const offsetById = new Map<string, number>()
-    let cum = 0
+    let cumg = 0
     for (const a of [...lineageAccts].sort((x, y) => x.created_at.localeCompare(y.created_at))) {
-      offsetById.set(a.id, cum)
-      cum += (a.balance - a.account_size)
+      offsetById.set(a.id, cumg)
+      cumg += (a.balance - a.account_size)
     }
     const sorted = [...snapshots].sort((a, b) => a.ts.localeCompare(b.ts))
-    // Downsample to max 200 points for chart performance
     const step = Math.max(1, Math.floor(sorted.length / 200))
     return sorted.filter((_, i) => i % step === 0 || i === sorted.length - 1).map(s => ({
       ts: s.ts.slice(0, mode === 'monthly' ? 10 : 7),
       equity: Math.round((s.equity + (offsetById.get(s.account_id) ?? 0)) * 100) / 100,
     }))
-  }, [snapshots, lineageAccts, mode])
+  }, [allTrades, snapshots, lineageAccts, accounts, selectedAccountId, mode, selectedMonth])
 
   // ---- Report PDF ----
 
