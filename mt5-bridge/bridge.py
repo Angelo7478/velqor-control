@@ -276,7 +276,7 @@ def warmup_history():
     hasn't loaded it yet. We call history_deals_total repeatedly until
     the count stabilizes."""
     date_from = datetime.now(tz=timezone.utc) - timedelta(days=HISTORY_DAYS)
-    date_to = datetime.now(tz=timezone.utc)
+    date_to = datetime.now(tz=timezone.utc) + timedelta(days=1)  # buffer: server MT5 in ora locale (UTC+offset), non tagliare i deal recenti
     prev_count = -1
     for attempt in range(5):
         total = mt5.history_deals_total(date_from, date_to)
@@ -309,7 +309,10 @@ def _apply_close_data(trade, d):
 
 
 def get_closed_deals(since_date):
-    date_to = datetime.now(tz=timezone.utc)
+    # buffer +1g su date_to: i timestamp MT5 sono in ora server (UTC+offset);
+    # passando 'now' UTC come limite superiore si perderebbero i deal piu' recenti
+    # (causa principale delle posizioni "appese" non riconciliate).
+    date_to = datetime.now(tz=timezone.utc) + timedelta(days=1)
     deals = mt5.history_deals_get(since_date, date_to)
     if deals is None or len(deals) == 0:
         return []
@@ -687,7 +690,7 @@ def run_enrich():
         log.info(f"Enrich: {account['name']} ({login})")
 
         date_from = datetime.now(tz=timezone.utc) - timedelta(days=HISTORY_DAYS)
-        deals = mt5.history_deals_get(date_from, datetime.now(tz=timezone.utc))
+        deals = mt5.history_deals_get(date_from, datetime.now(tz=timezone.utc) + timedelta(days=1))
         if not deals:
             log.warning("Nessun deal")
             return
