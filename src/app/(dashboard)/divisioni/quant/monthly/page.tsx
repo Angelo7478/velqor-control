@@ -42,6 +42,52 @@ const PHASE_LABEL: Record<string, string> = {
   breached: 'Breached', archived: 'Storico', unknown: '',
 }
 
+/** Costruisce l'SVG della equity curve per i report PDF, con assi X/Y, griglia,
+ *  label valori ($k) e date, e linee verticali di separazione fase. */
+function buildEquitySvg(
+  data: { ts: string; equity: number }[],
+  boundaries: { index: number; label: string }[],
+): string {
+  if (data.length < 2) return ''
+  const w = 700, h = 220, padL = 60, padR = 16, padT = 14, padB = 28
+  const eqVals = data.map(d => d.equity)
+  const rawMin = Math.min(...eqVals), rawMax = Math.max(...eqVals)
+  const span = (rawMax - rawMin) || Math.max(1, Math.abs(rawMax) * 0.01)
+  const minEq = rawMin - span * 0.06
+  const maxEq = rawMax + span * 0.06
+  const scaleX = (i: number) => padL + (i / (data.length - 1)) * (w - padL - padR)
+  const scaleY = (v: number) => h - padB - ((v - minEq) / (maxEq - minEq)) * (h - padB - padT)
+  const points = data.map((d, i) => `${scaleX(i).toFixed(1)},${scaleY(d.equity).toFixed(1)}`).join(' ')
+  const areaPoints = `${scaleX(0).toFixed(1)},${(h - padB).toFixed(1)} ${points} ${scaleX(data.length - 1).toFixed(1)},${(h - padB).toFixed(1)}`
+  const ySteps = 5
+  const yGrid = Array.from({ length: ySteps + 1 }, (_, k) => {
+    const v = minEq + (maxEq - minEq) * (k / ySteps)
+    const y = scaleY(v)
+    return `<line x1="${padL}" y1="${y.toFixed(1)}" x2="${w - padR}" y2="${y.toFixed(1)}" stroke="#eef2f7" stroke-width="1" /><text x="${padL - 6}" y="${(y + 3).toFixed(1)}" font-size="9" fill="#94a3b8" text-anchor="end">$${(v / 1000).toFixed(1)}k</text>`
+  }).join('')
+  const nX = Math.min(6, data.length)
+  const xLabels = Array.from({ length: nX }, (_, k) => {
+    const i = Math.round(k * (data.length - 1) / (nX - 1))
+    const x = scaleX(i)
+    const anchor = k === 0 ? 'start' : k === nX - 1 ? 'end' : 'middle'
+    return `<text x="${x.toFixed(1)}" y="${h - 8}" font-size="9" fill="#94a3b8" text-anchor="${anchor}">${data[i].ts}</text>`
+  }).join('')
+  const dividers = boundaries.map(b => {
+    const x = scaleX(b.index)
+    return `<line x1="${x.toFixed(1)}" y1="${padT}" x2="${x.toFixed(1)}" y2="${h - padB}" stroke="#f59e0b" stroke-width="1.2" stroke-dasharray="4 3" /><text x="${(x + 3).toFixed(1)}" y="${padT + 9}" font-size="8" fill="#b45309" font-weight="600">${b.label}</text>`
+  }).join('')
+  return `
+    <svg viewBox="0 0 ${w} ${h}" style="width:100%;max-height:240px">
+      ${yGrid}
+      <line x1="${padL}" y1="${padT}" x2="${padL}" y2="${h - padB}" stroke="#cbd5e1" stroke-width="1" />
+      <line x1="${padL}" y1="${h - padB}" x2="${w - padR}" y2="${h - padB}" stroke="#cbd5e1" stroke-width="1" />
+      <polygon points="${areaPoints}" fill="#6366f120" />
+      <polyline points="${points}" fill="none" stroke="#6366f1" stroke-width="1.8" />
+      ${dividers}
+      ${xLabels}
+    </svg>`
+}
+
 // ============================================
 // Helpers
 // ============================================
@@ -621,28 +667,7 @@ export default function MonthlyPage() {
     // Build equity SVG
     let equitySvg = ''
     if (equityChartData.length > 1) {
-      const w = 700, h = 200, pad = 30
-      const eqVals = equityChartData.map(d => d.equity)
-      const minEq = Math.min(...eqVals) * 0.999
-      const maxEq = Math.max(...eqVals) * 1.001
-      const scaleX = (i: number) => pad + (i / (equityChartData.length - 1)) * (w - 2 * pad)
-      const scaleY = (v: number) => h - pad - ((v - minEq) / (maxEq - minEq)) * (h - 2 * pad)
-      const points = equityChartData.map((d, i) => `${scaleX(i).toFixed(1)},${scaleY(d.equity).toFixed(1)}`).join(' ')
-      const areaPoints = `${scaleX(0).toFixed(1)},${(h - pad).toFixed(1)} ${points} ${scaleX(equityChartData.length - 1).toFixed(1)},${(h - pad).toFixed(1)}`
-      const dividers = phaseBoundaries.map(b => {
-        const x = scaleX(b.index)
-        return `<line x1="${x.toFixed(1)}" y1="${pad}" x2="${x.toFixed(1)}" y2="${h - pad}" stroke="#f59e0b" stroke-width="1.2" stroke-dasharray="4 3" /><text x="${(x + 3).toFixed(1)}" y="${pad + 9}" font-size="8" fill="#b45309" font-weight="600">${b.label}</text>`
-      }).join('')
-      equitySvg = `
-        <svg viewBox="0 0 ${w} ${h}" style="width:100%;max-height:200px">
-          <polygon points="${areaPoints}" fill="#6366f120" />
-          <polyline points="${points}" fill="none" stroke="#6366f1" stroke-width="1.5" />
-          ${dividers}
-          <text x="${pad}" y="${h - 8}" font-size="9" fill="#94a3b8">${equityChartData[0].ts}</text>
-          <text x="${w - pad}" y="${h - 8}" font-size="9" fill="#94a3b8" text-anchor="end">${equityChartData[equityChartData.length - 1].ts}</text>
-          <text x="${pad - 4}" y="${scaleY(maxEq) + 4}" font-size="9" fill="#94a3b8" text-anchor="end">${fmtM(maxEq)}</text>
-          <text x="${pad - 4}" y="${scaleY(minEq) + 4}" font-size="9" fill="#94a3b8" text-anchor="end">${fmtM(minEq)}</text>
-        </svg>`
+      equitySvg = buildEquitySvg(equityChartData, phaseBoundaries)
     }
 
     const html = `<!DOCTYPE html>
@@ -891,26 +916,7 @@ export default function MonthlyPage() {
     // Equity SVG
     let equitySvg = ''
     if (equityChartData.length > 1) {
-      const w = 700, h = 200, pad = 30
-      const eqVals = equityChartData.map(d => d.equity)
-      const minEq = Math.min(...eqVals) * 0.999
-      const maxEq = Math.max(...eqVals) * 1.001
-      const scaleX = (i: number) => pad + (i / (equityChartData.length - 1)) * (w - 2 * pad)
-      const scaleY = (v: number) => h - pad - ((v - minEq) / (maxEq - minEq)) * (h - 2 * pad)
-      const points = equityChartData.map((d, i) => `${scaleX(i).toFixed(1)},${scaleY(d.equity).toFixed(1)}`).join(' ')
-      const areaPoints = `${scaleX(0).toFixed(1)},${(h - pad).toFixed(1)} ${points} ${scaleX(equityChartData.length - 1).toFixed(1)},${(h - pad).toFixed(1)}`
-      const dividers = phaseBoundaries.map(b => {
-        const x = scaleX(b.index)
-        return `<line x1="${x.toFixed(1)}" y1="${pad}" x2="${x.toFixed(1)}" y2="${h - pad}" stroke="#f59e0b" stroke-width="1.2" stroke-dasharray="4 3" /><text x="${(x + 3).toFixed(1)}" y="${pad + 9}" font-size="8" fill="#b45309" font-weight="600">${b.label}</text>`
-      }).join('')
-      equitySvg = `
-        <svg viewBox="0 0 ${w} ${h}" style="width:100%;max-height:200px">
-          <polygon points="${areaPoints}" fill="#6366f120" />
-          <polyline points="${points}" fill="none" stroke="#6366f1" stroke-width="1.5" />
-          ${dividers}
-          <text x="${pad}" y="${h - 8}" font-size="9" fill="#94a3b8">${equityChartData[0].ts}</text>
-          <text x="${w - pad}" y="${h - 8}" font-size="9" fill="#94a3b8" text-anchor="end">${equityChartData[equityChartData.length - 1].ts}</text>
-        </svg>`
+      equitySvg = buildEquitySvg(equityChartData, phaseBoundaries)
     }
 
     // Public summary paragraphs
