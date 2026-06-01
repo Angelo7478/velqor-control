@@ -34,6 +34,12 @@ interface TradeRow {
   close_time: string
   lots: number
   symbol: string
+  account_id?: string
+}
+
+const PHASE_LABEL: Record<string, string> = {
+  step1: 'Challenge', step2: 'Verification', funded: 'Funded',
+  breached: 'Breached', archived: 'Storico', unknown: '',
 }
 
 // ============================================
@@ -92,7 +98,7 @@ export default function MonthlyPage() {
   const [allTrades, setAllTrades] = useState<TradeRow[]>([])
   const [snapshots, setSnapshots] = useState<{ ts: string; equity: number; account_id: string }[]>([])
   // Conti della lineage selezionata (per aggregare challenge + verification)
-  const [lineageAccts, setLineageAccts] = useState<{ id: string; account_size: number; balance: number; created_at: string }[]>([])
+  const [lineageAccts, setLineageAccts] = useState<{ id: string; account_size: number; balance: number; created_at: string; challenge_phase: string | null }[]>([])
   const [benchmarks, setBenchmarks] = useState<Map<string, { ts: string; close_price: number }[]>>(new Map())
   const [perfData, setPerfData] = useState<Map<string, Record<string, unknown>>>(new Map())
 
@@ -131,14 +137,14 @@ export default function MonthlyPage() {
     // Risolvi tutta la lineage (challenge + verification, anche conti inactive)
     // cosi i dati del report sono AGGREGATI sull'intera challenge, non sul singolo conto.
     let lineageIds = [selectedAccountId]
-    let linAccts: { id: string; account_size: number; balance: number; created_at: string }[] = []
+    let linAccts: { id: string; account_size: number; balance: number; created_at: string; challenge_phase: string | null }[] = []
     if (acc?.lineage_id) {
       const { data: la } = await supabase.from('qel_accounts')
-        .select('id, account_size, balance, created_at')
+        .select('id, account_size, balance, created_at, challenge_phase')
         .eq('lineage_id', acc.lineage_id).order('created_at')
       if (la && la.length) {
-        linAccts = la.map((x: { id: string; account_size: number | null; balance: number | null; created_at: string }) => ({
-          id: x.id, account_size: Number(x.account_size || 0), balance: Number(x.balance || 0), created_at: x.created_at,
+        linAccts = la.map((x: { id: string; account_size: number | null; balance: number | null; created_at: string; challenge_phase: string | null }) => ({
+          id: x.id, account_size: Number(x.account_size || 0), balance: Number(x.balance || 0), created_at: x.created_at, challenge_phase: x.challenge_phase,
         }))
         lineageIds = linAccts.map(x => x.id)
       }
@@ -177,7 +183,7 @@ export default function MonthlyPage() {
     // curve trade-based (continua, senza il cap di 1000 righe degli snapshot)
     // e per il trend mensile in general mode.
     queries.push(
-      supabase.from('qel_trades').select('strategy_id, net_profit, close_time, lots, symbol')
+      supabase.from('qel_trades').select('strategy_id, net_profit, close_time, lots, symbol, account_id')
         .in('account_id', lineageIds).eq('is_open', false)
         .not('close_time', 'is', null)
         .order('close_time')
@@ -475,10 +481,10 @@ export default function MonthlyPage() {
       .sort((a, b) => (a.close_time as string).localeCompare(b.close_time as string))
     if (closed.length > 0) {
       let cum = base
-      const full: { ts: string; equity: number }[] = [{ ts: closed[0].close_time as string, equity: base }]
+      const full: { ts: string; equity: number; accountId: string }[] = [{ ts: closed[0].close_time as string, equity: base, accountId: closed[0].account_id || '' }]
       for (const t of closed) {
         cum += Number(t.net_profit || 0)
-        full.push({ ts: t.close_time as string, equity: cum })
+        full.push({ ts: t.close_time as string, equity: cum, accountId: t.account_id || '' })
       }
       let pts = full
       if (mode === 'monthly') {
@@ -486,12 +492,14 @@ export default function MonthlyPage() {
         const before = full.filter(p => p.ts < start)
         const within = full.filter(p => p.ts >= start && p.ts < end)
         const startEq = before.length ? before[before.length - 1].equity : base
-        pts = [{ ts: start, equity: startEq }, ...within]
+        const startAcc = before.length ? before[before.length - 1].accountId : (within[0]?.accountId || '')
+        pts = [{ ts: start, equity: startEq, accountId: startAcc }, ...within]
       }
       const step = Math.max(1, Math.floor(pts.length / 200))
       return pts.filter((_, i) => i % step === 0 || i === pts.length - 1).map(p => ({
         ts: p.ts.slice(0, mode === 'monthly' ? 10 : 7),
         equity: Math.round(p.equity * 100) / 100,
+        accountId: p.accountId,
       }))
     }
 
@@ -508,8 +516,28 @@ export default function MonthlyPage() {
     return sorted.filter((_, i) => i % step === 0 || i === sorted.length - 1).map(s => ({
       ts: s.ts.slice(0, mode === 'monthly' ? 10 : 7),
       equity: Math.round((s.equity + (offsetById.get(s.account_id) ?? 0)) * 100) / 100,
+      accountId: s.account_id,
     }))
   }, [allTrades, snapshots, lineageAccts, accounts, selectedAccountId, mode, selectedMonth])
+
+  // Etichette di fase per conto + confini sulla equity (dove cambia il conto)
+  const phaseLabelById = useMemo(() => {
+    const m = new Map<string, string>()
+    lineageAccts.forEach(a => { m.set(a.id, (a.challenge_phase && PHASE_LABEL[a.challenge_phase]) || '') })
+    return m
+  }, [lineageAccts])
+
+  const phaseBoundaries = useMemo(() => {
+    if (lineageAccts.length < 2) return [] as { index: number; label: string }[]
+    const out: { index: number; label: string }[] = []
+    for (let i = 1; i < equityChartData.length; i++) {
+      const cur = equityChartData[i].accountId
+      if (cur && cur !== equityChartData[i - 1].accountId) {
+        out.push({ index: i, label: phaseLabelById.get(cur) || '' })
+      }
+    }
+    return out
+  }, [equityChartData, lineageAccts, phaseLabelById])
 
   // ---- Report PDF ----
 
@@ -601,10 +629,15 @@ export default function MonthlyPage() {
       const scaleY = (v: number) => h - pad - ((v - minEq) / (maxEq - minEq)) * (h - 2 * pad)
       const points = equityChartData.map((d, i) => `${scaleX(i).toFixed(1)},${scaleY(d.equity).toFixed(1)}`).join(' ')
       const areaPoints = `${scaleX(0).toFixed(1)},${(h - pad).toFixed(1)} ${points} ${scaleX(equityChartData.length - 1).toFixed(1)},${(h - pad).toFixed(1)}`
+      const dividers = phaseBoundaries.map(b => {
+        const x = scaleX(b.index)
+        return `<line x1="${x.toFixed(1)}" y1="${pad}" x2="${x.toFixed(1)}" y2="${h - pad}" stroke="#f59e0b" stroke-width="1.2" stroke-dasharray="4 3" /><text x="${(x + 3).toFixed(1)}" y="${pad + 9}" font-size="8" fill="#b45309" font-weight="600">${b.label}</text>`
+      }).join('')
       equitySvg = `
         <svg viewBox="0 0 ${w} ${h}" style="width:100%;max-height:200px">
           <polygon points="${areaPoints}" fill="#6366f120" />
           <polyline points="${points}" fill="none" stroke="#6366f1" stroke-width="1.5" />
+          ${dividers}
           <text x="${pad}" y="${h - 8}" font-size="9" fill="#94a3b8">${equityChartData[0].ts}</text>
           <text x="${w - pad}" y="${h - 8}" font-size="9" fill="#94a3b8" text-anchor="end">${equityChartData[equityChartData.length - 1].ts}</text>
           <text x="${pad - 4}" y="${scaleY(maxEq) + 4}" font-size="9" fill="#94a3b8" text-anchor="end">${fmtM(maxEq)}</text>
@@ -866,10 +899,15 @@ export default function MonthlyPage() {
       const scaleY = (v: number) => h - pad - ((v - minEq) / (maxEq - minEq)) * (h - 2 * pad)
       const points = equityChartData.map((d, i) => `${scaleX(i).toFixed(1)},${scaleY(d.equity).toFixed(1)}`).join(' ')
       const areaPoints = `${scaleX(0).toFixed(1)},${(h - pad).toFixed(1)} ${points} ${scaleX(equityChartData.length - 1).toFixed(1)},${(h - pad).toFixed(1)}`
+      const dividers = phaseBoundaries.map(b => {
+        const x = scaleX(b.index)
+        return `<line x1="${x.toFixed(1)}" y1="${pad}" x2="${x.toFixed(1)}" y2="${h - pad}" stroke="#f59e0b" stroke-width="1.2" stroke-dasharray="4 3" /><text x="${(x + 3).toFixed(1)}" y="${pad + 9}" font-size="8" fill="#b45309" font-weight="600">${b.label}</text>`
+      }).join('')
       equitySvg = `
         <svg viewBox="0 0 ${w} ${h}" style="width:100%;max-height:200px">
           <polygon points="${areaPoints}" fill="#6366f120" />
           <polyline points="${points}" fill="none" stroke="#6366f1" stroke-width="1.5" />
+          ${dividers}
           <text x="${pad}" y="${h - 8}" font-size="9" fill="#94a3b8">${equityChartData[0].ts}</text>
           <text x="${w - pad}" y="${h - 8}" font-size="9" fill="#94a3b8" text-anchor="end">${equityChartData[equityChartData.length - 1].ts}</text>
         </svg>`
@@ -1290,6 +1328,10 @@ export default function MonthlyPage() {
                     <YAxis tick={{ fontSize: 10 }} tickFormatter={v => `$${v.toLocaleString()}`} domain={['auto', 'auto']} />
                     <Tooltip formatter={(v) => [`$${Number(v).toLocaleString('it-IT', { minimumFractionDigits: 2 })}`, 'Equity']} />
                     <Area type="monotone" dataKey="equity" stroke="#6366f1" fill="#6366f120" strokeWidth={2} />
+                    {phaseBoundaries.map((b, i) => (
+                      <ReferenceLine key={`ph-${i}`} x={equityChartData[b.index]?.ts} stroke="#f59e0b" strokeDasharray="4 3"
+                        label={{ value: b.label, position: 'insideTopRight', fontSize: 10, fill: '#b45309' }} />
+                    ))}
                   </AreaChart>
                 </ResponsiveContainer>
               </div>
