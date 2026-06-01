@@ -90,7 +90,9 @@ export default function MonthlyPage() {
   const [monthTrades, setMonthTrades] = useState<TradeRow[]>([])
   const [prevMonthTrades, setPrevMonthTrades] = useState<TradeRow[]>([])
   const [allTrades, setAllTrades] = useState<TradeRow[]>([])
-  const [snapshots, setSnapshots] = useState<{ ts: string; equity: number }[]>([])
+  const [snapshots, setSnapshots] = useState<{ ts: string; equity: number; account_id: string }[]>([])
+  // Conti della lineage selezionata (per aggregare challenge + verification)
+  const [lineageAccts, setLineageAccts] = useState<{ id: string; account_size: number; balance: number; created_at: string }[]>([])
   const [benchmarks, setBenchmarks] = useState<Map<string, { ts: string; close_price: number }[]>>(new Map())
   const [perfData, setPerfData] = useState<Map<string, Record<string, unknown>>>(new Map())
 
@@ -126,23 +128,40 @@ export default function MonthlyPage() {
     const { start: prevStart, end: prevEnd } = getMonthRange(prev)
     const acc = accounts.find(a => a.id === selectedAccountId)
 
+    // Risolvi tutta la lineage (challenge + verification, anche conti inactive)
+    // cosi i dati del report sono AGGREGATI sull'intera challenge, non sul singolo conto.
+    let lineageIds = [selectedAccountId]
+    let linAccts: { id: string; account_size: number; balance: number; created_at: string }[] = []
+    if (acc?.lineage_id) {
+      const { data: la } = await supabase.from('qel_accounts')
+        .select('id, account_size, balance, created_at')
+        .eq('lineage_id', acc.lineage_id).order('created_at')
+      if (la && la.length) {
+        linAccts = la.map((x: { id: string; account_size: number | null; balance: number | null; created_at: string }) => ({
+          id: x.id, account_size: Number(x.account_size || 0), balance: Number(x.balance || 0), created_at: x.created_at,
+        }))
+        lineageIds = linAccts.map(x => x.id)
+      }
+    }
+    setLineageAccts(linAccts)
+
     // Parallel queries
     const queries = [
       // 1. Current month trades
       supabase.from('qel_trades').select('strategy_id, net_profit, close_time, lots, symbol')
-        .eq('account_id', selectedAccountId).eq('is_open', false)
-        .not('strategy_id', 'is', null).not('close_time', 'is', null)
+        .in('account_id', lineageIds).eq('is_open', false)
+        .not('close_time', 'is', null)
         .gte('close_time', start).lt('close_time', end).order('close_time'),
       // 2. Previous month trades
       supabase.from('qel_trades').select('strategy_id, net_profit, close_time, lots, symbol')
-        .eq('account_id', selectedAccountId).eq('is_open', false)
-        .not('strategy_id', 'is', null).not('close_time', 'is', null)
+        .in('account_id', lineageIds).eq('is_open', false)
+        .not('close_time', 'is', null)
         .gte('close_time', prevStart).lt('close_time', prevEnd).order('close_time'),
       // 3. Strategies
       supabase.from('qel_strategies').select('*').order('magic'),
       // 4. Snapshots for equity curve
-      supabase.from('qel_account_snapshots').select('ts, equity')
-        .eq('account_id', selectedAccountId)
+      supabase.from('qel_account_snapshots').select('ts, equity, account_id')
+        .in('account_id', lineageIds)
         .gte('ts', mode === 'monthly' ? start : '2020-01-01')
         .lt('ts', end).order('ts'),
       // 5. Benchmarks (3 months lookback for regime)
@@ -151,15 +170,15 @@ export default function MonthlyPage() {
         .lte('ts', end.slice(0, 10)).order('ts'),
       // 6. Per-account performance
       supabase.from('v_strategy_recent_performance').select('*')
-        .eq('account_id', selectedAccountId),
+        .in('account_id', lineageIds),
     ]
 
     // For general mode, also load all trades
     if (mode === 'general') {
       queries.push(
         supabase.from('qel_trades').select('strategy_id, net_profit, close_time, lots, symbol')
-          .eq('account_id', selectedAccountId).eq('is_open', false)
-          .not('strategy_id', 'is', null).not('close_time', 'is', null)
+          .in('account_id', lineageIds).eq('is_open', false)
+          .not('close_time', 'is', null)
           .order('close_time')
       )
     }
@@ -173,6 +192,7 @@ export default function MonthlyPage() {
     const snapData = (results[3].data || []).map((s: Record<string, unknown>) => ({
       ts: s.ts as string,
       equity: Number(s.equity),
+      account_id: s.account_id as string,
     }))
     setSnapshots(snapData)
 
@@ -184,10 +204,21 @@ export default function MonthlyPage() {
     }
     setBenchmarks(benchMap)
 
-    // Performance map
+    // Performance map — aggrega le righe per strategia su TUTTA la lineage (somma trade/pnl,
+    // media pesata per win%/payoff/lotti, max per il DD).
     const pMap = new Map<string, Record<string, unknown>>()
-    for (const p of (results[5].data || [])) {
-      pMap.set(p.strategy_id as string, p)
+    for (const p of (results[5].data || []) as Record<string, unknown>[]) {
+      const sid = p.strategy_id as string
+      const ex = pMap.get(sid)
+      if (!ex) { pMap.set(sid, { ...p }); continue }
+      const t1 = Number(ex.total_trades ?? 0), t2 = Number(p.total_trades ?? 0)
+      const tot = t1 + t2
+      ex.total_pnl = Number(ex.total_pnl ?? 0) + Number(p.total_pnl ?? 0)
+      ex.win_pct = tot > 0 ? (Number(ex.win_pct ?? 0) * t1 + Number(p.win_pct ?? 0) * t2) / tot : 0
+      ex.payoff = tot > 0 ? (Number(ex.payoff ?? 0) * t1 + Number(p.payoff ?? 0) * t2) / tot : Number(ex.payoff ?? 0)
+      ex.avg_lots = tot > 0 ? (Number(ex.avg_lots ?? 0) * t1 + Number(p.avg_lots ?? 0) * t2) / tot : Number(ex.avg_lots ?? 0)
+      ex.max_dd = Math.max(Number(ex.max_dd ?? 0), Number(p.max_dd ?? 0))
+      ex.total_trades = tot
     }
     setPerfData(pMap)
 
@@ -434,13 +465,22 @@ export default function MonthlyPage() {
   // Equity curve chart data
   const equityChartData = useMemo(() => {
     if (snapshots.length === 0) return []
+    // Offset per fase: rende la equity continua sulla lineage (no salto al cambio fase,
+    // ogni fase riparte dal capitale ma la curva prosegue dal guadagno cumulato precedente).
+    const offsetById = new Map<string, number>()
+    let cum = 0
+    for (const a of [...lineageAccts].sort((x, y) => x.created_at.localeCompare(y.created_at))) {
+      offsetById.set(a.id, cum)
+      cum += (a.balance - a.account_size)
+    }
+    const sorted = [...snapshots].sort((a, b) => a.ts.localeCompare(b.ts))
     // Downsample to max 200 points for chart performance
-    const step = Math.max(1, Math.floor(snapshots.length / 200))
-    return snapshots.filter((_, i) => i % step === 0 || i === snapshots.length - 1).map(s => ({
+    const step = Math.max(1, Math.floor(sorted.length / 200))
+    return sorted.filter((_, i) => i % step === 0 || i === sorted.length - 1).map(s => ({
       ts: s.ts.slice(0, mode === 'monthly' ? 10 : 7),
-      equity: Math.round(s.equity * 100) / 100,
+      equity: Math.round((s.equity + (offsetById.get(s.account_id) ?? 0)) * 100) / 100,
     }))
-  }, [snapshots, mode])
+  }, [snapshots, lineageAccts, mode])
 
   // ---- Report PDF ----
 
