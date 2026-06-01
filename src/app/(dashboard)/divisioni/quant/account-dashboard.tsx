@@ -280,13 +280,17 @@ export default function AccountDashboard({ account, lineageAccounts, onClose }: 
     const expectancy = closedTrades.length > 0 ? totalNetPL / closedTrades.length : 0
     const titleName = isLineageView ? lineageAccounts![0].name.replace(/—.*/, '').trim() : account.name
 
-    // Max drawdown aggregato dalla equity curve
+    // Max DD REALIZZATO (su equity dei trade chiusi, picco-minimo). Continuo sulla lineage.
     let peak = -Infinity, maxDDpct = 0
     tradeEquityCurve.forEach(p => {
       if (p.equity > peak) peak = p.equity
       const dd = peak > 0 ? (peak - p.equity) / peak * 100 : 0
       if (dd > maxDDpct) maxDDpct = dd
     })
+    // Max DD EQUITY (con floating): valore calcolato dal bridge sugli snapshot, per fase.
+    // Sulla lineage prendo il massimo per-fase (ogni fase misura il proprio DD equity).
+    const openDDpct = (isLineageView ? lineageAccounts! : [account])
+      .reduce((m, a) => Math.max(m, Number(a.max_total_dd_pct || 0)), 0)
 
     // SVG equity curve con divisori di fase
     let chartSvg = '<p style="font-size:11px;color:#94a3b8">Dati equity insufficienti.</p>'
@@ -346,7 +350,8 @@ export default function AccountDashboard({ account, lineageAccounts, onClose }: 
       ['Media perdita', fmtM(-avgLoss)],
       ['Miglior trade', fmtM(bestTrade)],
       ['Peggior trade', fmtM(worstTrade)],
-      ['Max drawdown', `${fmtR(maxDDpct, 1)}%`],
+      ['Max DD chiuso (realizz.)', `${fmtR(maxDDpct, 1)}%`],
+      ['Max DD equity (floating)', `${fmtR(openDDpct, 1)}%`],
       ['Durata media', `${fmtR(avgDuration, 1)} h`],
     ]
     const metricRows = metrics.map(([k, v]) => `<tr><td>${k}</td><td class="r b">${v}</td></tr>`).join('')
