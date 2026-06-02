@@ -229,8 +229,12 @@ export default function QuantPage() {
     const regimes4Q = detectMarketRegimes4Q(benchFull)
     setStratRegimes4Q(regimes4Q)
 
-    // Build dual curve only for the trading period
-    const benchTradingPeriod = benchFull.filter(b => b.ts >= firstDate)
+    // Build dual curve. Includo una barra PRIMA del primo trade come ancora a 0%:
+    // cosi strategia e buy&hold partono dallo stesso zero (la strategia sale da 0
+    // man mano che i trade chiudono, invece di partire gia col primo trade contabilizzato).
+    const beforeBars = benchFull.filter(b => b.ts < firstDate)
+    const anchorBar = beforeBars.length ? [beforeBars[beforeBars.length - 1]] : []
+    const benchTradingPeriod = [...anchorBar, ...benchFull.filter(b => b.ts >= firstDate)]
     const dualCurve = buildStrategyVsBenchmark(tradePnls, benchTradingPeriod, accSize)
     setStratBenchData(dualCurve)
 
