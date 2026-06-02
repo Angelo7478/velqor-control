@@ -133,6 +133,16 @@ export default function BuilderPage() {
 
     const supabase = createClient()
 
+    // Risolvi la lineage del conto selezionato (challenge + verification, anche
+    // conti inactive) per aggregare TUTTE le strategie/strumenti che hanno lavorato.
+    let lineageIds = [selectedAccountId]
+    const selAcc = accounts.find(a => a.id === selectedAccountId)
+    if (selAcc?.lineage_id) {
+      const { data: la } = await supabase.from('qel_accounts')
+        .select('id').eq('lineage_id', selAcc.lineage_id)
+      if (la && la.length) lineageIds = la.map((x: { id: string }) => x.id)
+    }
+
     // Load strategies
     const { data: strats, error: stratsErr } = await supabase
       .from('qel_strategies')
@@ -142,11 +152,11 @@ export default function BuilderPage() {
 
     if (stratsErr) console.error('[Builder] strategies query error:', stratsErr)
 
-    // Load closed trades for selected account
+    // Load closed trades across the whole lineage
     const { data: tradeData, error: tradesErr } = await supabase
       .from('qel_trades')
       .select('strategy_id, net_profit, lots, close_time, symbol, open_price')
-      .eq('account_id', selectedAccountId)
+      .in('account_id', lineageIds)
       .eq('is_open', false)
       .not('strategy_id', 'is', null)
       .not('close_time', 'is', null)
