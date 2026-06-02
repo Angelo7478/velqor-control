@@ -585,6 +585,15 @@ export default function MonthlyPage() {
     return out
   }, [equityChartData, lineageAccts, phaseLabelById])
 
+  // Split sistematico (trade con strategia) vs discrezionale/manuale (senza strategia).
+  // Il Builder considera solo il sistematico; qui lo separiamo per trasparenza.
+  const scopeSplit = useMemo(() => {
+    const sum = (arr: TradeRow[]) => arr.reduce((s, t) => s + Number(t.net_profit || 0), 0)
+    const sys = tradesToAnalyze.filter(t => t.strategy_id)
+    const man = tradesToAnalyze.filter(t => !t.strategy_id)
+    return { sysPl: sum(sys), sysN: sys.length, manPl: sum(man), manN: man.length }
+  }, [tradesToAnalyze])
+
   // ---- Report PDF ----
 
   function openReport() {
@@ -761,6 +770,13 @@ export default function MonthlyPage() {
     </div>
     ${extraKpis}
   </div>
+
+  ${scopeSplit.manN > 0 ? `
+  <div style="margin:8px 0 12px;padding:10px 14px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;font-size:11px;color:#475569;line-height:1.6">
+    <strong>Composizione risultato:</strong> Totale conto <span style="font-weight:600">${fmtM(kpis.totalPl)}</span> (${kpis.totalTrades} trade) =
+    Sistematico <span style="color:${plC(scopeSplit.sysPl)};font-weight:600">${fmtM(scopeSplit.sysPl)}</span> (${scopeSplit.sysN} trade, allineato al Builder)
+    + Discrezionale/manuale <span style="color:${plC(scopeSplit.manPl)};font-weight:600">${fmtM(scopeSplit.manPl)}</span> (${scopeSplit.manN} trade).
+  </div>` : ''}
 
   ${prevKpis && mode === 'monthly' ? `
   <div style="font-size:10px;color:#64748b;margin-bottom:12px">
@@ -1023,6 +1039,13 @@ export default function MonthlyPage() {
     </div>
     ${extraKpis}
   </div>
+
+  ${scopeSplit.manN > 0 ? `
+  <div style="margin:8px 0 14px;padding:10px 14px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;font-size:11px;color:#475569;line-height:1.6">
+    <strong>Composizione risultato:</strong> Totale conto <span style="font-weight:600">${fmtM(kpis.totalPl)}</span> (${kpis.totalTrades} operazioni) =
+    Sistematico <span style="color:${plC(scopeSplit.sysPl)};font-weight:600">${fmtM(scopeSplit.sysPl)}</span> (${scopeSplit.sysN})
+    + Discrezionale <span style="color:${plC(scopeSplit.manPl)};font-weight:600">${fmtM(scopeSplit.manPl)}</span> (${scopeSplit.manN}).
+  </div>` : ''}
 
   <!-- Approcci Operativi -->
   <h2>Approcci Operativi</h2>
