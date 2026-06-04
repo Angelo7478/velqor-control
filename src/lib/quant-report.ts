@@ -12,6 +12,8 @@ export interface ReportTrade {
   cls: string        // classe asset (Indici USA / Europa / Crypto / ...)
   phase?: string     // etichetta fase (lineage) per i divisori
   strat?: string     // nome strategia (solo report interni)
+  lots?: number      // volume dell'operazione (per analisi position sizing)
+  sid?: string       // chiave strategia (magic) per contare le strategie attive; mai mostrata
 }
 
 export interface ReportPhase { label: string; base: number; pl: number; n: number }
@@ -250,6 +252,34 @@ export function buildReportHtml(tradesIn: ReportTrade[], o: ReportOptions): stri
   const stratSection = (!o.isPublic && T.some(t => t.strat))
     ? `<div class="sec">Per Strategia</div><table><thead><tr><th>Strategia</th><th class="r">Oper.</th><th class="r">Win%</th><th class="r">Contributo</th><th class="r">Quota</th></tr></thead><tbody>${allocRows(group('strat'), false)}</tbody></table>` : ''
 
+  // Evoluzione strategie attive & position sizing (per mese) — per valutare il dynamic sizing nel tempo
+  const hasLots = T.some(t => (t.lots || 0) > 0)
+  let sizingHtml = ''
+  if (hasLots) {
+    const sm: Record<string, { strats: Set<string>; n: number; lots: number; pl: number }> = {}
+    for (const t of T) {
+      const m = t.d.slice(0, 7)
+      if (!sm[m]) sm[m] = { strats: new Set<string>(), n: 0, lots: 0, pl: 0 }
+      if (t.sid) sm[m].strats.add(t.sid)
+      sm[m].n++; sm[m].lots += t.lots || 0; sm[m].pl += t.pl
+    }
+    const sMonths = Object.keys(sm).sort()
+    const activeCounts = sMonths.map(m => sm[m].strats.size)
+    const minA = activeCounts.length ? Math.min(...activeCounts) : 0
+    const maxA = activeCounts.length ? Math.max(...activeCounts) : 0
+    const avgA = activeCounts.length ? activeCounts.reduce((a, b) => a + b, 0) / activeCounts.length : 0
+    const totalDistinct = new Set(T.filter(t => t.sid).map(t => t.sid)).size
+    const szRows = sMonths.map(m => {
+      const ob = sm[m]
+      const avgLot = ob.n > 0 ? ob.lots / ob.n : 0
+      const lotsPerStrat = ob.strats.size > 0 ? ob.lots / ob.strats.size : 0
+      return `<tr><td class="b">${m}</td><td class="r b">${ob.strats.size}</td><td class="r">${ob.n}</td><td class="r">${ob.lots.toFixed(2)}</td><td class="r">${avgLot.toFixed(2)}</td><td class="r">${lotsPerStrat.toFixed(2)}</td><td class="r ${clsN(ob.pl)}">${fmt(ob.pl)}</td></tr>`
+    }).join('')
+    sizingHtml = `<div class="sec">Evoluzione Strategie Attive &amp; Position Sizing</div>` +
+      `<div class="method" style="margin-bottom:8px">Monitoraggio cadenzato del numero di strategie attive e del dimensionamento (lotti) mese per mese. Serve a valutare nel tempo gli effetti del <b>dynamic position sizing</b> applicato periodicamente al portafoglio: come variano i motori attivi, il volume e il lotto medio, e l'impatto sul P/L. Nel periodo: <b>${minA}-${maxA} strategie attive/mese</b> (media ${avgA.toFixed(1)}), ${totalDistinct} distinte complessive.</div>` +
+      `<table><thead><tr><th>Mese</th><th class="r">Strat. attive</th><th class="r">Oper.</th><th class="r">Lotti tot.</th><th class="r">Lotto medio</th><th class="r">Lotti/strat.</th><th class="r">P/L</th></tr></thead><tbody>${szRows}</tbody></table>`
+  }
+
   const methodTxt = 'Operativita basata su un <b>portafoglio multi-strategia sistematico</b>, governato da regole, su indici azionari, energia, valute e crypto. Stili complementari (mean reversion, stagionalita, trend following) combinati per de-correlazione e validati su backtest fuori campione (walk-forward, Monte Carlo, stress test di regime) e su operativita live. Gestione del rischio istituzionale: dimensionamento a frazione di Kelly con risk parity, budget di drawdown esplicito e guardrail rigidi (perdita giornaliera max 5%, totale max 10%).'
 
   return `<!DOCTYPE html><html lang="it"><head><meta charset="utf-8"><title>${esc(o.title)}</title>
@@ -290,6 +320,7 @@ ${o.intro ? `<div class="intro">${o.intro}</div>` : ''}
 ${phaseHtml}
 <div class="grid2"><div><div class="sec">Metriche di Performance</div><table><tbody>${row2(perf)}</tbody></table></div><div><div class="sec">Metriche di Rischio</div><table><tbody>${row2(risk)}</tbody></table></div></div>
 <div class="sec">Rendimento Mese per Mese</div><table><thead><tr><th>Mese</th><th class="r">Rendimento</th><th class="r">P/L</th><th class="r">Cumulato</th><th class="r">Oper.</th><th class="r">Win%</th><th></th></tr></thead><tbody>${monthlyRows}</tbody></table>
+${sizingHtml}
 <div class="grid2"><div><div class="sec">Per Tipologia</div><table><thead><tr><th>Tipologia</th><th class="r">Oper.</th><th class="r">Win%</th><th class="r">Contributo</th><th class="r">Quota</th></tr></thead><tbody>${allocRows(group('type'), true)}</tbody></table></div><div><div class="sec">Per Classe di Asset</div><table><thead><tr><th>Classe</th><th class="r">Oper.</th><th class="r">Win%</th><th class="r">Contributo</th><th class="r">Quota</th></tr></thead><tbody>${allocRows(group('cls'), false)}</tbody></table></div></div>
 ${stratSection}
 <div class="sec">Analisi Costi di Transazione</div><table>${costHtml}</table>

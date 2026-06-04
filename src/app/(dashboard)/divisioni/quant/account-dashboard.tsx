@@ -293,6 +293,8 @@ export default function AccountDashboard({ account, lineageAccounts, onClose }: 
         cls: symCls(t.symbol),
         phase: isLineageView ? (phaseLabelById.get(t.account_id) || undefined) : undefined,
         strat: strat ? (strat.name || undefined) : undefined,
+        lots: Number(t.lots || 0),
+        sid: strat ? String(strat.magic) : undefined,
       }
     })
     const swapSum = closedTrades.reduce((s, t) => s + Number(t.swap || 0), 0)
