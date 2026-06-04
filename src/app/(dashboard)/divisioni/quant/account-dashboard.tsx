@@ -6,6 +6,7 @@ import { QelAccount, QelAccountSnapshot, QelTrade, QelStrategy } from '@/types/d
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, AreaChart, Area, ReferenceLine } from 'recharts'
 import { fmt, fmtUsd, plColor, ddBarColor, MONTHS } from '@/lib/quant-utils'
 import InfoTooltip from '@/components/ui/InfoTooltip'
+import { buildReportHtml, ReportTrade, ReportPhase } from '@/lib/quant-report'
 
 interface Props {
   account: QelAccount
@@ -269,152 +270,65 @@ export default function AccountDashboard({ account, lineageAccounts, onClose }: 
 
   const displayTrades = showAllTrades ? sortedTrades : sortedTrades.slice(0, 100)
 
-  /** Esporta un report PDF (HTML stampabile) con equity aggregata + metriche della lineage. */
-  function exportPdf() {
-    const fmtR = (n: number | null | undefined, d = 2) =>
-      n !== null && n !== undefined && !isNaN(Number(n))
-        ? Number(n).toLocaleString('it-IT', { minimumFractionDigits: d, maximumFractionDigits: d }) : '—'
-    const fmtM = (n: number) => `${n < 0 ? '-' : ''}$${Math.abs(n).toLocaleString('it-IT', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`
-    const plC = (n: number) => n > 0 ? '#16a34a' : n < 0 ? '#dc2626' : '#475569'
-    const dateNow = new Date().toLocaleDateString('it-IT', { day: '2-digit', month: 'long', year: 'numeric' })
-    const expectancy = closedTrades.length > 0 ? totalNetPL / closedTrades.length : 0
-    const titleName = isLineageView ? lineageAccounts![0].name.replace(/—.*/, '').trim() : account.name
-
-    // Max DD REALIZZATO (su equity dei trade chiusi, picco-minimo). Continuo sulla lineage.
-    let peak = -Infinity, maxDDpct = 0
-    tradeEquityCurve.forEach(p => {
-      if (p.equity > peak) peak = p.equity
-      const dd = peak > 0 ? (peak - p.equity) / peak * 100 : 0
-      if (dd > maxDDpct) maxDDpct = dd
-    })
-    // Max DD EQUITY (con floating): valore calcolato dal bridge sugli snapshot, per fase.
-    // Sulla lineage prendo il massimo per-fase (ogni fase misura il proprio DD equity).
-    const openDDpct = (isLineageView ? lineageAccounts! : [account])
-      .reduce((m, a) => Math.max(m, Number(a.max_total_dd_pct || 0)), 0)
-
-    // SVG equity curve con divisori di fase
-    let chartSvg = '<p style="font-size:11px;color:#94a3b8">Dati equity insufficienti.</p>'
-    if (tradeEquityCurve.length > 1) {
-      const data = tradeEquityCurve
-      const w = 760, h = 250, pad = 58, padR = 24, padTop = 22
-      const vals = data.map(d => d.equity)
-      const minV = Math.min(...vals), maxV = Math.max(...vals)
-      const rng = (maxV - minV) || 1
-      const lo = minV - rng * 0.06, hi = maxV + rng * 0.06
-      const scX = (i: number) => pad + (i / (data.length - 1)) * (w - pad - padR)
-      const scY = (v: number) => h - pad - ((v - lo) / (hi - lo)) * (h - pad - padTop)
-      const ySteps = 5
-      const yGrid = Array.from({ length: ySteps + 1 }, (_, i) => {
-        const v = lo + (hi - lo) * (i / ySteps); const y = scY(v)
-        return `<line x1="${pad}" y1="${y}" x2="${w - padR}" y2="${y}" stroke="#f1f5f9"/><text x="${pad - 6}" y="${y}" font-size="9" fill="#94a3b8" text-anchor="end" dominant-baseline="middle">$${(v / 1000).toFixed(1)}k</text>`
-      }).join('')
-      const baseLine = (() => { const y = scY(Number(initialAccount.account_size)); return `<line x1="${pad}" y1="${y}" x2="${w - padR}" y2="${y}" stroke="#cbd5e1" stroke-dasharray="2 2"/>` })()
-      let dividers = ''
-      for (let i = 1; i < data.length; i++) {
-        if (data[i].accountId && data[i].accountId !== data[i - 1].accountId) {
-          const x = scX(i); const lbl = phaseLabelById.get(data[i].accountId) || ''
-          dividers += `<line x1="${x}" y1="${padTop}" x2="${x}" y2="${h - pad}" stroke="#f59e0b" stroke-width="1.5" stroke-dasharray="4 4"/><text x="${x + 3}" y="${padTop + 10}" font-size="9" fill="#b45309" font-weight="600">${lbl}</text>`
-        }
+  /** Esporta il report standard (modulo quant-report). isPublic = nessun nome/logica strategia. */
+  function exportPdf(isPublic: boolean) {
+    const curr: 'EUR' | 'USD' = account.currency === 'EUR' ? 'EUR' : 'USD'
+    const baseSize = Number(initialAccount.account_size) || 100000
+    const styleLbl = (st?: string | null) =>
+      st === 'seasonal' ? 'Seasonal' : st === 'mean_reversion' ? 'Mean Reversion' : st === 'trend_following' ? 'Trend Following' : 'Altro'
+    const symCls = (sym: string) =>
+      /US100|US500/.test(sym) ? 'Indici USA'
+      : /GER40/.test(sym) ? 'Indici Europa'
+      : sym === 'BTCUSD' ? 'Crypto'
+      : sym === 'XAUUSD' ? 'Metalli'
+      : /USD(JPY|CAD)/.test(sym) ? 'Forex'
+      : /UKOIL/.test(sym) ? 'Energia'
+      : sym
+    const rtrades: ReportTrade[] = closedTrades.map(t => {
+      const strat = strategyMap.get((t.base_magic ?? t.magic) as number)
+      return {
+        d: (t.close_time || '').slice(0, 10),
+        pl: Number(t.net_profit ?? t.profit ?? 0),
+        type: strat ? styleLbl(strat.strategy_style) : 'Tattico',
+        cls: symCls(t.symbol),
+        phase: isLineageView ? (phaseLabelById.get(t.account_id) || undefined) : undefined,
+        strat: strat ? (strat.name || undefined) : undefined,
       }
-      const pts = data.map((d, i) => `${scX(i).toFixed(1)},${scY(d.equity).toFixed(1)}`).join(' ')
-      const areaPts = `${scX(0).toFixed(1)},${(h - pad).toFixed(1)} ${pts} ${scX(data.length - 1).toFixed(1)},${(h - pad).toFixed(1)}`
-      const xInt = Math.max(1, Math.floor(data.length / 8))
-      const xLabels = data.filter((_, i) => i % xInt === 0).map((d, idx) =>
-        `<text x="${scX(idx * xInt)}" y="${h - 8}" font-size="9" fill="#94a3b8" text-anchor="middle">${d.date.toLocaleDateString('it-IT', { day: '2-digit', month: '2-digit', year: '2-digit' })}</text>`).join('')
-      chartSvg = `<div style="background:#fafbfc;border:1px solid #e2e8f0;border-radius:10px;padding:14px 10px 6px">
-        <svg viewBox="0 0 ${w} ${h}" style="width:100%">
-          ${yGrid}${baseLine}${xLabels}
-          <polygon points="${areaPts}" fill="#7c3aed" opacity="0.07"/>
-          <polyline points="${pts}" fill="none" stroke="#7c3aed" stroke-width="2.5"/>
-          ${dividers}
-        </svg></div>`
+    })
+    const swapSum = closedTrades.reduce((s, t) => s + Number(t.swap || 0), 0)
+    const commSum = closedTrades.reduce((s, t) => s + Number(t.commission || 0), 0)
+    let phases: ReportPhase[] | undefined
+    if (isLineageView) {
+      phases = lineageAccounts!.map(a => {
+        const at = closedTrades.filter(t => t.account_id === a.id)
+        return {
+          label: (a.challenge_phase && PHASE_LABEL[a.challenge_phase]) || a.name.split('—')[1]?.trim() || a.name,
+          base: Number(a.account_size),
+          pl: at.reduce((s, t) => s + Number(t.net_profit ?? t.profit ?? 0), 0),
+          n: at.length,
+        }
+      })
     }
-
-    // Breakdown per fase
-    const phaseSrc = isLineageView ? lineageAccounts! : [account]
-    const phaseRows = phaseSrc.map(a => {
-      const at = closedTrades.filter(t => t.account_id === a.id)
-      const net = at.reduce((s, t) => s + Number(t.net_profit || t.profit || 0), 0)
-      const wins = at.filter(t => Number(t.net_profit || t.profit || 0) > 0).length
-      const wr = at.length ? wins / at.length * 100 : 0
-      const lbl = (a.challenge_phase && PHASE_LABEL[a.challenge_phase]) || a.name.split('—')[1]?.trim() || a.name
-      return `<tr><td>${lbl}</td><td class="r">${at.length}</td><td class="r">${fmtR(wr, 1)}%</td><td class="r b" style="color:${plC(net)}">${fmtM(net)}</td></tr>`
-    }).join('')
-
-    const metrics: [string, string][] = [
-      ['Trade chiusi', String(closedTrades.length)],
-      ['Win rate', `${fmtR(winRate, 1)}%`],
-      ['Profit factor', fmtR(profitFactor, 2)],
-      ['Aspettativa / trade', fmtM(expectancy)],
-      ['Media vincita', fmtM(avgWin)],
-      ['Media perdita', fmtM(-avgLoss)],
-      ['Miglior trade', fmtM(bestTrade)],
-      ['Peggior trade', fmtM(worstTrade)],
-      ['Max DD chiuso (realizz.)', `${fmtR(maxDDpct, 1)}%`],
-      ['Max DD equity (floating)', `${fmtR(openDDpct, 1)}%`],
-      ['Durata media', `${fmtR(avgDuration, 1)} h`],
-    ]
-    const metricRows = metrics.map(([k, v]) => `<tr><td>${k}</td><td class="r b">${v}</td></tr>`).join('')
-
-    const phaseChips = phaseSrc.map((a, i) => {
-      const lbl = (a.challenge_phase && PHASE_LABEL[a.challenge_phase]) || a.name.split('—')[1]?.trim() || a.name
-      return `${i > 0 ? ' <span style="color:#cbd5e1">&rarr;</span> ' : ''}<span style="background:#ede9fe;color:#6d28d9;padding:2px 8px;border-radius:20px;font-size:10px;font-weight:600">${lbl} · ${fmtM(Number(a.balance || a.account_size) - Number(a.account_size))}</span>`
-    }).join('')
-
-    const html = `<!DOCTYPE html><html lang="it"><head><meta charset="utf-8"><title>VELQOR Quant — ${titleName}</title>
-<style>
-  *{box-sizing:border-box;margin:0;padding:0}
-  body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;color:#1e293b;padding:32px 36px;max-width:840px;margin:0 auto;font-size:12px;line-height:1.5}
-  .head{display:flex;justify-content:space-between;align-items:flex-start;border-bottom:2px solid #7c3aed;padding-bottom:14px;margin-bottom:18px}
-  .logo{font-size:22px;font-weight:800;letter-spacing:-0.5px;color:#0f172a}
-  .logo span{color:#7c3aed}
-  h1{font-size:17px;margin-bottom:3px;color:#0f172a}
-  .sub{font-size:11px;color:#64748b}
-  .big{text-align:right}
-  .big .eq{font-size:24px;font-weight:800;color:#0f172a}
-  .big .pl{font-size:14px;font-weight:700}
-  table{width:100%;border-collapse:collapse;margin-top:6px}
-  th,td{text-align:left;padding:6px 8px;border-bottom:1px solid #f1f5f9;font-size:11px}
-  th{color:#94a3b8;text-transform:uppercase;font-size:9px;letter-spacing:.04em}
-  td.r{text-align:right}
-  td.b{font-weight:700}
-  .grid{display:flex;gap:16px;margin-top:14px}
-  .col{flex:1}
-  .sec{font-size:11px;font-weight:700;color:#334155;margin:18px 0 4px}
-  .foot{margin-top:22px;padding-top:10px;border-top:1px solid #f1f5f9;font-size:9px;color:#94a3b8;text-align:center}
-  @media print{.no-print{display:none}body{padding:0}}
-</style></head><body>
-  <div class="head">
-    <div>
-      <div class="logo">VELQOR<span> Quant</span></div>
-      <h1 style="margin-top:8px">${titleName}${isLineageView ? ' — Lineage aggregata' : ''}</h1>
-      <div class="sub">${account.broker} · capitale iniziale ${fmtM(Number(initialAccount.account_size))} · ${dateNow}</div>
-      ${isLineageView ? `<div style="margin-top:6px">${phaseChips}</div>` : ''}
-    </div>
-    <div class="big">
-      <div class="eq">${fmtUsd(eq)}</div>
-      <div class="pl" style="color:${plC(pl)}">${pl >= 0 ? '+' : ''}${fmtM(pl)} (${plPct >= 0 ? '+' : ''}${fmtR(plPct, 2)}%)</div>
-    </div>
-  </div>
-
-  <div class="sec">Equity curve aggregata</div>
-  ${chartSvg}
-
-  <div class="grid">
-    <div class="col">
-      <div class="sec">Metriche aggregate</div>
-      <table><tbody>${metricRows}</tbody></table>
-    </div>
-    <div class="col">
-      <div class="sec">Per fase</div>
-      <table><thead><tr><th>Fase</th><th class="r">Trade</th><th class="r">Win%</th><th class="r">P/L netto</th></tr></thead><tbody>${phaseRows}</tbody></table>
-    </div>
-  </div>
-
-  <div style="margin-top:4px" class="no-print"><button onclick="window.print()" style="padding:6px 14px;border:1px solid #7c3aed;background:#7c3aed;color:#fff;border-radius:6px;cursor:pointer;font-size:11px;font-weight:600">Stampa / Salva PDF</button></div>
-  <div class="foot">VELQOR Control Room · Quant Engine · report generato il ${dateNow} · dati live aggregati su ${phaseSrc.length} ${phaseSrc.length === 1 ? 'conto' : 'fasi'}</div>
-</body></html>`
-
+    const dispName = isLineageView ? lineageAccounts![0].name.replace(/—.*/, '').trim() : account.name
+    const html = buildReportHtml(rtrades, {
+      title: (isPublic ? 'Performance Report' : 'Report Conto') + ' — ' + dispName,
+      subtitle: account.broker + ' · ' + baseSize.toLocaleString('it-IT') + ' ' + curr + (isLineageView ? ' · ' + lineageAccounts!.length + ' fasi aggregate' : ' · Login ' + account.login),
+      metaRight: [
+        'Capitale: ' + baseSize.toLocaleString('it-IT') + ' ' + curr,
+        'Valuta base: ' + curr,
+        'Broker: ' + account.broker,
+        ...(isPublic ? [] : ['Account: #' + account.login]),
+      ],
+      currency: curr,
+      base: baseSize,
+      swap: swapSum,
+      comm: commSum,
+      isPublic,
+      badge: isPublic ? 'CONFIDENZIALE' : 'INTERNO',
+      targetPct: (account.challenge_phase === 'step1' || account.challenge_phase === 'step2') ? 10 : undefined,
+      phases,
+      costNote: isPublic,
+    })
     const win = window.open('', '_blank')
     if (!win) { alert('Abilita i popup per esportare il PDF.'); return }
     win.document.write(html)
@@ -427,10 +341,16 @@ export default function AccountDashboard({ account, lineageAccounts, onClose }: 
         <button onClick={onClose} className="text-sm text-violet-600 hover:text-violet-800 flex items-center gap-1">
           &larr; Torna ai conti
         </button>
-        <button onClick={exportPdf}
-          className="text-xs px-3 py-1.5 rounded-md border border-violet-300 text-violet-700 hover:bg-violet-50 font-medium flex items-center gap-1.5">
-          📄 Esporta PDF{isLineageView ? ' (aggregato)' : ''}
-        </button>
+        <div className="flex items-center gap-2">
+          <button onClick={() => exportPdf(false)}
+            className="text-xs px-3 py-1.5 rounded-md border border-slate-300 text-slate-700 hover:bg-slate-50 font-medium">
+            📄 PDF interno
+          </button>
+          <button onClick={() => exportPdf(true)}
+            className="text-xs px-3 py-1.5 rounded-md border border-violet-300 text-violet-700 hover:bg-violet-50 font-medium">
+            🌐 PDF pubblico
+          </button>
+        </div>
       </div>
 
       {error && (
