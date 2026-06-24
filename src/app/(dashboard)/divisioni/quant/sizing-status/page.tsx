@@ -59,6 +59,8 @@ export default function SizingStatusPage() {
   const [sizing, setSizing] = useState<Sizing[]>([])
   const [strats, setStrats] = useState<Strat[]>([])
   const [loading, setLoading] = useState(true)
+  const [refreshing, setRefreshing] = useState(false)
+  const [refreshMsg, setRefreshMsg] = useState<string | null>(null)
 
   useEffect(() => { load() }, [])
   useEffect(() => { const i = setInterval(load, 60000); return () => clearInterval(i) }, [])
@@ -76,6 +78,20 @@ export default function SizingStatusPage() {
     setSizing((s.data as Sizing[]) || [])
     setStrats((st.data as Strat[]) || [])
     setLoading(false)
+  }
+
+  async function refreshBenchmarks() {
+    setRefreshing(true); setRefreshMsg(null)
+    const supabase = createClient()
+    const { data, error } = await supabase.functions.invoke('refresh-benchmarks')
+    if (error) {
+      setRefreshMsg('Errore aggiornamento: ' + error.message)
+    } else {
+      const reg = (data as { regime?: string } | null)?.regime
+      setRefreshMsg(`Benchmark aggiornati · regime: ${reg ?? '—'}`)
+      await load()
+    }
+    setRefreshing(false)
   }
 
   if (loading) return <p className="text-slate-500 p-4">Caricamento...</p>
@@ -103,11 +119,24 @@ export default function SizingStatusPage() {
     <div className="p-4 sm:p-6 space-y-4">
       <div>
         <QuantNav />
-        <div className="mt-1">
-          <h1 className="text-2xl font-bold text-slate-900">Stato Position Sizing</h1>
-          <p className="text-sm text-slate-500 mt-0.5">
-            Spia per conto: rischio MC95 aggregato attuale vs consigliato, modulato dal regime dei sottostanti. {shown.length} portafogli monitorati.
-          </p>
+        <div className="mt-1 flex items-start justify-between gap-3 flex-wrap">
+          <div>
+            <h1 className="text-2xl font-bold text-slate-900">Stato Position Sizing</h1>
+            <p className="text-sm text-slate-500 mt-0.5">
+              Spia per conto: rischio MC95 aggregato attuale vs consigliato, modulato dal regime dei sottostanti. {shown.length} portafogli monitorati.
+            </p>
+          </div>
+          <div className="flex flex-col items-end gap-1">
+            <button
+              onClick={refreshBenchmarks}
+              disabled={refreshing}
+              className="px-3 py-2 text-sm rounded-lg bg-violet-600 text-white font-medium hover:bg-violet-700 disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"
+              title="Scarica i prezzi aggiornati (Yahoo) e ricalcola il regime di mercato"
+            >
+              {refreshing ? 'Aggiornamento…' : '↻ Aggiorna regime'}
+            </button>
+            {refreshMsg && <span className="text-[11px] text-slate-500 max-w-[280px] text-right">{refreshMsg}</span>}
+          </div>
         </div>
       </div>
 
