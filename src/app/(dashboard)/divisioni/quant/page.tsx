@@ -26,6 +26,8 @@ export default function QuantPage() {
   const [strategies, setStrategies] = useState<QelStrategy[]>([])
   const [baseStrategies, setBaseStrategies] = useState<QelStrategy[]>([])
   const [accounts, setAccounts] = useState<QelAccount[]>([])
+  const [portfolios, setPortfolios] = useState<{ id: string; account_id: string }[]>([])
+  const [sizingRows, setSizingRows] = useState<{ portfolio_id: string; strategy_id: string; current_lots: number | null; recommended_lots: number | null; status: string | null; created_at: string }[]>([])
   const [selectedAccountId, setSelectedAccountId] = useState<string>('')
   const [loading, setLoading] = useState(true)
   const [tab, setTab] = useState<Tab>('overview')
@@ -81,13 +83,17 @@ export default function QuantPage() {
 
   async function loadInitial() {
     const supabase = createClient()
-    const [stratRes, accRes] = await Promise.all([
+    const [stratRes, accRes, pfRes, szRes] = await Promise.all([
       supabase.from('qel_strategies').select('*').order('magic'),
       supabase.from('qel_accounts').select('*').order('name'),
+      supabase.from('qel_portfolios').select('id, account_id'),
+      supabase.from('qel_strategy_sizing').select('portfolio_id, strategy_id, current_lots, recommended_lots, status, created_at').order('created_at', { ascending: false }),
     ])
     setBaseStrategies(stratRes.data || [])
     setStrategies(stratRes.data || [])
     setAccounts(accRes.data || [])
+    setPortfolios((pfRes.data as { id: string; account_id: string }[]) || [])
+    setSizingRows((szRes.data as { portfolio_id: string; strategy_id: string; current_lots: number | null; recommended_lots: number | null; status: string | null; created_at: string }[]) || [])
     if (accRes.data && accRes.data.length > 0) {
       setSelectedAccountId(accRes.data[0].id)
     }
@@ -264,6 +270,9 @@ export default function QuantPage() {
     const dateNow = new Date().toLocaleDateString('it-IT', { day: '2-digit', month: 'long', year: 'numeric' })
     const fmtR = (n: number | null | undefined, d = 2) => n !== null && n !== undefined ? Number(n).toLocaleString('it-IT', { minimumFractionDigits: d, maximumFractionDigits: d }) : '—'
     const fmtM = (n: number) => { const p = n >= 0 ? '' : '-'; return `${p}$${Math.abs(n).toLocaleString('it-IT', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}` }
+    // Sizing v2 per-conto (qel_strategy_sizing) per questa strategia su questo conto.
+    const _pf = portfolios.find(p => p.account_id === selectedAccountId)
+    const _sz = _pf ? sizingRows.find(r => r.portfolio_id === _pf.id && r.strategy_id === s.id) : undefined
     const plC = (n: number) => n > 0 ? '#16a34a' : n < 0 ? '#dc2626' : '#475569'
 
     // Style labels
@@ -544,25 +553,26 @@ export default function QuantPage() {
       </div>`).join('')}
   </div>
 
-  <h2>Sizing (per 10K equity)</h2>
+  <h2>Sizing &mdash; ${accName}</h2>
   <div class="sizing-grid">
     <div class="sizing-cell" style="background:#f8fafc;border:1px solid #e2e8f0">
-      <div class="sizing-value" style="color:#475569">${s.lot_static ?? '—'}</div>
-      <div class="sizing-label" style="color:#94a3b8">Lot Test</div>
+      <div class="sizing-value" style="color:#475569">$${fmtR(s.test_mc95_dd, 0)}</div>
+      <div class="sizing-label" style="color:#94a3b8">MC95 DD / 1 lotto</div>
+    </div>
+    <div class="sizing-cell" style="background:#f8fafc;border:1px solid #e2e8f0">
+      <div class="sizing-value" style="color:#475569">${_sz ? fmtR(_sz.current_lots, 2) : '—'}</div>
+      <div class="sizing-label" style="color:#94a3b8">Lotti attuali</div>
     </div>
     <div class="sizing-cell" style="background:#f0fdf4;border:1px solid #bbf7d0">
-      <div class="sizing-value" style="color:#16a34a">${s.lot_neutral ?? '—'}</div>
-      <div class="sizing-label" style="color:#4ade80">Neutrale</div>
-    </div>
-    <div class="sizing-cell" style="background:#fffbeb;border:1px solid #fde68a">
-      <div class="sizing-value" style="color:#d97706">${s.lot_aggressive ?? '—'}</div>
-      <div class="sizing-label" style="color:#fbbf24">Aggressivo</div>
+      <div class="sizing-value" style="color:#16a34a">${_sz ? fmtR(_sz.recommended_lots, 2) : '—'}</div>
+      <div class="sizing-label" style="color:#4ade80">Lotti consigliati</div>
     </div>
     <div class="sizing-cell" style="background:#eff6ff;border:1px solid #bfdbfe">
-      <div class="sizing-value" style="color:#2563eb">${s.lot_conservative ?? '—'}</div>
-      <div class="sizing-label" style="color:#60a5fa">Conservativo</div>
+      <div class="sizing-value" style="color:#2563eb;font-size:14px">${_sz?.status ?? 'n/d'}</div>
+      <div class="sizing-label" style="color:#60a5fa">Stato</div>
     </div>
   </div>
+  ${!_sz ? `<div style="font-size:10px;color:#94a3b8;margin-top:6px">Lotti per conto non ancora calcolati nel sizing v2 (vedi pannello Stato Sizing). MC95 a 1 lotto: $${fmtR(s.test_mc95_dd, 0)}.</div>` : ''}
 
   ${s.real_avg_duration_hours ? `<div style="font-size:10px;color:#64748b;margin-top:8px">Durata media trade: <strong>${fmtR(s.real_avg_duration_hours, 1)} ore</strong></div>` : ''}
   ${s.notes ? `<div style="font-size:10px;color:#94a3b8;margin-top:4px">Note: ${s.notes}</div>` : ''}
@@ -1352,26 +1362,37 @@ export default function QuantPage() {
               ))}
             </div>
 
-            {/* Sizing */}
-            <h3 className="text-sm font-semibold text-slate-700 mb-3">Sizing (per 10K equity)</h3>
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-6">
-              <div className="bg-slate-50 rounded-lg p-3">
-                <p className="text-lg font-bold text-slate-800">{selectedStrat.lot_static}</p>
-                <p className="text-xs text-slate-500">Lot Test</p>
-              </div>
-              <div className="bg-green-50 rounded-lg p-3">
-                <p className="text-lg font-bold text-green-700">{selectedStrat.lot_neutral}</p>
-                <p className="text-xs text-green-600">Neutrale</p>
-              </div>
-              <div className="bg-amber-50 rounded-lg p-3">
-                <p className="text-lg font-bold text-amber-700">{selectedStrat.lot_aggressive}</p>
-                <p className="text-xs text-amber-600">Aggressivo</p>
-              </div>
-              <div className="bg-blue-50 rounded-lg p-3">
-                <p className="text-lg font-bold text-blue-700">{selectedStrat.lot_conservative}</p>
-                <p className="text-xs text-blue-600">Conservativo</p>
-              </div>
-            </div>
+            {/* Sizing v2 per-conto */}
+            {(() => {
+              const pf = portfolios.find(p => p.account_id === selectedAccountId)
+              const sz = pf ? sizingRows.find(r => r.portfolio_id === pf.id && r.strategy_id === selectedStrat.id) : undefined
+              const accName = accounts.find(a => a.id === selectedAccountId)?.name || 'conto'
+              return (
+                <>
+                  <h3 className="text-sm font-semibold text-slate-700 mb-3">Sizing — {accName}</h3>
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-2">
+                    <div className="bg-slate-50 rounded-lg p-3">
+                      <p className="text-lg font-bold text-slate-800">${fmt(selectedStrat.test_mc95_dd, 0)}</p>
+                      <p className="text-xs text-slate-500">MC95 DD / 1 lotto</p>
+                    </div>
+                    <div className="bg-slate-50 rounded-lg p-3">
+                      <p className="text-lg font-bold text-slate-800">{sz ? fmt(sz.current_lots, 2) : '—'}</p>
+                      <p className="text-xs text-slate-500">Lotti attuali</p>
+                    </div>
+                    <div className="bg-green-50 rounded-lg p-3">
+                      <p className="text-lg font-bold text-green-700">{sz ? fmt(sz.recommended_lots, 2) : '—'}</p>
+                      <p className="text-xs text-green-600">Lotti consigliati</p>
+                    </div>
+                    <div className="bg-blue-50 rounded-lg p-3">
+                      <p className="text-sm font-bold text-blue-700 pt-1">{sz?.status ?? 'n/d'}</p>
+                      <p className="text-xs text-blue-600">Stato</p>
+                    </div>
+                  </div>
+                  {!sz && <p className="text-xs text-slate-400 mb-6">Lotti per conto non ancora calcolati nel sizing v2 (vedi <a href="/divisioni/quant/sizing-status" className="text-violet-600 hover:underline">Stato Sizing</a>).</p>}
+                  {sz && <div className="mb-6" />}
+                </>
+              )
+            })()}
 
             {selectedStrat.real_avg_duration_hours && (
               <div className="bg-slate-50 rounded-lg p-3 mb-6">
