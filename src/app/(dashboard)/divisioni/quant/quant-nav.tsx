@@ -6,6 +6,8 @@ const PAGES = [
   { href: '/divisioni/quant', label: 'Overview', icon: '📊' },
   { href: '/divisioni/quant/sizing', label: 'Sizing', icon: '⚖️' },
   { href: '/divisioni/quant/sizing-status', label: 'Stato Sizing', icon: '🚦' },
+  { href: '/divisioni/quant/schede', label: 'Schede', icon: '📋' },
+  { href: '/divisioni/quant/magic', label: 'Stato Magic', icon: '🎯' },
   { href: '/divisioni/quant/health', label: 'Salute', icon: '🩺' },
   { href: '/divisioni/quant/scenarios', label: 'Scenari', icon: '🎲' },
   { href: '/divisioni/quant/builder', label: 'Builder', icon: '🔧' },
