@@ -46,6 +46,7 @@ type FileRow = {
   file_name: string
   file_path: string
   description: string | null
+  drive_url: string | null
 }
 
 function fmt(n: number | null | undefined, d = 0): string {
@@ -90,7 +91,7 @@ export default function SchedeStrategiePage() {
     const [s, t, f] = await Promise.all([
       supabase.from('qel_strategies').select('id, magic, name, asset, timeframe, direction, status, test_period, test_trades, test_win_pct, test_profit_factor, test_max_dd, test_ret_dd, test_mc95_dd, test_sharpe, notes').order('magic'),
       supabase.from('qel_strategy_tests').select('*').order('test_date', { ascending: false }),
-      supabase.from('qel_strategy_files').select('id, strategy_id, file_type, file_name, file_path, description').order('file_type'),
+      supabase.from('qel_strategy_files').select('id, strategy_id, file_type, file_name, file_path, description, drive_url').order('file_type'),
     ])
     const ss = (s.data as Strat[]) || []
     setStrats(ss)
@@ -217,15 +218,25 @@ export default function SchedeStrategiePage() {
                 <div className="px-4 py-2 border-b border-slate-100"><h3 className="text-sm font-semibold text-slate-700">File su Drive ({sFiles.length})</h3></div>
                 {sFiles.length === 0 && <p className="text-sm text-slate-400 p-4">Nessun file indicizzato.</p>}
                 <div className="divide-y divide-slate-100">
-                  {sFiles.map(f => (
-                    <div key={f.id} className="px-4 py-2 flex items-start gap-2">
-                      <span>{fileIcon(f.file_type)}</span>
-                      <div className="min-w-0">
-                        <p className="text-xs font-medium text-slate-700 truncate">{f.file_name}</p>
-                        <p className="text-[10px] text-slate-400">{f.file_type}{f.description ? ` · ${f.description}` : ''}</p>
-                      </div>
-                    </div>
-                  ))}
+                  {sFiles.map(f => {
+                    const href = f.drive_url || `https://drive.google.com/drive/search?q=${encodeURIComponent(f.file_name)}`
+                    return (
+                      <a
+                        key={f.id}
+                        href={href}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="px-4 py-2 flex items-start gap-2 hover:bg-violet-50 transition-colors group"
+                        title={f.drive_url ? 'Apri in Google Drive' : 'Cerca in Google Drive'}
+                      >
+                        <span>{fileIcon(f.file_type)}</span>
+                        <div className="min-w-0 flex-1">
+                          <p className="text-xs font-medium text-violet-700 group-hover:underline truncate">{f.file_name} <span className="text-slate-300 group-hover:text-violet-400">↗</span></p>
+                          <p className="text-[10px] text-slate-400">{f.file_type}{f.description ? ` · ${f.description}` : ''}</p>
+                        </div>
+                      </a>
+                    )
+                  })}
                 </div>
               </div>
             </>
