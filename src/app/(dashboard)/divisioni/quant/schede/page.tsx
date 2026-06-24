@@ -89,7 +89,7 @@ export default function SchedeStrategiePage() {
   async function load() {
     const supabase = createClient()
     const [s, t, f] = await Promise.all([
-      supabase.from('qel_strategies').select('id, magic, name, asset, timeframe, direction, status, test_period, test_trades, test_win_pct, test_profit_factor, test_max_dd, test_ret_dd, test_mc95_dd, test_sharpe, notes').order('magic'),
+      supabase.from('qel_strategies').select('id, magic, name, asset, timeframe, direction, status, test_period, test_trades, test_win_pct, test_profit_factor, test_max_dd, test_ret_dd, test_mc95_dd, test_sharpe, notes').neq('status', 'retired').order('magic'),
       supabase.from('qel_strategy_tests').select('*').order('test_date', { ascending: false }),
       supabase.from('qel_strategy_files').select('id, strategy_id, file_type, file_name, file_path, description, drive_url').order('file_type'),
     ])
