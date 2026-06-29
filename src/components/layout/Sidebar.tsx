@@ -3,15 +3,22 @@
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
 import { cn } from '@/lib/utils'
-import { DIVISIONS } from '@/lib/constants'
 import { useUI } from '@/stores/ui'
 
 const NAV_ITEMS = [
-  { href: '/', label: 'Dashboard', icon: '📊' },
-  { href: '/memorandum', label: 'Memorandum', icon: '📋' },
-  { href: '/calendario', label: 'Calendario', icon: '📅' },
-  { href: '/progetti', label: 'Progetti', icon: '📁' },
-  { href: '/task', label: 'Task', icon: '✅' },
+  { href: '/divisioni/quant', label: 'Overview', icon: '📊' },
+  { href: '/divisioni/quant/conti', label: 'Conti', icon: '🏦' },
+  { href: '/divisioni/quant/schede-conto', label: 'Schede Conto', icon: '🗂️' },
+  { href: '/divisioni/quant/sizing-status', label: 'Stato Sizing', icon: '🚦' },
+  { href: '/divisioni/quant/sizing', label: 'Sizing', icon: '⚖️' },
+  { href: '/divisioni/quant/schede', label: 'Schede Strategia', icon: '📋' },
+  { href: '/divisioni/quant/magic', label: 'Stato Magic', icon: '🎯' },
+  { href: '/divisioni/quant/health', label: 'Salute', icon: '🩺' },
+  { href: '/divisioni/quant/scenarios', label: 'Scenari', icon: '🎲' },
+  { href: '/divisioni/quant/research', label: 'Research', icon: '🔬' },
+  { href: '/divisioni/quant/monthly', label: 'Mensile', icon: '📈' },
+  { href: '/divisioni/quant/builder', label: 'Builder', icon: '🔧' },
+  { href: '/divisioni/quant/import', label: 'Import', icon: '📥' },
 ]
 
 export function Sidebar() {
@@ -37,60 +44,39 @@ export function Sidebar() {
       >
         {/* Logo */}
         <div className="p-4 border-b border-slate-700">
-          <Link href="/" onClick={closeSidebar}>
-            <h1 className="text-xl font-bold tracking-tight">VELQOR</h1>
+          <Link href="/divisioni/quant" onClick={closeSidebar}>
+            <h1 className="text-xl font-bold tracking-tight">VELQOR QUANT</h1>
             <span className="text-xs text-slate-400">Control Room</span>
           </Link>
         </div>
 
-        {/* Nav principale */}
+        {/* Nav Quant */}
         <nav className="p-3">
           <ul className="space-y-1">
-            {NAV_ITEMS.map((item) => (
-              <li key={item.href}>
-                <Link
-                  href={item.href}
-                  onClick={closeSidebar}
-                  className={cn(
-                    'flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors touch-target',
-                    pathname === item.href
-                      ? 'bg-blue-600 text-white'
-                      : 'text-slate-300 hover:bg-slate-800 hover:text-white'
-                  )}
-                >
-                  <span>{item.icon}</span>
-                  {item.label}
-                </Link>
-              </li>
-            ))}
+            {NAV_ITEMS.map((item) => {
+              const active = item.href === '/divisioni/quant'
+                ? pathname === item.href
+                : pathname.startsWith(item.href)
+              return (
+                <li key={item.href}>
+                  <Link
+                    href={item.href}
+                    onClick={closeSidebar}
+                    className={cn(
+                      'flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors touch-target',
+                      active
+                        ? 'bg-blue-600 text-white'
+                        : 'text-slate-300 hover:bg-slate-800 hover:text-white'
+                    )}
+                  >
+                    <span>{item.icon}</span>
+                    {item.label}
+                  </Link>
+                </li>
+              )
+            })}
           </ul>
         </nav>
-
-        {/* Divisioni */}
-        <div className="p-3 mt-2">
-          <p className="px-3 text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2">
-            Divisioni
-          </p>
-          <ul className="space-y-1">
-            {Object.entries(DIVISIONS).map(([key, div]) => (
-              <li key={key}>
-                <Link
-                  href={div.href}
-                  onClick={closeSidebar}
-                  className={cn(
-                    'flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors touch-target',
-                    pathname.startsWith(div.href)
-                      ? 'bg-slate-700 text-white'
-                      : 'text-slate-300 hover:bg-slate-800 hover:text-white'
-                  )}
-                >
-                  <span>{div.icon}</span>
-                  {div.label}
-                </Link>
-              </li>
-            ))}
-          </ul>
-        </div>
       </aside>
     </>
   )
