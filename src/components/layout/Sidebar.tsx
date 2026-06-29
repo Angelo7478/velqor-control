@@ -17,7 +17,8 @@ const NAV_ITEMS = [
   { href: '/divisioni/quant/scenarios', label: 'Scenari', icon: '🎲' },
   { href: '/divisioni/quant/research', label: 'Research', icon: '🔬' },
   { href: '/divisioni/quant/monthly', label: 'Mensile', icon: '📈' },
-  { href: '/divisioni/quant/builder', label: 'Builder', icon: '🔧' },
+  { href: '/divisioni/quant/portfolio', label: 'Builder', icon: '🔧' },
+  { href: '/divisioni/quant/builder', label: 'Builder Legacy', icon: '🛠️' },
   { href: '/divisioni/quant/import', label: 'Import', icon: '📥' },
 ]
 
