@@ -89,12 +89,61 @@ export default function SchedeContoPage() {
 
   if (loading) return <div className="text-slate-500 p-4">Caricamento schede conto…</div>
 
+  // ---- Aggregatore capitale per strategia (limite FTMO $400k per strategia/trader) ----
+  const FTMO_CAP = 400000
+  const capRows = (() => {
+    const m = new Map<number, { name: string; cap: number; accounts: string[] }>()
+    for (const r of strats) {
+      if (r.is_active === false) continue
+      const s = r.qel_strategies; if (!s?.magic) continue
+      const pf = portfolios.find(p => p.id === r.portfolio_id); if (!pf) continue
+      const acc = accounts.find(a => a.id === pf.account_id); if (!acc) continue
+      const e = m.get(s.magic) || { name: s.name, cap: 0, accounts: [] }
+      e.cap += Number(acc.account_size) || 0
+      e.accounts.push(acc.name)
+      m.set(s.magic, e)
+    }
+    return [...m.entries()].map(([magic, v]) => ({ magic, ...v })).sort((a, b) => b.cap - a.cap)
+  })()
+
   return (
     <div className="space-y-6">
       <div>
         <h1 className="text-2xl font-bold text-slate-900">Schede Conto</h1>
         <p className="text-sm text-slate-500">Composizione e sizing a 3 livelli per conto. La size <b>attiva</b> è evidenziata; le 3 colonne sono i lotti <b>attuali</b> in esecuzione. <b>Target</b> = lotti nuovi quality+live da caricare (<span className="text-green-700">✓ verde</span> = applicati / <span className="text-amber-700">→ ambra</span> = da aggiornare in MT5). Badge <span className="text-amber-700">no-live</span> = versione deployata senza track record live → size con haircut prudenziale finché non raggiunge consistenza. Revisione mensile.</p>
       </div>
+
+      {/* Aggregatore capitale per strategia — limite FTMO $400k */}
+      {capRows.length > 0 && (
+        <div className="border border-slate-200 rounded-xl bg-white overflow-hidden">
+          <div className="px-4 py-2.5 bg-slate-50 border-b border-slate-200 flex items-center gap-2">
+            <span className="font-semibold text-slate-900 text-sm">Capitale per strategia su tutti i conti</span>
+            <span className="text-xs text-slate-500">limite FTMO ${ (FTMO_CAP/1000).toFixed(0) }k per strategia (conta solo se tradata IDENTICA; differenziando per pattern contano separate)</span>
+          </div>
+          <div className="overflow-x-auto"><table className="w-full text-sm">
+            <thead><tr className="text-left text-xs text-slate-500 border-b border-slate-100">
+              <th className="px-4 py-2">Magic</th><th className="px-2 py-2">Strategia</th>
+              <th className="px-2 py-2 text-right">Conti</th><th className="px-2 py-2 text-right">Capitale</th>
+              <th className="px-2 py-2">Uso del limite $400k</th>
+            </tr></thead>
+            <tbody>
+              {capRows.map(r => {
+                const pct = Math.min(100, (r.cap / FTMO_CAP) * 100)
+                const col = r.cap > FTMO_CAP ? 'bg-red-500' : r.cap >= 350000 ? 'bg-amber-500' : 'bg-green-500'
+                return (
+                  <tr key={r.magic} className="border-b border-slate-50">
+                    <td className="px-4 py-2 font-mono text-slate-700">{r.magic}</td>
+                    <td className="px-2 py-2 text-slate-900">{r.name}</td>
+                    <td className="px-2 py-2 text-right text-slate-600" title={r.accounts.join(', ')}>{r.accounts.length}</td>
+                    <td className={`px-2 py-2 text-right font-medium ${r.cap > FTMO_CAP ? 'text-red-600' : 'text-slate-900'}`}>${(r.cap/1000).toFixed(0)}k{r.cap > FTMO_CAP && ' ⚠'}</td>
+                    <td className="px-2 py-2"><div className="h-2 w-full max-w-[220px] rounded bg-slate-100 overflow-hidden"><div className={`h-full ${col}`} style={{ width: `${pct}%` }} /></div></td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table></div>
+        </div>
+      )}
 
       {accounts.map(acc => {
         const pf = portfolios.find(p => p.account_id === acc.id)
