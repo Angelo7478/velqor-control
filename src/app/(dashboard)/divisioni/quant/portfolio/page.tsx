@@ -10,6 +10,7 @@ type Strat = {
   direction: string | null; strategy_style: string | null; status: string; include_in_portfolio: boolean | null
   test_mc95_dd: number | null; test_max_open_dd: number | null; test_ret_dd: number | null; test_profit_factor: number | null
   real_trades: number | null; real_avg_per_lot: number | null; real_win_pct: number | null; real_profit_factor: number | null
+  live_status: string | null
 }
 type Account = { id: string; name: string; account_size: number | null; currency: string | null; max_daily_loss_pct: number | null; max_total_loss_pct: number | null }
 type Signal = { base_magic: number; sig_time: string; pl_per_lot: number }
@@ -33,12 +34,10 @@ const RISK_FACTOR = (g: string | null): string => (g === 'INDICI_US' || g === 'S
 // le 0-live prendono un haircut prudenziale (0.7). Niente Kelly/HRP (scartati dai dati).
 function qualityWeight(s: Strat): number {
   const robust = Math.min(Number(s.test_ret_dd) || 1, 10)
-  const trades = Number(s.real_trades) || 0
-  const pf = Number(s.real_profit_factor) || 0
-  let live = 0.7
-  if (trades >= 50 && pf >= 1.5) live = 1.15
-  else if (trades >= 30 && pf >= 1.2) live = 1.0
-  else if (trades >= 10) live = 0.85
+  // Fattore live basato sulla versione DEPLOYATA (live_status), non sui real_* aggregati
+  // (es. la magic 6 ha real_* della vecchia versione H1, ma la M15 deployata e 0-live).
+  // proven = track record live consistente; building/none = haircut prudenziale finche non matura.
+  const live = s.live_status === 'proven' ? 1.15 : 0.7
   return robust * live
 }
 
@@ -67,7 +66,7 @@ export default function PortfolioBuilderPage() {
     const supabase = createClient()
     const [sRes, aRes, sigRes] = await Promise.all([
       supabase.from('qel_strategies')
-        .select('id,magic,name,asset,asset_group,direction,strategy_style,status,include_in_portfolio,test_mc95_dd,test_max_open_dd,test_ret_dd,test_profit_factor,real_trades,real_avg_per_lot,real_win_pct,real_profit_factor')
+        .select('id,magic,name,asset,asset_group,direction,strategy_style,status,include_in_portfolio,test_mc95_dd,test_max_open_dd,test_ret_dd,test_profit_factor,real_trades,real_avg_per_lot,real_win_pct,real_profit_factor,live_status')
         .in('status', ['active', 'testing']).order('magic'),
       supabase.from('qel_accounts').select('id,name,account_size,currency,max_daily_loss_pct,max_total_loss_pct').eq('status', 'active').order('account_size', { ascending: false }),
       supabase.from('v_signal_trades').select('base_magic,sig_time,pl_per_lot').order('sig_time'),

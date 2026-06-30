@@ -26,6 +26,7 @@ type Strategy = {
   parameters: string | null
   test_mc95_dd: number | null
   test_max_open_dd: number | null
+  live_status: string | null
 }
 
 type PortStrat = {
@@ -39,6 +40,8 @@ type PortStrat = {
   final_lots: number | null
   dd_budget_allocation_pct: number | null
   sizing_notes: string | null
+  target_lots: Record<string, number> | null
+  lots_applied: boolean | null
   qel_strategies: Strategy | null
 }
 
@@ -71,7 +74,7 @@ export default function SchedeContoPage() {
     const [accRes, pfRes, psRes] = await Promise.all([
       supabase.from('qel_accounts').select('id,name,login,server,account_size,currency,status,challenge_phase,max_daily_loss_pct,max_total_loss_pct,vps_name').neq('status', 'inactive').neq('status', 'breached').order('account_size', { ascending: false }),
       supabase.from('qel_portfolios').select('id,account_id,name,max_dd_target_pct,daily_dd_limit_pct'),
-      supabase.from('qel_portfolio_strategies').select('id,portfolio_id,is_active,active_level,lot_conservative,lot_neutral,lot_aggressive,final_lots,dd_budget_allocation_pct,sizing_notes,qel_strategies(magic,name,asset_group,direction,strategy_style,parameters,test_mc95_dd,test_max_open_dd)'),
+      supabase.from('qel_portfolio_strategies').select('id,portfolio_id,is_active,active_level,lot_conservative,lot_neutral,lot_aggressive,final_lots,dd_budget_allocation_pct,sizing_notes,target_lots,lots_applied,qel_strategies(magic,name,asset_group,direction,strategy_style,parameters,test_mc95_dd,test_max_open_dd,live_status)'),
     ])
     setAccounts((accRes.data as Account[]) || [])
     setPortfolios((pfRes.data as Portfolio[]) || [])
@@ -85,7 +88,7 @@ export default function SchedeContoPage() {
     <div className="space-y-6">
       <div>
         <h1 className="text-2xl font-bold text-slate-900">Schede Conto</h1>
-        <p className="text-sm text-slate-500">Composizione e sizing a 3 livelli per conto. La size <b>attiva</b> è evidenziata. Revisione mensile.</p>
+        <p className="text-sm text-slate-500">Composizione e sizing a 3 livelli per conto. La size <b>attiva</b> è evidenziata; le 3 colonne sono i lotti <b>attuali</b> in esecuzione. <b>Target</b> = lotti nuovi quality+live da caricare (<span className="text-green-700">✓ verde</span> = applicati / <span className="text-amber-700">→ ambra</span> = da aggiornare in MT5). Badge <span className="text-amber-700">no-live</span> = versione deployata senza track record live → size con haircut prudenziale finché non raggiunge consistenza. Revisione mensile.</p>
       </div>
 
       {accounts.map(acc => {
@@ -134,6 +137,7 @@ export default function SchedeContoPage() {
                           <th key={l} className={`px-2 py-2 text-right ${l === activeLevel ? 'text-blue-700 font-semibold' : ''}`}>{LEVEL_LABEL[l]}</th>
                         ))}
                         <th className="px-2 py-2 text-right">MC95 %</th>
+                        <th className="px-2 py-2 text-right">Target (da caricare)</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -143,7 +147,9 @@ export default function SchedeContoPage() {
                           <tr key={r.id} className="border-b border-slate-50 hover:bg-slate-50/50">
                             <td className="px-4 py-2 font-mono text-slate-700">{s?.magic ?? '—'}</td>
                             <td className="px-2 py-2">
-                              <div className="text-slate-900">{s?.name}</div>
+                              <div className="text-slate-900">{s?.name} {s?.live_status === 'proven'
+                                ? <span className="text-[10px] px-1.5 py-0.5 rounded bg-green-100 text-green-700 align-middle">live</span>
+                                : <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-100 text-amber-700 align-middle">no-live · size ridotta</span>}</div>
                               <div className="text-xs text-slate-400">{s?.parameters}</div>
                             </td>
                             <td className="px-2 py-2"><span className={`text-xs ${s?.direction === 'short' ? 'text-red-600' : 'text-slate-600'}`}>{s?.direction}</span></td>
@@ -156,6 +162,17 @@ export default function SchedeContoPage() {
                               )
                             })}
                             <td className="px-2 py-2 text-right text-slate-500">{fmt(r.dd_budget_allocation_pct, 2)}%</td>
+                            <td className="px-2 py-2 text-right">
+                              {(() => {
+                                const tgt = r.target_lots?.[activeLevel]
+                                if (tgt == null) return <span className="text-slate-300">—</span>
+                                const cur = Number((r as any)['lot_' + activeLevel]) || 0
+                                const same = r.lots_applied === true || Math.abs(tgt - cur) < 0.005
+                                return same
+                                  ? <span className="text-green-700 font-semibold">✓ {fmt(tgt, 2)}</span>
+                                  : <span className="text-amber-700 font-semibold">→ {fmt(tgt, 2)}</span>
+                              })()}
+                            </td>
                           </tr>
                         )
                       })}
