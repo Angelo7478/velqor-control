@@ -65,20 +65,25 @@ export default function SchedeContoPage() {
   const [accounts, setAccounts] = useState<Account[]>([])
   const [portfolios, setPortfolios] = useState<Portfolio[]>([])
   const [strats, setStrats] = useState<PortStrat[]>([])
+  const [liveLots, setLiveLots] = useState<Map<string, number>>(new Map())
   const [loading, setLoading] = useState(true)
 
   useEffect(() => { load() }, [])
 
   async function load() {
     const supabase = createClient()
-    const [accRes, pfRes, psRes] = await Promise.all([
+    const [accRes, pfRes, psRes, llRes] = await Promise.all([
       supabase.from('qel_accounts').select('id,name,login,server,account_size,currency,status,challenge_phase,max_daily_loss_pct,max_total_loss_pct,vps_name').neq('status', 'inactive').neq('status', 'breached').order('account_size', { ascending: false }),
       supabase.from('qel_portfolios').select('id,account_id,name,max_dd_target_pct,daily_dd_limit_pct'),
       supabase.from('qel_portfolio_strategies').select('id,portfolio_id,is_active,active_level,lot_conservative,lot_neutral,lot_aggressive,final_lots,dd_budget_allocation_pct,sizing_notes,target_lots,lots_applied,qel_strategies(magic,name,asset_group,direction,strategy_style,parameters,test_mc95_dd,test_max_open_dd,live_status)'),
+      supabase.from('v_account_strategy_live_lot').select('account_id,base_magic,last_lot'),
     ])
     setAccounts((accRes.data as Account[]) || [])
     setPortfolios((pfRes.data as Portfolio[]) || [])
     setStrats((psRes.data as unknown as PortStrat[]) || [])
+    const ll = new Map<string, number>()
+    for (const r of ((llRes.data as { account_id: string; base_magic: number; last_lot: number }[]) || [])) ll.set(`${r.account_id}:${r.base_magic}`, Number(r.last_lot))
+    setLiveLots(ll)
     setLoading(false)
   }
 
@@ -166,10 +171,11 @@ export default function SchedeContoPage() {
                               {(() => {
                                 const tgt = r.target_lots?.[activeLevel]
                                 if (tgt == null) return <span className="text-slate-300">—</span>
-                                const cur = Number((r as any)['lot_' + activeLevel]) || 0
-                                const same = r.lots_applied === true || Math.abs(tgt - cur) < 0.005
-                                return same
-                                  ? <span className="text-green-700 font-semibold">✓ {fmt(tgt, 2)}</span>
+                                const live = liveLots.get(`${acc.id}:${s?.magic}`)
+                                const appliedLive = live != null && Math.abs(live - tgt) < 0.02
+                                const applied = r.lots_applied === true || appliedLive
+                                return applied
+                                  ? <span className="text-green-700 font-semibold" title={appliedLive ? `live ${fmt(live, 2)} lotti` : 'segnato applicato'}>✓ {fmt(tgt, 2)}</span>
                                   : <span className="text-amber-700 font-semibold">→ {fmt(tgt, 2)}</span>
                               })()}
                             </td>
