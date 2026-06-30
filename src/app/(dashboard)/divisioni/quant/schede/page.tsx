@@ -174,7 +174,7 @@ export default function SchedeStrategiePage() {
                   ))}
                 </div>
                 <p className="text-[11px] text-slate-400 mt-2">Periodo test: {s.test_period || '—'}</p>
-                {s.notes && <p className="text-xs text-slate-500 mt-2 bg-amber-50 rounded-lg p-2">{s.notes}</p>}
+                {s.notes && <p className="text-xs text-slate-600 mt-2 bg-amber-50 rounded-lg p-3 whitespace-pre-line leading-relaxed">{s.notes}</p>}
               </div>
 
               {/* test */}
