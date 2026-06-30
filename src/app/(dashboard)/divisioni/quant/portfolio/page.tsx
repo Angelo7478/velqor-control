@@ -19,6 +19,20 @@ const LEVEL_LABEL: Record<Level, string> = { conservative: 'Conservativo', neutr
 // fattore di rischio per il cap di correlazione (le US-equity contano come un cluster)
 const RISK_FACTOR = (g: string | null): string => (g === 'INDICI_US' || g === 'SP500' || g === 'GER40') ? 'EQUITY' : (g || 'ALTRO')
 
+// Peso qualita: robustezza (test ret/DD, cap 10) x fattore live.
+// Pesa di piu le strategie robuste E con buoni risultati live, non solo nei test;
+// le 0-live prendono un haircut prudenziale (0.7). Niente Kelly/HRP (scartati dai dati).
+function qualityWeight(s: Strat): number {
+  const robust = Math.min(Number(s.test_ret_dd) || 1, 10)
+  const trades = Number(s.real_trades) || 0
+  const pf = Number(s.real_profit_factor) || 0
+  let live = 0.7
+  if (trades >= 50 && pf >= 1.5) live = 1.15
+  else if (trades >= 30 && pf >= 1.2) live = 1.0
+  else if (trades >= 10) live = 0.85
+  return robust * live
+}
+
 function fmt(n: number | null | undefined, d = 2): string {
   if (n === null || n === undefined || Number.isNaN(Number(n))) return '—'
   return Number(n).toLocaleString('it-IT', { minimumFractionDigits: d, maximumFractionDigits: d })
@@ -63,14 +77,16 @@ export default function PortfolioBuilderPage() {
   const sizing = useMemo(() => {
     const selected = strats.filter(s => sel.has(s.id) && (s.test_mc95_dd || 0) > 0)
     const budgetUsd = (ddBudget / 100) * equity
-    const perStrat = selected.length > 0 ? budgetUsd / selected.length : 0
+    const wTot = selected.reduce((a, s) => a + qualityWeight(s), 0) || 1
     const rows = selected.map(s => {
       const mc95 = Number(s.test_mc95_dd) || 0
-      const lots = Math.max(0.01, Math.round((perStrat / mc95) * 100) / 100)
+      const w = qualityWeight(s)
+      const budgetStrat = budgetUsd * w / wTot
+      const lots = Math.max(0.01, Math.round((budgetStrat / mc95) * 100) / 100)
       const mc95Pct = (lots * mc95 / equity) * 100
       const mae = Number(s.test_max_open_dd) || 0
       const dayFloat = s.direction === 'short' ? 0 : lots * mae
-      return { s, lots, mc95Pct, dayFloat }
+      return { s, lots, mc95Pct, dayFloat, w }
     })
     return { rows, lotsById: new Map(rows.map(r => [r.s.id, r.lots])) }
   }, [strats, sel, equity, ddBudget])
@@ -114,6 +130,15 @@ export default function PortfolioBuilderPage() {
     }
   }, [signals, sizing, equity])
 
+  // ---- Confronto metriche tra i 3 livelli (scalano linearmente col budget) ----
+  const levelCompare = useMemo(() => {
+    if (!sim) return null
+    return (Object.keys(LEVELS) as Level[]).map(l => {
+      const ratio = LEVELS[l] / ddBudget
+      return { l, mc95: LEVELS[l], monthly: sim.monthlyPct * ratio, annual: sim.monthlyPct * 12 * ratio, worstDay: worstDayPct * ratio, retDd: sim.retDd }
+    })
+  }, [sim, ddBudget, worstDayPct])
+
   // ---- Export config JSON ----
   function exportConfig() {
     const cfg = {
@@ -140,10 +165,11 @@ export default function PortfolioBuilderPage() {
       equity_base: equity, max_dd_target_pct: ddBudget, daily_dd_limit_pct: maxDay, safety_factor: 1.0, is_active: true,
     }).select('id').single()
     if (ptf) {
-      // 3 livelli per ogni strategia
+      // 3 livelli per ogni strategia (pesati per qualita+live, stessa logica del pannello)
+      const wTot = sizing.rows.reduce((a, r) => a + r.w, 0) || 1
       const rows = sizing.rows.map(r => {
         const mc95 = Number(r.s.test_mc95_dd) || 1
-        const perL = (l: number) => Math.max(0.01, Math.round(((l / 100) * equity / sizing.rows.length / mc95) * 100) / 100)
+        const perL = (l: number) => Math.max(0.01, Math.round(((l / 100) * equity * r.w / wTot / mc95) * 100) / 100)
         return {
           portfolio_id: ptf.id, strategy_id: r.s.id, is_active: true, active_level: level,
           lot_conservative: perL(LEVELS.conservative), lot_neutral: perL(LEVELS.neutral), lot_aggressive: perL(LEVELS.aggressive),
@@ -208,6 +234,33 @@ export default function PortfolioBuilderPage() {
         </div>
       )}
 
+      {/* Confronto livelli di sizing */}
+      {levelCompare && (
+        <div className="bg-white border border-slate-200 rounded-xl p-4">
+          <div className="text-sm font-semibold text-slate-900 mb-2">Confronto livelli di sizing (le metriche scalano col budget; Return/DD invariato)</div>
+          <table className="w-full text-sm">
+            <thead><tr className="text-left text-xs text-slate-500 border-b border-slate-200">
+              <th className="px-2 py-1">Livello</th><th className="px-2 py-1 text-right">MC95 budget</th>
+              <th className="px-2 py-1 text-right">~ Mensile</th><th className="px-2 py-1 text-right">~ Annuo</th>
+              <th className="px-2 py-1 text-right">Worst-day</th><th className="px-2 py-1 text-right">Return/DD</th>
+            </tr></thead>
+            <tbody>
+              {levelCompare.map(r => (
+                <tr key={r.l} className={`border-b border-slate-50 ${r.l === level ? 'bg-blue-50' : ''}`}>
+                  <td className="px-2 py-1 font-medium text-slate-800">{LEVEL_LABEL[r.l]}{r.l === level && <span className="text-xs text-blue-600"> (attivo)</span>}</td>
+                  <td className="px-2 py-1 text-right">{fmt(r.mc95, 1)}%</td>
+                  <td className="px-2 py-1 text-right font-semibold text-slate-900">{fmt(r.monthly, 2)}%</td>
+                  <td className="px-2 py-1 text-right">{fmt(r.annual, 1)}%</td>
+                  <td className="px-2 py-1 text-right text-red-600">{fmt(r.worstDay, 2)}%</td>
+                  <td className="px-2 py-1 text-right">{fmt(r.retDd, 2)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <p className="text-xs text-slate-400 mt-2">Mensile/worst-day dalla simulazione live deduplicata, scalati al budget del livello. Il DD reale combinato e circa 1/4 della somma MC95 (decorrelazione): per le challenge si puo salire sopra l&apos;aggressivo sfruttando quel cuscino.</p>
+        </div>
+      )}
+
       {/* Azioni */}
       <div className="flex flex-wrap items-center gap-3 bg-white border border-slate-200 rounded-xl p-4">
         <input value={ptfName} onChange={e => setPtfName(e.target.value)} placeholder="Nome PTF" className="border border-slate-300 rounded-lg px-3 py-1.5 text-sm" />
@@ -245,7 +298,7 @@ export default function PortfolioBuilderPage() {
           </tbody>
         </table>
       </div>
-      <p className="text-xs text-slate-400">Sizing equal-risk: budget MC95 = {ddBudget}% equity diviso tra le {sizing.rows.length} selezionate. Worst-day floating = somma (lotti × MAE) delle long (le US-equity correlate sommano = conservativo). Live deduplicato (un campione per segnale, vista v_signal_trades), include il track record storico 10K/80K.</p>
+      <p className="text-xs text-slate-400">Sizing quality-weighted: budget MC95 = {ddBudget}% equity distribuito per peso qualita (robustezza test ret/DD × fattore live: premia chi ha dato anche dal vivo, haircut 0,7 alle 0-live), non equal-risk. Niente Kelly/HRP (scartati dai dati). Worst-day floating = somma (lotti × MAE) delle long (le US-equity correlate sommano = conservativo). Live deduplicato (un campione per segnale, vista v_signal_trades), include il track record storico 10K/80K.</p>
     </div>
   )
 }
