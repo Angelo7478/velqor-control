@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { createClient } from '@/lib/supabase-browser'
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts'
+import { detectMarketRegimes4Q, regimeMultiplier, REGIME_4Q_LABELS, type MarketRegime4Q } from '@/lib/quant-utils'
 
 type Strat = {
   id: string; magic: number | null; name: string; asset: string | null; asset_group: string | null
@@ -49,6 +50,8 @@ export default function PortfolioBuilderPage() {
   const [ptfName, setPtfName] = useState('')
   const [msg, setMsg] = useState('')
   const [loading, setLoading] = useState(true)
+  const [regimeBySym, setRegimeBySym] = useState<Map<string, MarketRegime4Q>>(new Map())
+  const [applyRegime, setApplyRegime] = useState(false)
 
   useEffect(() => { load() }, [])
 
@@ -66,6 +69,18 @@ export default function PortfolioBuilderPage() {
     setAccounts((aRes.data as Account[]) || [])
     setSignals((sigRes.data as Signal[]) || [])
     setSel(new Set(list.filter(s => s.include_in_portfolio).map(s => s.id)))
+    // Regime corrente per sottostante: ultimi ~220 bar daily per simbolo (evita il cap 1000 righe Supabase)
+    const symbols = [...new Set(list.map(s => s.asset).filter(Boolean) as string[])]
+    const bRes = await Promise.all(symbols.map(sym =>
+      supabase.from('qel_benchmarks').select('symbol,ts,high,low,close_price').eq('symbol', sym).order('ts', { ascending: false }).limit(220)
+    ))
+    const rmap = new Map<string, MarketRegime4Q>()
+    bRes.forEach((r, i) => {
+      const pts = (((r.data as { ts: string; high: number | null; low: number | null; close_price: number }[]) || [])).slice().reverse()
+      const zones = detectMarketRegimes4Q(pts)
+      if (zones.length) rmap.set(symbols[i], zones[zones.length - 1].regime)
+    })
+    setRegimeBySym(rmap)
     setLoading(false)
   }
 
@@ -77,10 +92,11 @@ export default function PortfolioBuilderPage() {
   const sizing = useMemo(() => {
     const selected = strats.filter(s => sel.has(s.id) && (s.test_mc95_dd || 0) > 0)
     const budgetUsd = (ddBudget / 100) * equity
-    const wTot = selected.reduce((a, s) => a + qualityWeight(s), 0) || 1
+    const effW = (s: Strat) => qualityWeight(s) * (applyRegime ? regimeMultiplier(s.strategy_style, regimeBySym.get(s.asset || '') || null) : 1)
+    const wTot = selected.reduce((a, s) => a + effW(s), 0) || 1
     const rows = selected.map(s => {
       const mc95 = Number(s.test_mc95_dd) || 0
-      const w = qualityWeight(s)
+      const w = effW(s)
       const budgetStrat = budgetUsd * w / wTot
       const lots = Math.max(0.01, Math.round((budgetStrat / mc95) * 100) / 100)
       const mc95Pct = (lots * mc95 / equity) * 100
@@ -89,7 +105,7 @@ export default function PortfolioBuilderPage() {
       return { s, lots, mc95Pct, dayFloat, w }
     })
     return { rows, lotsById: new Map(rows.map(r => [r.s.id, r.lots])) }
-  }, [strats, sel, equity, ddBudget])
+  }, [strats, sel, equity, ddBudget, applyRegime, regimeBySym])
 
   const aggMc95 = sizing.rows.reduce((a, r) => a + r.mc95Pct, 0)
   const worstDayPct = (sizing.rows.reduce((a, r) => a + r.dayFloat, 0) / equity) * 100
@@ -209,6 +225,22 @@ export default function PortfolioBuilderPage() {
           <span>Worst-day <b className={worstDayPct > maxDay ? 'text-red-600' : 'text-slate-900'}>{fmt(worstDayPct, 2)}%</b> <span className="text-xs text-slate-400">/ {fmt(maxDay, 0)}%</span></span>
         </div>
       </div>
+
+      {/* Regime di mercato (analisi mensile) */}
+      {regimeBySym.size > 0 && (
+        <div className="flex flex-wrap items-center gap-4 bg-white border border-slate-200 rounded-xl p-4">
+          <label className="flex items-center gap-2 text-sm">
+            <input type="checkbox" checked={applyRegime} onChange={e => setApplyRegime(e.target.checked)} />
+            <span className="font-medium text-slate-800">Adatta i pesi al regime</span>
+            <span className="text-xs text-slate-400">(mensile: +15% stili favoriti dal regime, −20% sfavoriti)</span>
+          </label>
+          <div className="flex flex-wrap gap-2 text-xs">
+            {[...regimeBySym.entries()].filter(([sym]) => strats.some(s => sel.has(s.id) && s.asset === sym)).map(([sym, reg]) => (
+              <span key={sym} className="px-2 py-1 rounded-lg bg-slate-100 text-slate-600">{sym}: <b className="text-slate-800">{REGIME_4Q_LABELS[reg]}</b></span>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Simulazione */}
       {sim && (

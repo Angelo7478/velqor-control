@@ -121,6 +121,17 @@ export const REGIME_COHERENCE: Record<string, { favorable: MarketRegime4Q[]; unf
   },
 }
 
+// Moltiplicatore di peso per il regime corrente (analisi mensile): premia (+15%) le
+// strategie il cui stile e favorito dal regime del proprio sottostante, penalizza (-20%)
+// quelle in regime sfavorevole, neutro altrove. Decision support, da rivedere ogni mese.
+export function regimeMultiplier(style: string | null, regime: MarketRegime4Q | null): number {
+  if (!regime) return 1.0
+  const coh = REGIME_COHERENCE[style || 'hybrid'] || REGIME_COHERENCE.hybrid
+  if (coh.favorable.includes(regime)) return 1.15
+  if (coh.unfavorable.includes(regime)) return 0.80
+  return 1.0
+}
+
 export interface BenchmarkPoint {
   date: string        // YYYY-MM-DD
   stratReturn: number // strategy cumulative return %
