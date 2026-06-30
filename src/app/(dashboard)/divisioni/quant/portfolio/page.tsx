@@ -10,7 +10,7 @@ type Strat = {
   direction: string | null; strategy_style: string | null; status: string; include_in_portfolio: boolean | null
   test_mc95_dd: number | null; test_max_open_dd: number | null; test_ret_dd: number | null; test_profit_factor: number | null
   real_trades: number | null; real_avg_per_lot: number | null; real_win_pct: number | null; real_profit_factor: number | null
-  live_status: string | null
+  live_status: string | null; regime_gated: boolean | null
 }
 type Account = { id: string; name: string; account_size: number | null; currency: string | null; max_daily_loss_pct: number | null; max_total_loss_pct: number | null }
 type Signal = { base_magic: number; sig_time: string; pl_per_lot: number }
@@ -50,6 +50,7 @@ export default function PortfolioBuilderPage() {
   const [strats, setStrats] = useState<Strat[]>([])
   const [accounts, setAccounts] = useState<Account[]>([])
   const [signals, setSignals] = useState<Signal[]>([])
+  const [acctComp, setAcctComp] = useState<Map<string, Set<string>>>(new Map())
   const [sel, setSel] = useState<Set<string>>(new Set())
   const [equity, setEquity] = useState(100000)
   const [level, setLevel] = useState<Level>('neutral')
@@ -64,17 +65,29 @@ export default function PortfolioBuilderPage() {
 
   async function load() {
     const supabase = createClient()
-    const [sRes, aRes, sigRes] = await Promise.all([
+    const [sRes, aRes, sigRes, pfRes, psRes] = await Promise.all([
       supabase.from('qel_strategies')
-        .select('id,magic,name,asset,asset_group,direction,strategy_style,status,include_in_portfolio,test_mc95_dd,test_max_open_dd,test_ret_dd,test_profit_factor,real_trades,real_avg_per_lot,real_win_pct,real_profit_factor,live_status')
+        .select('id,magic,name,asset,asset_group,direction,strategy_style,status,include_in_portfolio,test_mc95_dd,test_max_open_dd,test_ret_dd,test_profit_factor,real_trades,real_avg_per_lot,real_win_pct,real_profit_factor,live_status,regime_gated')
         .in('status', ['active', 'testing']).order('magic'),
       supabase.from('qel_accounts').select('id,name,account_size,currency,max_daily_loss_pct,max_total_loss_pct').eq('status', 'active').order('account_size', { ascending: false }),
       supabase.from('v_signal_trades').select('base_magic,sig_time,pl_per_lot').order('sig_time'),
+      supabase.from('qel_portfolios').select('id,account_id'),
+      supabase.from('qel_portfolio_strategies').select('portfolio_id,strategy_id'),
     ])
     const list = (sRes.data as Strat[]) || []
     setStrats(list)
     setAccounts((aRes.data as Account[]) || [])
     setSignals((sigRes.data as Signal[]) || [])
+    // composizione salvata per conto (per caricarla quando si seleziona il conto)
+    const pfAcc = new Map<string, string>()
+    for (const p of ((pfRes.data as { id: string; account_id: string | null }[]) || [])) if (p.account_id) pfAcc.set(p.id, p.account_id)
+    const comp = new Map<string, Set<string>>()
+    for (const r of ((psRes.data as { portfolio_id: string; strategy_id: string }[]) || [])) {
+      const acc = pfAcc.get(r.portfolio_id); if (!acc) continue
+      if (!comp.has(acc)) comp.set(acc, new Set())
+      comp.get(acc)!.add(r.strategy_id)
+    }
+    setAcctComp(comp)
     setSel(new Set(list.filter(s => s.include_in_portfolio).map(s => s.id)))
     // Regime corrente per sottostante: ultimi ~220 bar daily per simbolo (evita il cap 1000 righe Supabase)
     const symbols = [...new Set(list.map(s => s.asset).filter(Boolean) as string[])]
@@ -92,20 +105,31 @@ export default function PortfolioBuilderPage() {
   }
 
   function toggle(id: string) { setSel(p => { const n = new Set(p); n.has(id) ? n.delete(id) : n.add(id); return n }) }
-  function pickAccount(id: string) { setAcctId(id); const a = accounts.find(x => x.id === id); if (a?.account_size) setEquity(Number(a.account_size)) }
+  function pickAccount(id: string) {
+    setAcctId(id)
+    const a = accounts.find(x => x.id === id); if (a?.account_size) setEquity(Number(a.account_size))
+    const comp = acctComp.get(id) // carica la composizione salvata del conto, se c'e
+    if (comp && comp.size > 0) setSel(new Set(comp))
+  }
 
   // ---- Sizing istituzionale: budget MC95 = livello% equity, equal-risk tra le selezionate ----
   const ddBudget = LEVELS[level]
   const sizing = useMemo(() => {
     const selected = strats.filter(s => sel.has(s.id) && (s.test_mc95_dd || 0) > 0)
     const budgetUsd = (ddBudget / 100) * equity
-    const effW = (s: Strat) => qualityWeight(s) * (applyRegime ? regimeMultiplier(s.strategy_style, regimeBySym.get(s.asset || '') || null) : 1)
+    const effW = (s: Strat) => {
+      const base = qualityWeight(s)
+      if (!applyRegime) return base
+      const m = regimeMultiplier(s.strategy_style, regimeBySym.get(s.asset || '') || null)
+      if (s.regime_gated && m < 1) return 0 // gated + regime sfavorevole -> OFF (spenta, non ridotta)
+      return base * m
+    }
     const wTot = selected.reduce((a, s) => a + effW(s), 0) || 1
     const rows = selected.map(s => {
       const mc95 = Number(s.test_mc95_dd) || 0
       const w = effW(s)
       const budgetStrat = budgetUsd * w / wTot
-      const lots = Math.max(0.01, Math.round((budgetStrat / mc95) * 100) / 100)
+      const lots = w === 0 ? 0 : Math.max(0.01, Math.round((budgetStrat / mc95) * 100) / 100)
       const mc95Pct = (lots * mc95 / equity) * 100
       const mae = Number(s.test_max_open_dd) || 0
       const dayFloat = s.direction === 'short' ? 0 : lots * mae
@@ -336,7 +360,7 @@ export default function PortfolioBuilderPage() {
                   <td className="px-2 py-2 text-right text-slate-600">{fmt(s.test_mc95_dd, 0)}</td>
                   <td className="px-2 py-2 text-right text-slate-500">{fmt(s.test_ret_dd, 1)} · {fmt(s.test_profit_factor, 2)}</td>
                   <td className="px-2 py-2 text-right text-slate-500">{s.real_trades ? <>{s.real_trades} · {fmt(s.real_avg_per_lot, 1)} · {fmt(s.real_profit_factor, 2)}</> : <span className="text-slate-300">no live</span>}</td>
-                  <td className="px-2 py-2 text-right font-semibold text-blue-800">{r ? fmt(r.lots, 2) : '—'}</td>
+                  <td className="px-2 py-2 text-right font-semibold text-blue-800">{r ? (r.lots === 0 ? <span className="text-amber-600" title="spenta dal gate regime (sfavorevole)">OFF</span> : fmt(r.lots, 2)) : '—'}</td>
                   <td className="px-2 py-2 text-right text-slate-500">{r ? fmt(r.mc95Pct, 2) + '%' : '—'}</td>
                 </tr>
               )
