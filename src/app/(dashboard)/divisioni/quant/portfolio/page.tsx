@@ -17,6 +17,14 @@ type Signal = { base_magic: number; sig_time: string; pl_per_lot: number }
 const LEVELS = { conservative: 3.5, neutral: 6, aggressive: 9 } as const
 type Level = keyof typeof LEVELS
 const LEVEL_LABEL: Record<Level, string> = { conservative: 'Conservativo', neutral: 'Neutro', aggressive: 'Aggressivo' }
+// Cuscino di decorrelazione misurato sul book attuale (PTF_SIM, block-bootstrap): DD reale ~1/4 dell'aritmetico.
+// E un RIFERIMENTO, non licenza per sovra-sizzare; rivedere se cambia la composizione del portafoglio.
+const DECORR = 0.26
+// Livelli di valutazione (oltre i 3 operativi): per vedere dove toccano i limiti daily/totale.
+const EVAL_LEVELS: { name: string; mc95: number }[] = [
+  { name: 'Conservativo', mc95: 3.5 }, { name: 'Neutro', mc95: 6 }, { name: 'Aggressivo', mc95: 9 },
+  { name: 'Challenge', mc95: 12 }, { name: 'Spinto', mc95: 15 },
+]
 // fattore di rischio per il cap di correlazione (le US-equity contano come un cluster)
 const RISK_FACTOR = (g: string | null): string => (g === 'INDICI_US' || g === 'SP500' || g === 'GER40') ? 'EQUITY' : (g || 'ALTRO')
 
@@ -146,14 +154,19 @@ export default function PortfolioBuilderPage() {
     }
   }, [signals, sizing, equity])
 
-  // ---- Confronto metriche tra i 3 livelli (scalano linearmente col budget) ----
+  // ---- Confronto livelli + valutazione limiti (ddopen daily, MC95 totale). Scalano col budget ----
   const levelCompare = useMemo(() => {
-    if (!sim) return null
-    return (Object.keys(LEVELS) as Level[]).map(l => {
-      const ratio = LEVELS[l] / ddBudget
-      return { l, mc95: LEVELS[l], monthly: sim.monthlyPct * ratio, annual: sim.monthlyPct * 12 * ratio, worstDay: worstDayPct * ratio, retDd: sim.retDd }
+    if (!sim || ddBudget <= 0) return null
+    return EVAL_LEVELS.map(L => {
+      const ratio = L.mc95 / ddBudget
+      const daily = worstDayPct * ratio
+      return {
+        name: L.name, arith: L.mc95, real: L.mc95 * DECORR, daily,
+        monthly: sim.monthlyPct * ratio, annual: sim.monthlyPct * 12 * ratio,
+        overTot: L.mc95 > maxTot, overDay: daily > maxDay,
+      }
     })
-  }, [sim, ddBudget, worstDayPct])
+  }, [sim, ddBudget, worstDayPct, maxTot, maxDay])
 
   // ---- Export config JSON ----
   function exportConfig() {
@@ -266,30 +279,32 @@ export default function PortfolioBuilderPage() {
         </div>
       )}
 
-      {/* Confronto livelli di sizing */}
+      {/* Confronto livelli + valutazione limiti */}
       {levelCompare && (
         <div className="bg-white border border-slate-200 rounded-xl p-4">
-          <div className="text-sm font-semibold text-slate-900 mb-2">Confronto livelli di sizing (le metriche scalano col budget; Return/DD invariato)</div>
+          <div className="text-sm font-semibold text-slate-900 mb-2">Livelli di sizing e limiti (su 100k = {fmt(equity, 0)}; le metriche scalano col budget)</div>
           <table className="w-full text-sm">
             <thead><tr className="text-left text-xs text-slate-500 border-b border-slate-200">
-              <th className="px-2 py-1">Livello</th><th className="px-2 py-1 text-right">MC95 budget</th>
+              <th className="px-2 py-1">Livello</th>
+              <th className="px-2 py-1 text-right">MC95 aritm.<span className="text-slate-300"> /{fmt(maxTot, 0)}</span></th>
+              <th className="px-2 py-1 text-right">MC95 reale*</th>
+              <th className="px-2 py-1 text-right">DD-day open<span className="text-slate-300"> /{fmt(maxDay, 0)}</span></th>
               <th className="px-2 py-1 text-right">~ Mensile</th><th className="px-2 py-1 text-right">~ Annuo</th>
-              <th className="px-2 py-1 text-right">Worst-day</th><th className="px-2 py-1 text-right">Return/DD</th>
             </tr></thead>
             <tbody>
               {levelCompare.map(r => (
-                <tr key={r.l} className={`border-b border-slate-50 ${r.l === level ? 'bg-blue-50' : ''}`}>
-                  <td className="px-2 py-1 font-medium text-slate-800">{LEVEL_LABEL[r.l]}{r.l === level && <span className="text-xs text-blue-600"> (attivo)</span>}</td>
-                  <td className="px-2 py-1 text-right">{fmt(r.mc95, 1)}%</td>
+                <tr key={r.name} className={`border-b border-slate-50 ${r.name === LEVEL_LABEL[level] ? 'bg-blue-50' : ''}`}>
+                  <td className="px-2 py-1 font-medium text-slate-800">{r.name}{r.name === LEVEL_LABEL[level] && <span className="text-xs text-blue-600"> (attivo)</span>}</td>
+                  <td className={`px-2 py-1 text-right font-medium ${r.overTot ? 'text-red-600' : 'text-slate-900'}`}>{fmt(r.arith, 1)}%{r.overTot && ' ⚠'}</td>
+                  <td className="px-2 py-1 text-right text-slate-500">{fmt(r.real, 1)}%</td>
+                  <td className={`px-2 py-1 text-right ${r.overDay ? 'text-red-600' : 'text-slate-600'}`}>{fmt(r.daily, 2)}%{r.overDay && ' ⚠'}</td>
                   <td className="px-2 py-1 text-right font-semibold text-slate-900">{fmt(r.monthly, 2)}%</td>
                   <td className="px-2 py-1 text-right">{fmt(r.annual, 1)}%</td>
-                  <td className="px-2 py-1 text-right text-red-600">{fmt(r.worstDay, 2)}%</td>
-                  <td className="px-2 py-1 text-right">{fmt(r.retDd, 2)}</td>
                 </tr>
               ))}
             </tbody>
           </table>
-          <p className="text-xs text-slate-400 mt-2">Mensile/worst-day dalla simulazione live deduplicata, scalati al budget del livello. Il DD reale combinato e circa 1/4 della somma MC95 (decorrelazione): per le challenge si puo salire sopra l&apos;aggressivo sfruttando quel cuscino.</p>
+          <p className="text-xs text-slate-400 mt-2"><b>MC95 aritmetico</b> = somma worst-case (tetto duro: assume che tutto correli) — è il numero su cui NON sforare. <b>DD-day open</b> = floating del cluster long sul giorno peggiore (somma lotti×MAE). <b>*MC95 reale</b> = se la decorrelazione regge come nel 2022 (cuscino ~{fmt(DECORR * 100, 0)}% misurato su PTF_SIM): è un riferimento, non licenza per sovra-sizzare. Operativo = i 3 livelli sopra; Challenge/Spinto sono per valutare i limiti.</p>
         </div>
       )}
 
