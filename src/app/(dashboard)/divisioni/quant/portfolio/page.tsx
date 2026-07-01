@@ -39,12 +39,14 @@ const RISK_FACTOR = (g: string | null): string => (g === 'INDICI_US' || g === 'S
 // Peso qualita: robustezza (test ret/DD, cap 10) x fattore live.
 // Pesa di piu le strategie robuste E con buoni risultati live, non solo nei test;
 // le 0-live prendono un haircut prudenziale (0.7). Niente Kelly/HRP (scartati dai dati).
-function qualityWeight(s: Strat): number {
+// asIfProven = scenario "a regime": tutte le strategie trattate come live-proven (haircut rimosso).
+// Serve a mostrare la size-obiettivo quando le 0-live matureranno, accanto a quella prudente operativa.
+function qualityWeight(s: Strat, asIfProven = false): number {
   const robust = Math.min(Number(s.test_ret_dd) || 1, 10)
   // Fattore live basato sulla versione DEPLOYATA (live_status), non sui real_* aggregati
   // (es. la magic 6 ha real_* della vecchia versione H1, ma la M15 deployata e 0-live).
   // proven = track record live consistente; building/none = haircut prudenziale finche non matura.
-  const live = s.live_status === 'proven' ? 1.15 : 0.7
+  const live = (asIfProven || s.live_status === 'proven') ? 1.15 : 0.7
   return robust * live
 }
 
@@ -128,25 +130,35 @@ export default function PortfolioBuilderPage() {
   const sizing = useMemo(() => {
     const selected = strats.filter(s => sel.has(s.id) && (s.test_mc95_dd || 0) > 0)
     const budgetUsd = (ddBudget / 100) * equity
-    const effW = (s: Strat) => {
-      const base = qualityWeight(s)
-      if (!applyRegime) return base
-      const m = regimeMultiplier(s.strategy_style, regimeBySym.get(s.asset || '') || null)
-      if (s.regime_gated && m < 1) return 0 // gated + regime sfavorevole -> OFF (spenta, non ridotta)
-      return base * m
+    // build(asIfProven): calcola le righe di sizing. false = prudente/operativa (haircut 0.7 alle 0-live);
+    // true = "a regime" (tutte proven), size-obiettivo quando le 0-live matureranno.
+    const build = (asIfProven: boolean) => {
+      const effW = (s: Strat) => {
+        const base = qualityWeight(s, asIfProven)
+        if (!applyRegime) return base
+        const m = regimeMultiplier(s.strategy_style, regimeBySym.get(s.asset || '') || null)
+        if (s.regime_gated && m < 1) return 0 // gated + regime sfavorevole -> OFF (spenta, non ridotta)
+        return base * m
+      }
+      const wTot = selected.reduce((a, s) => a + effW(s), 0) || 1
+      return selected.map(s => {
+        const mc95 = Number(s.test_mc95_dd) || 0
+        const w = effW(s)
+        const budgetStrat = budgetUsd * w / wTot
+        const lots = w === 0 ? 0 : Math.max(0.01, Math.round((budgetStrat / mc95) * 100) / 100)
+        const mc95Pct = (lots * mc95 / equity) * 100
+        const mae = Number(s.test_max_open_dd) || 0
+        const dayFloat = s.direction === 'short' ? 0 : lots * mae
+        return { s, lots, mc95Pct, dayFloat, w }
+      })
     }
-    const wTot = selected.reduce((a, s) => a + effW(s), 0) || 1
-    const rows = selected.map(s => {
-      const mc95 = Number(s.test_mc95_dd) || 0
-      const w = effW(s)
-      const budgetStrat = budgetUsd * w / wTot
-      const lots = w === 0 ? 0 : Math.max(0.01, Math.round((budgetStrat / mc95) * 100) / 100)
-      const mc95Pct = (lots * mc95 / equity) * 100
-      const mae = Number(s.test_max_open_dd) || 0
-      const dayFloat = s.direction === 'short' ? 0 : lots * mae
-      return { s, lots, mc95Pct, dayFloat, w }
-    })
-    return { rows, lotsById: new Map(rows.map(r => [r.s.id, r.lots])) }
+    const rows = build(false)
+    const regimeRows = build(true)
+    return {
+      rows,
+      lotsById: new Map(rows.map(r => [r.s.id, r.lots])),
+      regimeById: new Map(regimeRows.map(r => [r.s.id, { lots: r.lots, mc95Pct: r.mc95Pct }])),
+    }
   }, [strats, sel, equity, ddBudget, applyRegime, regimeBySym])
 
   const aggMc95 = sizing.rows.reduce((a, r) => a + r.mc95Pct, 0)
@@ -253,15 +265,25 @@ export default function PortfolioBuilderPage() {
     }
     return out
   }
-  // Box intro: composizione del portafoglio (strategie scelte + sizing al livello).
+  // Box intro: composizione del portafoglio (strategie scelte + sizing operativo e "a regime").
   function introHtml(levelPct: number, levelName: string): string {
+    let anyHaircut = false
     const body = sizing.rows.map(r => {
       const contrib = backtestMonthly.filter(m => m.magic === r.s.magic).reduce((a, m) => a + m.pl_per_lot, 0) * r.lots
       const lotsCell = r.lots === 0 ? '<span style="color:#d97706">OFF</span>' : r.lots.toFixed(2)
       const dir = r.s.direction ? ` <span style="color:${r.s.direction === 'short' ? '#dc2626' : '#94a3b8'};font-size:10px">${r.s.direction}</span>` : ''
-      return `<tr><td style="padding:2px 6px;font-family:monospace;color:#64748b">${r.s.magic ?? ''}</td><td style="padding:2px 6px">${r.s.name}${dir}</td><td style="padding:2px 6px;color:#64748b">${RISK_FACTOR(r.s.asset_group)}</td><td style="padding:2px 6px;text-align:right;font-weight:600">${lotsCell}</td><td style="padding:2px 6px;text-align:right">${r.mc95Pct.toFixed(2)}%</td><td style="padding:2px 6px;text-align:right;color:${contrib >= 0 ? '#16a34a' : '#dc2626'}">${contrib < 0 ? '-' : ''}$${Math.abs(Math.round(contrib)).toLocaleString('it-IT')}</td></tr>`
+      const rr = sizing.regimeById.get(r.s.id)
+      const proven = r.s.live_status === 'proven'
+      if (!proven && r.lots > 0) anyHaircut = true
+      const regimeCell = (r.lots === 0 || !rr) ? '<span style="color:#cbd5e1">—</span>'
+        : `<span style="color:${!proven && rr.lots > r.lots ? '#059669' : '#94a3b8'}">${rr.lots.toFixed(2)}</span>`
+      return `<tr><td style="padding:2px 6px;font-family:monospace;color:#64748b">${r.s.magic ?? ''}</td><td style="padding:2px 6px">${r.s.name}${dir}</td><td style="padding:2px 6px;color:#64748b">${RISK_FACTOR(r.s.asset_group)}</td><td style="padding:2px 6px;text-align:right;font-weight:600">${lotsCell}</td><td style="padding:2px 6px;text-align:right">${regimeCell}</td><td style="padding:2px 6px;text-align:right">${r.mc95Pct.toFixed(2)}%</td><td style="padding:2px 6px;text-align:right;color:${contrib >= 0 ? '#16a34a' : '#dc2626'}">${contrib < 0 ? '-' : ''}$${Math.abs(Math.round(contrib)).toLocaleString('it-IT')}</td></tr>`
     }).join('')
-    return `<b>Sizing ${levelName} — ${levelPct}% di MC95.</b> Backtest combinato delle strategie selezionate, scalati ai lotti del livello (costi broker reali già inclusi nei trade-list). <b>Composizione del portafoglio:</b><table style="width:100%;border-collapse:collapse;margin-top:8px;font-size:11px;color:#1e293b"><thead><tr style="text-align:left;color:#64748b;border-bottom:1px solid #ddd6fe"><th style="padding:2px 6px">Magic</th><th style="padding:2px 6px">Strategia</th><th style="padding:2px 6px">Fattore</th><th style="padding:2px 6px;text-align:right">Lotti</th><th style="padding:2px 6px;text-align:right">MC95%</th><th style="padding:2px 6px;text-align:right">Contributo</th></tr></thead><tbody>${body}</tbody><tfoot><tr style="border-top:1px solid #ddd6fe;font-weight:600"><td style="padding:3px 6px" colspan="4">${sizing.rows.length} strategie</td><td style="padding:3px 6px;text-align:right">${aggMc95.toFixed(1)}%</td><td style="padding:3px 6px;text-align:right;color:${btSim.net >= 0 ? '#16a34a' : '#dc2626'}">${btSim.net < 0 ? '-' : ''}$${Math.abs(Math.round(btSim.net)).toLocaleString('it-IT')}</td></tr></tfoot></table>`
+    const table = `<table style="width:100%;border-collapse:collapse;margin-top:8px;font-size:11px;color:#1e293b"><thead><tr style="text-align:left;color:#64748b;border-bottom:1px solid #ddd6fe"><th style="padding:2px 6px">Magic</th><th style="padding:2px 6px">Strategia</th><th style="padding:2px 6px">Fattore</th><th style="padding:2px 6px;text-align:right">Lotti</th><th style="padding:2px 6px;text-align:right">A regime</th><th style="padding:2px 6px;text-align:right">MC95%</th><th style="padding:2px 6px;text-align:right">Contributo</th></tr></thead><tbody>${body}</tbody><tfoot><tr style="border-top:1px solid #ddd6fe;font-weight:600"><td style="padding:3px 6px" colspan="5">${sizing.rows.length} strategie</td><td style="padding:3px 6px;text-align:right">${aggMc95.toFixed(1)}%</td><td style="padding:3px 6px;text-align:right;color:${btSim.net >= 0 ? '#16a34a' : '#dc2626'}">${btSim.net < 0 ? '-' : ''}$${Math.abs(Math.round(btSim.net)).toLocaleString('it-IT')}</td></tr></tfoot></table>`
+    const twoSizeNote = anyHaircut
+      ? `<div style="margin-top:8px;font-size:10.5px;color:#64748b"><b>Due size — "Lotti" (operativa) e "A regime".</b> La size operativa applica un haircut prudenziale (0,7) alle strategie senza storico live consistente: finché un edge non ha provato di reggere dal vivo (slippage, regime, costi reali) non gli si affida capitale pieno. La colonna <b>A regime</b> è la size-obiettivo se la strategia fosse già live-proven (haircut rimosso, come le strategie con track record). È dove arriverà quando maturerà (~30-40 trade live, PF&gt;1,2 → promozione). Il 0,7 è voluto: premia la prova sul campo e lascia crescere la size man mano che la strategia se la guadagna.</div>`
+      : ''
+    return `<b>Sizing ${levelName} — ${levelPct}% di MC95.</b> Backtest combinato delle strategie selezionate, scalati ai lotti del livello (costi broker reali già inclusi nei trade-list). <b>Composizione del portafoglio:</b>${table}${twoSizeNote}`
   }
   // Tabella 5-livelli (riuso della memo levelCompare) + spiegazione probabilità-DD (aritmetico/reale/storico).
   function levelCompareTableHtml(): string {
@@ -459,7 +481,9 @@ export default function PortfolioBuilderPage() {
             <th className="px-3 py-2"></th><th className="px-2 py-2">Magic</th><th className="px-2 py-2">Strategia</th>
             <th className="px-2 py-2">Fattore</th><th className="px-2 py-2 text-right">MC95/lot</th>
             <th className="px-2 py-2 text-right">Backtest R/DD·PF</th><th className="px-2 py-2 text-right">Live: segnali·avg/lot·PF</th>
-            <th className="px-2 py-2 text-right">Lotti ({levelName})</th><th className="px-2 py-2 text-right">MC95 %</th>
+            <th className="px-2 py-2 text-right">Lotti ({levelName})</th>
+            <th className="px-2 py-2 text-right" title="Size 'a regime': se tutte fossero live-proven (haircut 0,7 rimosso). Obiettivo quando le 0-live maturano.">A regime</th>
+            <th className="px-2 py-2 text-right">MC95 %</th>
           </tr></thead>
           <tbody>
             {strats.map(s => {
@@ -474,6 +498,14 @@ export default function PortfolioBuilderPage() {
                   <td className="px-2 py-2 text-right text-slate-500">{fmt(s.test_ret_dd, 1)} · {fmt(s.test_profit_factor, 2)}</td>
                   <td className="px-2 py-2 text-right text-slate-500">{s.real_trades ? <>{s.real_trades} · {fmt(s.real_avg_per_lot, 1)} · {fmt(s.real_profit_factor, 2)}</> : <span className="text-slate-300">no live</span>}</td>
                   <td className="px-2 py-2 text-right font-semibold text-blue-800">{r ? (r.lots === 0 ? <span className="text-amber-600" title="spenta dal gate regime (sfavorevole)">OFF</span> : fmt(r.lots, 2)) : '—'}</td>
+                  <td className="px-2 py-2 text-right" title="Size 'a regime' (come se live-proven)">
+                    {r && r.lots > 0 ? (() => {
+                      const rr = sizing.regimeById.get(s.id)
+                      if (!rr) return <span className="text-slate-300">—</span>
+                      const cls = s.live_status === 'proven' ? 'text-slate-400' : rr.lots > r.lots ? 'text-emerald-600' : 'text-slate-400'
+                      return <span className={cls}>{fmt(rr.lots, 2)}</span>
+                    })() : <span className="text-slate-300">—</span>}
+                  </td>
                   <td className="px-2 py-2 text-right text-slate-500">{r ? fmt(r.mc95Pct, 2) + '%' : '—'}</td>
                 </tr>
               )
@@ -482,6 +514,7 @@ export default function PortfolioBuilderPage() {
         </table>
       </div>
       <p className="text-xs text-slate-400">Sizing quality-weighted: budget MC95 = {ddBudget}% equity distribuito per peso qualita (robustezza test ret/DD × fattore live: premia chi ha dato anche dal vivo, haircut 0,7 alle 0-live), non equal-risk. Niente Kelly/HRP (scartati dai dati). Worst-day floating = somma (lotti × MAE) delle long (le US-equity correlate sommano = conservativo). Live deduplicato (un campione per segnale, vista v_signal_trades), include il track record storico 10K/80K.</p>
+      <p className="text-xs text-slate-400"><b>Colonna "Lotti" (operativa) vs "A regime".</b> La size operativa applica il haircut 0,7 alle strategie senza storico live (building/0-live): finché un edge non ha provato di reggere dal vivo — slippage, regime, costi reali (cfr. magic 12 breakeven live) — non gli si affida capitale pieno. La colonna <b>A regime</b> mostra la size-obiettivo se la strategia fosse già live-proven (haircut rimosso, ×1,15 come magic 3): è dove arriverà quando maturerà (~30-40 trade live, PF&gt;1,2 → promozione a proven). <b>Perché 0,7 e non di più:</b> è il premio alla prova sul campo. Alzarlo dimensionerebbe conti veri su edge solo-backtest; tenerlo lascia crescere la size <i>man mano che la strategia se la guadagna</i>. Sistema invariato: cambia solo la trasparenza (si vedono entrambe le size).</p>
     </div>
   )
 }
