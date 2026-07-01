@@ -17,17 +17,22 @@ type Account = { id: string; name: string; account_size: number | null; currency
 type Signal = { base_magic: number; sig_time: string; pl_per_lot: number }
 type BtMonth = { magic: number; month: string; pl_per_lot: number }
 
-const LEVELS = { conservative: 3.5, neutral: 6, aggressive: 9 } as const
-type Level = keyof typeof LEVELS
-const LEVEL_LABEL: Record<Level, string> = { conservative: 'Conservativo', neutral: 'Neutro', aggressive: 'Aggressivo' }
 // Cuscino di decorrelazione misurato sul book attuale (PTF_SIM, block-bootstrap): DD reale ~1/4 dell'aritmetico.
 // E un RIFERIMENTO, non licenza per sovra-sizzare; rivedere se cambia la composizione del portafoglio.
 const DECORR = 0.26
-// Livelli di valutazione (oltre i 3 operativi): per vedere dove toccano i limiti daily/totale.
-const EVAL_LEVELS: { name: string; mc95: number }[] = [
-  { name: 'Conservativo', mc95: 3.5 }, { name: 'Neutro', mc95: 6 }, { name: 'Aggressivo', mc95: 9 },
-  { name: 'Challenge', mc95: 12 }, { name: 'Spinto', mc95: 15 },
-]
+// Un unico modello di livelli (%MC95): 3 operativi + 2 di valutazione (Challenge/Spinto sfondano il 10%).
+// Guida SIA le size in tabella SIA la Scheda PDF; il selettore evidenzia il rosso oltre il limite del conto.
+const RISK_LEVELS = [
+  { key: 'conservative', name: 'Conservativo', mc95: 3.5 },
+  { key: 'neutral', name: 'Neutro', mc95: 6 },
+  { key: 'aggressive', name: 'Aggressivo', mc95: 9 },
+  { key: 'challenge', name: 'Challenge', mc95: 12 },
+  { key: 'spinto', name: 'Spinto', mc95: 15 },
+] as const
+type Level = typeof RISK_LEVELS[number]['key']
+const levelInfo = (k: string) => RISK_LEVELS.find(l => l.key === k) ?? RISK_LEVELS[1]
+// alias per la tabella di confronto (stessi 5 livelli)
+const EVAL_LEVELS = RISK_LEVELS.map(l => ({ name: l.name, mc95: l.mc95 }))
 // fattore di rischio per il cap di correlazione (le US-equity contano come un cluster)
 const RISK_FACTOR = (g: string | null): string => (g === 'INDICI_US' || g === 'SP500' || g === 'GER40') ? 'EQUITY' : (g || 'ALTRO')
 
@@ -53,7 +58,6 @@ export default function PortfolioBuilderPage() {
   const [accounts, setAccounts] = useState<Account[]>([])
   const [signals, setSignals] = useState<Signal[]>([])
   const [backtestMonthly, setBacktestMonthly] = useState<BtMonth[]>([])
-  const [reportLevelName, setReportLevelName] = useState('Neutro')
   const [acctComp, setAcctComp] = useState<Map<string, Set<string>>>(new Map())
   const [sel, setSel] = useState<Set<string>>(new Set())
   const [equity, setEquity] = useState(100000)
@@ -119,7 +123,8 @@ export default function PortfolioBuilderPage() {
   }
 
   // ---- Sizing istituzionale: budget MC95 = livello% equity, equal-risk tra le selezionate ----
-  const ddBudget = LEVELS[level]
+  const ddBudget = levelInfo(level).mc95
+  const levelName = levelInfo(level).name
   const sizing = useMemo(() => {
     const selected = strats.filter(s => sel.has(s.id) && (s.test_mc95_dd || 0) > 0)
     const budgetUsd = (ddBudget / 100) * equity
@@ -243,7 +248,7 @@ export default function PortfolioBuilderPage() {
   function levelCompareTableHtml(): string {
     if (!levelCompare) return ''
     const body = levelCompare.map(r => {
-      const hl = r.name === reportLevelName ? ' style="background:#eef2ff;font-weight:600"' : ''
+      const hl = r.name === levelName ? ' style="background:#eef2ff;font-weight:600"' : ''
       return `<tr${hl}><td style="padding:2px 6px">${r.name}</td><td style="padding:2px 6px;text-align:right">${r.arith.toFixed(1)}%${r.overTot ? ' &#9888;' : ''}</td><td style="padding:2px 6px;text-align:right">${r.real.toFixed(1)}%</td><td style="padding:2px 6px;text-align:right">${r.daily.toFixed(2)}%${r.overDay ? ' &#9888;' : ''}</td><td style="padding:2px 6px;text-align:right">${r.monthly.toFixed(2)}%</td><td style="padding:2px 6px;text-align:right">${r.annual.toFixed(1)}%</td></tr>`
     }).join('')
     return `Livelli di sizing e limiti del conto. MC95 aritmetico = tetto duro (tutto correla); reale = con la decorrelazione ~${(DECORR * 100).toFixed(0)}% misurata su PTF_SIM; il simbolo di allerta segnala oltre-limite. Livello attivo evidenziato.<table style="width:100%;border-collapse:collapse;margin-top:8px;font-size:11px"><thead><tr style="text-align:left;color:#64748b;border-bottom:1px solid #e2e8f0"><th style="padding:2px 6px">Livello</th><th style="padding:2px 6px;text-align:right">MC95 aritm.</th><th style="padding:2px 6px;text-align:right">MC95 reale</th><th style="padding:2px 6px;text-align:right">DD-day open</th><th style="padding:2px 6px;text-align:right">~ Mensile</th><th style="padding:2px 6px;text-align:right">~ Annuo</th></tr></thead><tbody>${body}</tbody></table>`
@@ -302,14 +307,15 @@ export default function PortfolioBuilderPage() {
       equity_base: equity, max_dd_target_pct: ddBudget, daily_dd_limit_pct: maxDay, safety_factor: 1.0, is_active: true,
     }).select('id').single()
     if (ptf) {
-      // 3 livelli per ogni strategia (pesati per qualita+live, stessa logica del pannello e della Scheda PDF)
+      // Sempre i 3 lotti operativi base (3,5/6/9%); final_lots = livello selezionato (anche Challenge/Spinto)
       const rows = sizing.rows.map(r => ({
         portfolio_id: ptf.id, strategy_id: r.s.id, is_active: true, active_level: level,
-        lot_conservative: perLevelLots(r, LEVELS.conservative), lot_neutral: perLevelLots(r, LEVELS.neutral), lot_aggressive: perLevelLots(r, LEVELS.aggressive),
+        lot_conservative: perLevelLots(r, 3.5), lot_neutral: perLevelLots(r, 6), lot_aggressive: perLevelLots(r, 9),
         final_lots: r.lots, lot_suggested: r.lots, dd_budget_allocation_pct: Number(r.mc95Pct.toFixed(2)),
       }))
       await supabase.from('qel_portfolio_strategies').insert(rows)
-      setMsg(`Salvato "${ptfName}" (${rows.length} strategie, livello ${LEVEL_LABEL[level]})`)
+      const overWarn = aggMc95 > maxTot ? ` ⚠ MC95 aggregato ${fmt(aggMc95, 1)}% oltre il limite ${fmt(maxTot, 0)}% del conto` : ''
+      setMsg(`Salvato "${ptfName}" (${rows.length} strategie, livello ${levelName})${overWarn}`)
       setPtfName('')
     } else setMsg('Errore salvataggio')
   }
@@ -332,10 +338,10 @@ export default function PortfolioBuilderPage() {
           </select></label>
         <label className="text-sm"><span className="block text-xs text-slate-500 mb-1">Equity</span>
           <input type="number" value={equity} onChange={e => setEquity(Number(e.target.value) || 0)} className="border border-slate-300 rounded-lg px-2 py-1.5 text-sm w-32" /></label>
-        <div className="text-sm"><span className="block text-xs text-slate-500 mb-1">Livello rischio</span>
-          <div className="flex gap-1">{(Object.keys(LEVELS) as Level[]).map(l => (
-            <button key={l} onClick={() => setLevel(l)} className={`px-3 py-1.5 text-sm rounded-lg border ${level === l ? 'bg-blue-600 text-white border-blue-600' : 'border-slate-300 text-slate-600 hover:bg-slate-50'}`}>{LEVEL_LABEL[l]}</button>
-          ))}</div></div>
+        <label className="text-sm"><span className="block text-xs text-slate-500 mb-1">Livello rischio (guida size + scheda)</span>
+          <select value={level} onChange={e => setLevel(e.target.value as Level)} className={`border rounded-lg px-2 py-1.5 text-sm ${aggMc95 > maxTot ? 'border-red-400 text-red-600' : 'border-slate-300'}`}>
+            {RISK_LEVELS.map(l => <option key={l.key} value={l.key}>{l.name} ({l.mc95}%){l.mc95 > maxTot ? ' — oltre limite' : ''}</option>)}
+          </select></label>
         <div className="ml-auto text-sm flex gap-6">
           <span>MC95 aggregato <b className={aggMc95 > maxTot ? 'text-red-600' : 'text-slate-900'}>{fmt(aggMc95, 1)}%</b> <span className="text-xs text-slate-400">/ {fmt(maxTot, 0)}%</span></span>
           <span>Worst-day <b className={worstDayPct > maxDay ? 'text-red-600' : 'text-slate-900'}>{fmt(worstDayPct, 2)}%</b> <span className="text-xs text-slate-400">/ {fmt(maxDay, 0)}%</span></span>
@@ -396,8 +402,8 @@ export default function PortfolioBuilderPage() {
             </tr></thead>
             <tbody>
               {levelCompare.map(r => (
-                <tr key={r.name} className={`border-b border-slate-50 ${r.name === LEVEL_LABEL[level] ? 'bg-blue-50' : ''}`}>
-                  <td className="px-2 py-1 font-medium text-slate-800">{r.name}{r.name === LEVEL_LABEL[level] && <span className="text-xs text-blue-600"> (attivo)</span>}</td>
+                <tr key={r.name} className={`border-b border-slate-50 ${r.name === levelName ? 'bg-blue-50' : ''}`}>
+                  <td className="px-2 py-1 font-medium text-slate-800">{r.name}{r.name === levelName && <span className="text-xs text-blue-600"> (attivo)</span>}</td>
                   <td className={`px-2 py-1 text-right font-medium ${r.overTot ? 'text-red-600' : 'text-slate-900'}`}>{fmt(r.arith, 1)}%{r.overTot && ' ⚠'}</td>
                   <td className="px-2 py-1 text-right text-slate-500">{fmt(r.real, 1)}%</td>
                   <td className={`px-2 py-1 text-right ${r.overDay ? 'text-red-600' : 'text-slate-600'}`}>{fmt(r.daily, 2)}%{r.overDay && ' ⚠'}</td>
@@ -417,10 +423,10 @@ export default function PortfolioBuilderPage() {
         <button onClick={savePTF} className="px-4 py-1.5 text-sm rounded-lg bg-blue-600 text-white hover:bg-blue-700">Salva PTF</button>
         <button onClick={exportConfig} className="px-4 py-1.5 text-sm rounded-lg border border-slate-300 text-slate-700 hover:bg-slate-50">Esporta file</button>
         <div className="flex items-center gap-1 ml-auto">
-          <select value={reportLevelName} onChange={e => setReportLevelName(e.target.value)} className="border border-slate-300 rounded-lg px-2 py-1.5 text-sm" title="Livello di sizing per la scheda">
-            {EVAL_LEVELS.map(l => <option key={l.name} value={l.name}>{l.name} ({l.mc95}%)</option>)}
+          <select value={level} onChange={e => setLevel(e.target.value as Level)} className="border border-slate-300 rounded-lg px-2 py-1.5 text-sm" title="Livello rischio (guida size in tabella e scheda)">
+            {RISK_LEVELS.map(l => <option key={l.key} value={l.key}>{l.name} ({l.mc95}%)</option>)}
           </select>
-          <button onClick={() => exportScheda(EVAL_LEVELS.find(l => l.name === reportLevelName)?.mc95 ?? 6, reportLevelName)} className="px-4 py-1.5 text-sm rounded-lg bg-violet-600 text-white hover:bg-violet-700">Scheda PDF</button>
+          <button onClick={() => exportScheda(ddBudget, levelName)} className="px-4 py-1.5 text-sm rounded-lg bg-violet-600 text-white hover:bg-violet-700">Scheda PDF</button>
         </div>
         {msg && <span className="text-sm text-slate-500 w-full">{msg}</span>}
       </div>
@@ -432,7 +438,7 @@ export default function PortfolioBuilderPage() {
             <th className="px-3 py-2"></th><th className="px-2 py-2">Magic</th><th className="px-2 py-2">Strategia</th>
             <th className="px-2 py-2">Fattore</th><th className="px-2 py-2 text-right">MC95/lot</th>
             <th className="px-2 py-2 text-right">Backtest R/DD·PF</th><th className="px-2 py-2 text-right">Live: segnali·avg/lot·PF</th>
-            <th className="px-2 py-2 text-right">Lotti ({LEVEL_LABEL[level]})</th><th className="px-2 py-2 text-right">MC95 %</th>
+            <th className="px-2 py-2 text-right">Lotti ({levelName})</th><th className="px-2 py-2 text-right">MC95 %</th>
           </tr></thead>
           <tbody>
             {strats.map(s => {
