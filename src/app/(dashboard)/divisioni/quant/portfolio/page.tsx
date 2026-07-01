@@ -188,19 +188,33 @@ export default function PortfolioBuilderPage() {
     }
   }, [signals, sizing, equity])
 
+  // ---- Backtest combinato (per la scheda e il confronto livelli): net/mesi dai backtest scalati ai lotti ----
+  // monthlyPct = net / (equity * mesi) * 100, identico al "Rendimento medio mensile" del report body.
+  // NB: diverso dalla sim live-dedup sopra (dominata dalla magic 3, sovrastima); qui e la verita full-book.
+  const btSim = useMemo(() => {
+    const monthsSet = new Set<string>(); let net = 0
+    for (const r of sizing.rows) {
+      if (r.s.magic == null) continue
+      for (const m of backtestMonthly) if (m.magic === r.s.magic) { monthsSet.add(m.month); net += m.pl_per_lot * r.lots }
+    }
+    const months = monthsSet.size || 1
+    return { net, months, monthlyPct: net / (equity * months) * 100 }
+  }, [sizing, backtestMonthly, equity])
+
   // ---- Confronto livelli + valutazione limiti (ddopen daily, MC95 totale). Scalano col budget ----
+  // Mensile/annuo dal BACKTEST combinato (btSim), coerente col corpo della scheda; non dalla sim live.
   const levelCompare = useMemo(() => {
-    if (!sim || ddBudget <= 0) return null
+    if (ddBudget <= 0 || backtestMonthly.length === 0) return null
     return EVAL_LEVELS.map(L => {
       const ratio = L.mc95 / ddBudget
       const daily = worstDayPct * ratio
       return {
         name: L.name, arith: L.mc95, real: L.mc95 * DECORR, daily,
-        monthly: sim.monthlyPct * ratio, annual: sim.monthlyPct * 12 * ratio,
+        monthly: btSim.monthlyPct * ratio, annual: btSim.monthlyPct * 12 * ratio,
         overTot: L.mc95 > maxTot, overDay: daily > maxDay,
       }
     })
-  }, [sim, ddBudget, worstDayPct, maxTot, maxDay])
+  }, [btSim, backtestMonthly, ddBudget, worstDayPct, maxTot, maxDay])
 
   // ---- Scheda PDF ricca: backtest combinato delle strategie, scalato ai lotti del livello ----
   // Lotti per livello (%MC95): stessa matematica quality+live del pannello, condivisa con savePTF.
@@ -239,19 +253,26 @@ export default function PortfolioBuilderPage() {
     }
     return out
   }
-  // Box intro: spiegazione della probabilità di drawdown su tre livelli (aritmetico/reale/storico).
+  // Box intro: composizione del portafoglio (strategie scelte + sizing al livello).
   function introHtml(levelPct: number, levelName: string): string {
-    const real = (levelPct * DECORR).toFixed(1)
-    return `<b>Sizing ${levelName} — ${levelPct}% di MC95.</b> Scheda costruita combinando i backtest a 1 lotto delle strategie selezionate, scalati ai lotti del livello. La probabilità di drawdown si legge su tre metri. <b>Aritmetico (tetto duro): ${levelPct}%</b>, il 95° percentile assumendo che tutte le strategie perdano insieme (correlazione = 1): è il numero su cui non sforare. <b>Reale (decorrelazione): circa ${real}%</b>, se il book resta decorrelato come nella storia (cuscino ~${(DECORR * 100).toFixed(0)}% misurato su PTF_SIM col block-bootstrap), circa un quarto dell'aritmetico. <b>Storico: circa 1,4%</b>, il peggio realmente visto nel 2022. Il Max Drawdown della sezione Rischio qui sotto è calcolato sulla curva combinata dei backtest mensili e cade tra il reale e lo storico: è una misura diversa dall'aritmetico, che resta un tetto prudenziale e non una previsione. Dati di backtest, costi broker reali già inclusi nei trade-list.`
+    const body = sizing.rows.map(r => {
+      const contrib = backtestMonthly.filter(m => m.magic === r.s.magic).reduce((a, m) => a + m.pl_per_lot, 0) * r.lots
+      const lotsCell = r.lots === 0 ? '<span style="color:#d97706">OFF</span>' : r.lots.toFixed(2)
+      const dir = r.s.direction ? ` <span style="color:${r.s.direction === 'short' ? '#dc2626' : '#94a3b8'};font-size:10px">${r.s.direction}</span>` : ''
+      return `<tr><td style="padding:2px 6px;font-family:monospace;color:#64748b">${r.s.magic ?? ''}</td><td style="padding:2px 6px">${r.s.name}${dir}</td><td style="padding:2px 6px;color:#64748b">${RISK_FACTOR(r.s.asset_group)}</td><td style="padding:2px 6px;text-align:right;font-weight:600">${lotsCell}</td><td style="padding:2px 6px;text-align:right">${r.mc95Pct.toFixed(2)}%</td><td style="padding:2px 6px;text-align:right;color:${contrib >= 0 ? '#16a34a' : '#dc2626'}">${contrib < 0 ? '-' : ''}$${Math.abs(Math.round(contrib)).toLocaleString('it-IT')}</td></tr>`
+    }).join('')
+    return `<b>Sizing ${levelName} — ${levelPct}% di MC95.</b> Backtest combinato delle strategie selezionate, scalati ai lotti del livello (costi broker reali già inclusi nei trade-list). <b>Composizione del portafoglio:</b><table style="width:100%;border-collapse:collapse;margin-top:8px;font-size:11px;color:#1e293b"><thead><tr style="text-align:left;color:#64748b;border-bottom:1px solid #ddd6fe"><th style="padding:2px 6px">Magic</th><th style="padding:2px 6px">Strategia</th><th style="padding:2px 6px">Fattore</th><th style="padding:2px 6px;text-align:right">Lotti</th><th style="padding:2px 6px;text-align:right">MC95%</th><th style="padding:2px 6px;text-align:right">Contributo</th></tr></thead><tbody>${body}</tbody><tfoot><tr style="border-top:1px solid #ddd6fe;font-weight:600"><td style="padding:3px 6px" colspan="4">${sizing.rows.length} strategie</td><td style="padding:3px 6px;text-align:right">${aggMc95.toFixed(1)}%</td><td style="padding:3px 6px;text-align:right;color:${btSim.net >= 0 ? '#16a34a' : '#dc2626'}">${btSim.net < 0 ? '-' : ''}$${Math.abs(Math.round(btSim.net)).toLocaleString('it-IT')}</td></tr></tfoot></table>`
   }
-  // Tabella 5-livelli (riuso della memo levelCompare) in HTML statico, evidenzia il livello scelto.
+  // Tabella 5-livelli (riuso della memo levelCompare) + spiegazione probabilità-DD (aritmetico/reale/storico).
   function levelCompareTableHtml(): string {
     if (!levelCompare) return ''
+    const real = (ddBudget * DECORR).toFixed(1)
+    const ddNote = `<b>Probabilità di drawdown, tre metri.</b> <b>Aritmetico (tetto duro): ${ddBudget}%</b>, il 95° percentile assumendo che tutte le strategie perdano insieme (correlazione = 1): il numero su cui non sforare. <b>Reale (decorrelazione): circa ${real}%</b>, se il book resta decorrelato come nella storia (cuscino ~${(DECORR * 100).toFixed(0)}% misurato su PTF_SIM col block-bootstrap), circa un quarto dell'aritmetico. <b>Storico: circa 1,4%</b>, il peggio visto nel 2022. Il Max Drawdown della sezione Rischio è calcolato sulla curva combinata dei backtest mensili e cade tra il reale e lo storico: misura diversa dall'aritmetico, che resta un tetto prudenziale e non una previsione.<br><br>`
     const body = levelCompare.map(r => {
       const hl = r.name === levelName ? ' style="background:#eef2ff;font-weight:600"' : ''
       return `<tr${hl}><td style="padding:2px 6px">${r.name}</td><td style="padding:2px 6px;text-align:right">${r.arith.toFixed(1)}%${r.overTot ? ' &#9888;' : ''}</td><td style="padding:2px 6px;text-align:right">${r.real.toFixed(1)}%</td><td style="padding:2px 6px;text-align:right">${r.daily.toFixed(2)}%${r.overDay ? ' &#9888;' : ''}</td><td style="padding:2px 6px;text-align:right">${r.monthly.toFixed(2)}%</td><td style="padding:2px 6px;text-align:right">${r.annual.toFixed(1)}%</td></tr>`
     }).join('')
-    return `Livelli di sizing e limiti del conto. MC95 aritmetico = tetto duro (tutto correla); reale = con la decorrelazione ~${(DECORR * 100).toFixed(0)}% misurata su PTF_SIM; il simbolo di allerta segnala oltre-limite. Livello attivo evidenziato.<table style="width:100%;border-collapse:collapse;margin-top:8px;font-size:11px"><thead><tr style="text-align:left;color:#64748b;border-bottom:1px solid #e2e8f0"><th style="padding:2px 6px">Livello</th><th style="padding:2px 6px;text-align:right">MC95 aritm.</th><th style="padding:2px 6px;text-align:right">MC95 reale</th><th style="padding:2px 6px;text-align:right">DD-day open</th><th style="padding:2px 6px;text-align:right">~ Mensile</th><th style="padding:2px 6px;text-align:right">~ Annuo</th></tr></thead><tbody>${body}</tbody></table>`
+    return `${ddNote}Livelli di sizing e limiti del conto. MC95 aritmetico = tetto duro (tutto correla); reale = con la decorrelazione ~${(DECORR * 100).toFixed(0)}% misurata su PTF_SIM; il simbolo di allerta segnala oltre-limite. Livello attivo evidenziato.<table style="width:100%;border-collapse:collapse;margin-top:8px;font-size:11px"><thead><tr style="text-align:left;color:#64748b;border-bottom:1px solid #e2e8f0"><th style="padding:2px 6px">Livello</th><th style="padding:2px 6px;text-align:right">MC95 aritm.</th><th style="padding:2px 6px;text-align:right">MC95 reale</th><th style="padding:2px 6px;text-align:right">DD-day open</th><th style="padding:2px 6px;text-align:right">~ Mensile</th><th style="padding:2px 6px;text-align:right">~ Annuo</th></tr></thead><tbody>${body}</tbody></table>`
   }
   function exportScheda(levelPct: number, levelName: string) {
     const trades = buildVirtualTrades(levelPct)
