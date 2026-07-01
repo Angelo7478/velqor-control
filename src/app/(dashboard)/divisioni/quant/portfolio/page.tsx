@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { createClient } from '@/lib/supabase-browser'
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts'
 import { detectMarketRegimes4Q, regimeMultiplier, REGIME_4Q_LABELS, type MarketRegime4Q } from '@/lib/quant-utils'
+import { buildReportHtml, type ReportTrade } from '@/lib/quant-report'
 
 type Strat = {
   id: string; magic: number | null; name: string; asset: string | null; asset_group: string | null
@@ -14,6 +15,7 @@ type Strat = {
 }
 type Account = { id: string; name: string; account_size: number | null; currency: string | null; max_daily_loss_pct: number | null; max_total_loss_pct: number | null }
 type Signal = { base_magic: number; sig_time: string; pl_per_lot: number }
+type BtMonth = { magic: number; month: string; pl_per_lot: number }
 
 const LEVELS = { conservative: 3.5, neutral: 6, aggressive: 9 } as const
 type Level = keyof typeof LEVELS
@@ -50,6 +52,8 @@ export default function PortfolioBuilderPage() {
   const [strats, setStrats] = useState<Strat[]>([])
   const [accounts, setAccounts] = useState<Account[]>([])
   const [signals, setSignals] = useState<Signal[]>([])
+  const [backtestMonthly, setBacktestMonthly] = useState<BtMonth[]>([])
+  const [reportLevelName, setReportLevelName] = useState('Neutro')
   const [acctComp, setAcctComp] = useState<Map<string, Set<string>>>(new Map())
   const [sel, setSel] = useState<Set<string>>(new Set())
   const [equity, setEquity] = useState(100000)
@@ -65,7 +69,7 @@ export default function PortfolioBuilderPage() {
 
   async function load() {
     const supabase = createClient()
-    const [sRes, aRes, sigRes, pfRes, psRes] = await Promise.all([
+    const [sRes, aRes, sigRes, pfRes, psRes, btmRes] = await Promise.all([
       supabase.from('qel_strategies')
         .select('id,magic,name,asset,asset_group,direction,strategy_style,status,include_in_portfolio,test_mc95_dd,test_max_open_dd,test_ret_dd,test_profit_factor,real_trades,real_avg_per_lot,real_win_pct,real_profit_factor,live_status,regime_gated')
         .in('status', ['active', 'testing']).order('magic'),
@@ -73,11 +77,13 @@ export default function PortfolioBuilderPage() {
       supabase.from('v_signal_trades').select('base_magic,sig_time,pl_per_lot').order('sig_time'),
       supabase.from('qel_portfolios').select('id,account_id'),
       supabase.from('qel_portfolio_strategies').select('portfolio_id,strategy_id'),
+      supabase.from('qel_strategy_backtest_monthly').select('magic,month,pl_per_lot').order('month'),
     ])
     const list = (sRes.data as Strat[]) || []
     setStrats(list)
     setAccounts((aRes.data as Account[]) || [])
     setSignals((sigRes.data as Signal[]) || [])
+    setBacktestMonthly((btmRes.data as BtMonth[]) || [])
     // composizione salvata per conto (per caricarla quando si seleziona il conto)
     const pfAcc = new Map<string, string>()
     for (const p of ((pfRes.data as { id: string; account_id: string | null }[]) || [])) if (p.account_id) pfAcc.set(p.id, p.account_id)
@@ -191,6 +197,85 @@ export default function PortfolioBuilderPage() {
     })
   }, [sim, ddBudget, worstDayPct, maxTot, maxDay])
 
+  // ---- Scheda PDF ricca: backtest combinato delle strategie, scalato ai lotti del livello ----
+  // Lotti per livello (%MC95): stessa matematica quality+live del pannello, condivisa con savePTF.
+  // OFF dal gate regime (w=0) -> 0 lotti (non contribuisce alla scheda).
+  function perLevelLots(r: { s: Strat; w: number }, levelPct: number): number {
+    if (r.w === 0) return 0
+    const wTot = sizing.rows.reduce((a, x) => a + x.w, 0) || 1
+    const mc95 = Number(r.s.test_mc95_dd) || 1
+    return Math.max(0.01, Math.round(((levelPct / 100) * equity * r.w / wTot / mc95) * 100) / 100)
+  }
+  const styleLbl = (st?: string | null) =>
+    st === 'seasonal' ? 'Seasonal' : st === 'mean_reversion' ? 'Mean Reversion'
+    : st === 'trend_following' ? 'Trend Following' : st === 'breakout' ? 'Breakout' : 'Altro'
+  const symCls = (sym: string) =>
+    /US100|US500/.test(sym) ? 'Indici USA'
+    : /GER40/.test(sym) ? 'Indici Europa'
+    : sym === 'BTCUSD' ? 'Crypto'
+    : sym === 'XAUUSD' ? 'Metalli'
+    : /USD(JPY|CAD)|EURUSD/.test(sym) ? 'Forex'
+    : /UKOIL|USOIL/.test(sym) ? 'Energia'
+    : sym
+  // Un trade virtuale per strategia-per-mese: la somma mensile combina le strategie del PTF.
+  function buildVirtualTrades(levelPct: number): ReportTrade[] {
+    const out: ReportTrade[] = []
+    for (const r of sizing.rows) {
+      if (r.s.magic == null) continue
+      const lots = perLevelLots(r, levelPct)
+      if (lots === 0) continue
+      for (const m of backtestMonthly.filter(x => x.magic === r.s.magic)) {
+        out.push({
+          d: m.month + '-15', pl: m.pl_per_lot * lots,
+          type: styleLbl(r.s.strategy_style), cls: symCls(r.s.asset || ''),
+          strat: r.s.name, lots, sid: String(r.s.magic),
+        })
+      }
+    }
+    return out
+  }
+  // Box intro: spiegazione della probabilità di drawdown su tre livelli (aritmetico/reale/storico).
+  function introHtml(levelPct: number, levelName: string): string {
+    const real = (levelPct * DECORR).toFixed(1)
+    return `<b>Sizing ${levelName} — ${levelPct}% di MC95.</b> Scheda costruita combinando i backtest a 1 lotto delle strategie selezionate, scalati ai lotti del livello. La probabilità di drawdown si legge su tre metri. <b>Aritmetico (tetto duro): ${levelPct}%</b>, il 95° percentile assumendo che tutte le strategie perdano insieme (correlazione = 1): è il numero su cui non sforare. <b>Reale (decorrelazione): circa ${real}%</b>, se il book resta decorrelato come nella storia (cuscino ~${(DECORR * 100).toFixed(0)}% misurato su PTF_SIM col block-bootstrap), circa un quarto dell'aritmetico. <b>Storico: circa 1,4%</b>, il peggio realmente visto nel 2022. Il Max Drawdown della sezione Rischio qui sotto è calcolato sulla curva combinata dei backtest mensili e cade tra il reale e lo storico: è una misura diversa dall'aritmetico, che resta un tetto prudenziale e non una previsione. Dati di backtest, costi broker reali già inclusi nei trade-list.`
+  }
+  // Tabella 5-livelli (riuso della memo levelCompare) in HTML statico, evidenzia il livello scelto.
+  function levelCompareTableHtml(): string {
+    if (!levelCompare) return ''
+    const body = levelCompare.map(r => {
+      const hl = r.name === reportLevelName ? ' style="background:#eef2ff;font-weight:600"' : ''
+      return `<tr${hl}><td style="padding:2px 6px">${r.name}</td><td style="padding:2px 6px;text-align:right">${r.arith.toFixed(1)}%${r.overTot ? ' &#9888;' : ''}</td><td style="padding:2px 6px;text-align:right">${r.real.toFixed(1)}%</td><td style="padding:2px 6px;text-align:right">${r.daily.toFixed(2)}%${r.overDay ? ' &#9888;' : ''}</td><td style="padding:2px 6px;text-align:right">${r.monthly.toFixed(2)}%</td><td style="padding:2px 6px;text-align:right">${r.annual.toFixed(1)}%</td></tr>`
+    }).join('')
+    return `Livelli di sizing e limiti del conto. MC95 aritmetico = tetto duro (tutto correla); reale = con la decorrelazione ~${(DECORR * 100).toFixed(0)}% misurata su PTF_SIM; il simbolo di allerta segnala oltre-limite. Livello attivo evidenziato.<table style="width:100%;border-collapse:collapse;margin-top:8px;font-size:11px"><thead><tr style="text-align:left;color:#64748b;border-bottom:1px solid #e2e8f0"><th style="padding:2px 6px">Livello</th><th style="padding:2px 6px;text-align:right">MC95 aritm.</th><th style="padding:2px 6px;text-align:right">MC95 reale</th><th style="padding:2px 6px;text-align:right">DD-day open</th><th style="padding:2px 6px;text-align:right">~ Mensile</th><th style="padding:2px 6px;text-align:right">~ Annuo</th></tr></thead><tbody>${body}</tbody></table>`
+  }
+  function exportScheda(levelPct: number, levelName: string) {
+    const trades = buildVirtualTrades(levelPct)
+    if (trades.length === 0) { setMsg('Nessun dato backtest per le strategie selezionate'); return }
+    const selMagics = sizing.rows.map(r => r.s.magic).filter((m): m is number => m != null)
+    const have = new Set(backtestMonthly.map(m => m.magic))
+    const missing = selMagics.filter(m => !have.has(m))
+    const curr: 'EUR' | 'USD' = acct?.currency === 'EUR' ? 'EUR' : 'USD'
+    const html = buildReportHtml(trades, {
+      title: `Scheda Portafoglio — ${ptfName || 'PTF'} (${levelName})`,
+      subtitle: `${fmt(equity, 0)} ${curr} · sizing ${levelName} (${levelPct}% MC95) · backtest combinato`,
+      metaRight: [
+        `Equity: ${fmt(equity, 0)} ${curr}`,
+        `Livello: ${levelName} (${levelPct}% MC95)`,
+        `Strategie: ${selMagics.length}`,
+        acct ? `Conto: ${acct.name}` : 'Sizing manuale',
+      ],
+      currency: curr, base: equity, swap: 0, comm: 0,
+      isPublic: false, badge: 'INTERNO',
+      intro: introHtml(levelPct, levelName),
+      groupNote: levelCompareTableHtml(),
+      costNote: false,
+    })
+    const win = window.open('', '_blank')
+    if (!win) { setMsg('Abilita i popup per esportare la scheda.'); return }
+    win.document.write(html); win.document.close()
+    setMsg(missing.length ? `Scheda ${levelName} aperta — attenzione: nessun backtest per magic ${missing.join(', ')} (escluse)` : `Scheda ${levelName} aperta in un nuovo tab`)
+  }
+
   // ---- Export config JSON ----
   function exportConfig() {
     const cfg = {
@@ -217,17 +302,12 @@ export default function PortfolioBuilderPage() {
       equity_base: equity, max_dd_target_pct: ddBudget, daily_dd_limit_pct: maxDay, safety_factor: 1.0, is_active: true,
     }).select('id').single()
     if (ptf) {
-      // 3 livelli per ogni strategia (pesati per qualita+live, stessa logica del pannello)
-      const wTot = sizing.rows.reduce((a, r) => a + r.w, 0) || 1
-      const rows = sizing.rows.map(r => {
-        const mc95 = Number(r.s.test_mc95_dd) || 1
-        const perL = (l: number) => Math.max(0.01, Math.round(((l / 100) * equity * r.w / wTot / mc95) * 100) / 100)
-        return {
-          portfolio_id: ptf.id, strategy_id: r.s.id, is_active: true, active_level: level,
-          lot_conservative: perL(LEVELS.conservative), lot_neutral: perL(LEVELS.neutral), lot_aggressive: perL(LEVELS.aggressive),
-          final_lots: r.lots, lot_suggested: r.lots, dd_budget_allocation_pct: Number(r.mc95Pct.toFixed(2)),
-        }
-      })
+      // 3 livelli per ogni strategia (pesati per qualita+live, stessa logica del pannello e della Scheda PDF)
+      const rows = sizing.rows.map(r => ({
+        portfolio_id: ptf.id, strategy_id: r.s.id, is_active: true, active_level: level,
+        lot_conservative: perLevelLots(r, LEVELS.conservative), lot_neutral: perLevelLots(r, LEVELS.neutral), lot_aggressive: perLevelLots(r, LEVELS.aggressive),
+        final_lots: r.lots, lot_suggested: r.lots, dd_budget_allocation_pct: Number(r.mc95Pct.toFixed(2)),
+      }))
       await supabase.from('qel_portfolio_strategies').insert(rows)
       setMsg(`Salvato "${ptfName}" (${rows.length} strategie, livello ${LEVEL_LABEL[level]})`)
       setPtfName('')
@@ -336,7 +416,13 @@ export default function PortfolioBuilderPage() {
         <input value={ptfName} onChange={e => setPtfName(e.target.value)} placeholder="Nome PTF" className="border border-slate-300 rounded-lg px-3 py-1.5 text-sm" />
         <button onClick={savePTF} className="px-4 py-1.5 text-sm rounded-lg bg-blue-600 text-white hover:bg-blue-700">Salva PTF</button>
         <button onClick={exportConfig} className="px-4 py-1.5 text-sm rounded-lg border border-slate-300 text-slate-700 hover:bg-slate-50">Esporta file</button>
-        {msg && <span className="text-sm text-slate-500">{msg}</span>}
+        <div className="flex items-center gap-1 ml-auto">
+          <select value={reportLevelName} onChange={e => setReportLevelName(e.target.value)} className="border border-slate-300 rounded-lg px-2 py-1.5 text-sm" title="Livello di sizing per la scheda">
+            {EVAL_LEVELS.map(l => <option key={l.name} value={l.name}>{l.name} ({l.mc95}%)</option>)}
+          </select>
+          <button onClick={() => exportScheda(EVAL_LEVELS.find(l => l.name === reportLevelName)?.mc95 ?? 6, reportLevelName)} className="px-4 py-1.5 text-sm rounded-lg bg-violet-600 text-white hover:bg-violet-700">Scheda PDF</button>
+        </div>
+        {msg && <span className="text-sm text-slate-500 w-full">{msg}</span>}
       </div>
 
       {/* Tabella */}
