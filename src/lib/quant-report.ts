@@ -280,7 +280,7 @@ export function buildReportHtml(tradesIn: ReportTrade[], o: ReportOptions): stri
       `<table><thead><tr><th>Mese</th><th class="r">Strat. attive</th><th class="r">Oper.</th><th class="r">Lotti tot.</th><th class="r">Lotto medio</th><th class="r">Lotti/strat.</th><th class="r">P/L</th></tr></thead><tbody>${szRows}</tbody></table>`
   }
 
-  const methodTxt = 'Operativita basata su un <b>portafoglio multi-strategia sistematico</b>, governato da regole, su indici azionari, energia, valute e crypto. Stili complementari (mean reversion, stagionalita, trend following) combinati per de-correlazione e validati su backtest fuori campione (walk-forward, Monte Carlo, stress test di regime) e su operativita live. Gestione del rischio istituzionale: dimensionamento a frazione di Kelly con risk parity, budget di drawdown esplicito e guardrail rigidi (perdita giornaliera max 5%, totale max 10%).'
+  const methodTxt = 'Operativita basata su un <b>portafoglio multi-strategia sistematico</b>, governato da regole, su indici azionari, energia, valute e crypto. Stili complementari (mean reversion, stagionalita, trend following, breakout) combinati per de-correlazione e validati su backtest fuori campione (walk-forward, Monte Carlo, stress test di regime) e su operativita live. Gestione del rischio istituzionale: <b>dimensionamento a budget di drawdown ripartito per l\'MC95</b> di ogni strategia, pesato per robustezza e risultati live, con guardrail rigidi (perdita giornaliera max 5%, totale max 10%).'
 
   return `<!DOCTYPE html><html lang="it"><head><meta charset="utf-8"><title>${esc(o.title)}</title>
 <style>
@@ -329,6 +329,6 @@ ${costNoteHtml}
 ${o.groupNote ? `<div class="sec">Una nota</div><div class="note">${o.groupNote}</div>` : ''}
 <div style="margin-top:12px" class="no-print"><button onclick="window.print()" style="padding:8px 18px;border:1px solid #7c3aed;background:#7c3aed;color:#fff;border-radius:6px;cursor:pointer;font-size:12px;font-weight:600">Stampa / Salva PDF</button></div>
 <div class="disc">AVVERTENZA SUL RISCHIO. Documento a finalita esclusivamente informative, non costituisce consulenza finanziaria ne offerta di investimento. Risultati da operativita reale su conto FTMO, al netto dei costi di transazione (swap e commissioni). Le performance passate non sono indicative ne garanzia di risultati futuri. Il trading sistematico comporta rischio elevato di perdita del capitale. Le metriche annualizzate sono proiezioni su periodo limitato.</div>
-<div class="foot">VELQOR Quant · Systematic Trading · documento generato dal sistema di monitoraggio · dati live</div>
+<div class="foot">VELQOR Quant · Systematic Trading · documento generato dal sistema di monitoraggio</div>
 </body></html>`
 }
