@@ -37,6 +37,7 @@ export interface ReportOptions {
   hideCostAnalysis?: boolean // backtest: i costi sono gia' nel P/L -> nascondi la tabella "lordo/pre-costi"
   sampleNoun?: string        // scheda a risoluzione mensile: ogni "trade" e' un campione strategia-mese -> 'mese'
   realTradesNote?: string    // nota col conteggio dei TRADE reali (la scheda mostra campioni mensili, non trade)
+  glossary?: boolean         // aggiunge la legenda "Come leggere la scheda" (spiegazioni in italiano semplice)
 }
 
 // ---- helpers numerici ----
@@ -337,6 +338,13 @@ ${o.hideCostAnalysis
 ${costNoteHtml}
 <div class="sec">Metodologia &amp; Gestione del Rischio</div><div class="method">${methodTxt}</div>
 ${o.groupNote ? `<div class="sec">Una nota</div><div class="note">${o.groupNote}</div>` : ''}
+${o.glossary ? `<div class="sec">Come leggere questa scheda — Legenda</div><div class="method" style="line-height:1.7">
+<b style="color:#4c1d95">RENDIMENTO.</b> <b>Rendimento netto</b> = guadagno totale in % del capitale, costi inclusi (verde = utile). <b>Annualizzato (CAGR)</b> = quanto renderebbe in media all'anno. <b>Rendimento medio mensile</b> = guadagno medio al mese. <b>Interessi composti</b>: OFF = size fissa (challenge prop); ON = reinvesti, la size cresce con l'equity (conto reale).<br>
+<b style="color:#4c1d95">RISCHIO.</b> <b>Max drawdown</b> = la peggior discesa dal picco più alto (più piccolo = meglio). <b>DD99 reale</b> = il drawdown che nel 99% dei casi non superi, misurato sui dati veri: è il rischio REALE su cui ragionare. <b>MC95 aritmetico</b> = tetto di paranoia (se TUTTE le strategie perdessero insieme, mai successo): solo riferimento. <b>Worst-day reale</b> = la peggior perdita in una giornata (le strategie lavorano in giorni diversi, quindi resta bassa). <b>% tempo in drawdown</b> = quanta parte del tempo sei sotto il picco precedente.<br>
+<b style="color:#4c1d95">QUALITÀ</b> (più alto = meglio, tranne Ulcer). <b>Sharpe</b> = rendimento vs oscillazioni (&gt;1 buono, &gt;2 ottimo). <b>Sortino</b> = come Sharpe ma pesa solo le oscillazioni negative. <b>Calmar</b> = rendimento annuo ÷ max drawdown. <b>Recovery</b> = guadagno totale ÷ peggior perdita. <b>Ulcer</b> = "dolore" del drawdown, profondità × durata (più BASSO = meglio). <b>Profit factor</b> = soldi vinti ÷ soldi persi (&gt;1 guadagna, &gt;2 solido). <b>Payoff</b> = vincita media ÷ perdita media. <b>Win%</b> = percentuale di mesi positivi.<br>
+<b style="color:#4c1d95">EVENTI ESTREMI (coda).</b> <b>VaR 95%</b> = la perdita che nel 95% dei casi non superi. <b>CVaR 95%</b> = quando sfori il VaR, quanto perdi in media. <b>Tail ratio</b> = grandi vincite ÷ grandi perdite (&gt;1 = più upside). <b>Skew / Kurtosi</b> = forma delle code (skew&gt;0 = code verso l'alto; kurtosi alta = eventi estremi più frequenti).<br>
+<b style="color:#4c1d95">SIZING &amp; COMPOSIZIONE.</b> <b>Modalità Ridotta/Piena</b>: Ridotta = size tagliata (0,7) sulle strategie non ancora validate dal vivo; Piena = tutte a target. <b>Livello</b> (Conservativo→Reale DD99+30%) = quanto rischio prendi; "Reale DD99+30%" è il punto operativo scelto (size sul DD reale + margine). <b>Contributo</b> = quanti $ ha portato ciascuna strategia. <b>Operazioni</b> = numero di trade REALI; le statistiche "per mese" sono calcolate sui P/L mensili, non per singolo trade.
+</div>` : ''}
 <div style="margin-top:12px" class="no-print"><button onclick="window.print()" style="padding:8px 18px;border:1px solid #7c3aed;background:#7c3aed;color:#fff;border-radius:6px;cursor:pointer;font-size:12px;font-weight:600">Stampa / Salva PDF</button></div>
 <div class="disc">AVVERTENZA SUL RISCHIO. Documento a finalita esclusivamente informative, non costituisce consulenza finanziaria ne offerta di investimento. Risultati da operativita reale su conto FTMO, al netto dei costi di transazione (swap e commissioni). Le performance passate non sono indicative ne garanzia di risultati futuri. Il trading sistematico comporta rischio elevato di perdita del capitale. Le metriche annualizzate sono proiezioni su periodo limitato.</div>
 <div class="foot">VELQOR Quant · Systematic Trading · documento generato dal sistema di monitoraggio</div>
