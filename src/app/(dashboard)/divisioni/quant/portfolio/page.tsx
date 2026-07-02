@@ -20,6 +20,11 @@ type BtMonth = { magic: number; month: string; pl_per_lot: number }
 // Cuscino di decorrelazione misurato sul book attuale (PTF_SIM, block-bootstrap): DD reale ~1/4 dell'aritmetico.
 // E un RIFERIMENTO, non licenza per sovra-sizzare; rivedere se cambia la composizione del portafoglio.
 const DECORR = 0.26
+// Costanti da Fase 1 (PTF_SIM/potenziale_reale.py, dati del book attuale — RICALCOLARE se cambia la composizione):
+// DD reale al 99° percentile / MC95 aritmetico (bootstrap 20gg 2021-2026 incl. orso 2022).
+const DD99_RATIO = 0.293
+// Worst-day floating REALE / aritmetico: la decorrelazione TEMPORALE (3=lun, 6=mar disgiunte) taglia il daily.
+const TEMPORAL_FLOOR = 0.58
 // Un unico modello di livelli (%MC95): 3 operativi + 2 di valutazione (Challenge/Spinto sfondano il 10%).
 // Guida SIA le size in tabella SIA la Scheda PDF; il selettore evidenzia il rosso oltre il limite del conto.
 const RISK_LEVELS = [
@@ -31,8 +36,13 @@ const RISK_LEVELS = [
 ] as const
 type Level = typeof RISK_LEVELS[number]['key']
 const levelInfo = (k: string) => RISK_LEVELS.find(l => l.key === k) ?? RISK_LEVELS[1]
-// alias per la tabella di confronto (stessi 5 livelli)
-const EVAL_LEVELS = RISK_LEVELS.map(l => ({ name: l.name, mc95: l.mc95 }))
+// Tabella di valutazione: i 5 livelli + i punti REALISTICI (sizing sul DD reale, non sull'aritmetico).
+// Reale DD99+margine = punti raccomandati da Fase 1 (richiedono l'overlay VIX come guardia dinamica prima del live).
+const EVAL_LEVELS = [
+  ...RISK_LEVELS.map(l => ({ name: l.name, mc95: l.mc95 })),
+  { name: 'Reale DD99+30%', mc95: 21.3 },
+  { name: 'Reale DD99 nudo', mc95: 30.4 },
+]
 // fattore di rischio per il cap di correlazione (le US-equity contano come un cluster)
 const RISK_FACTOR = (g: string | null): string => (g === 'INDICI_US' || g === 'SP500' || g === 'GER40') ? 'EQUITY' : (g || 'ALTRO')
 
@@ -230,11 +240,16 @@ export default function PortfolioBuilderPage() {
     if (ddBudget <= 0 || backtestMonthly.length === 0) return null
     return EVAL_LEVELS.map(L => {
       const ratio = L.mc95 / ddBudget
-      const daily = worstDayPct * ratio
+      const daily = worstDayPct * ratio                 // worst-day floating ARITMETICO (tutte insieme)
+      const dailyReal = daily * TEMPORAL_FLOOR           // worst-day REALE (decorrelazione temporale: 3=lun, 6=mar)
+      const ddReal = L.mc95 * DD99_RATIO                 // DD totale REALE al 99° pct (bootstrap)
+      const monthly = btSim.monthlyPct * ratio
+      const mult = L.mc95 / 6                             // moltiplicatore vs neutro (6% aritmetico)
+      const mesiChallenge = monthly > 0 ? 10 / monthly : 0  // mesi per +10% (target challenge)
       return {
-        name: L.name, arith: L.mc95, real: L.mc95 * DECORR, daily,
-        monthly: btSim.monthlyPct * ratio, annual: btSim.monthlyPct * 12 * ratio,
-        overTot: L.mc95 > maxTot, overDay: daily > maxDay,
+        name: L.name, arith: L.mc95, real: L.mc95 * DECORR, daily, dailyReal, ddReal, mult, mesiChallenge,
+        monthly, annual: monthly * 12,
+        overTot: L.mc95 > maxTot, overReal: ddReal > maxTot, overDayReal: dailyReal > maxDay,
       }
     })
   }, [btSim, backtestMonthly, ddBudget, worstDayPct, maxTot, maxDay])
@@ -306,13 +321,12 @@ export default function PortfolioBuilderPage() {
   // Tabella 5-livelli (riuso della memo levelCompare) + spiegazione probabilità-DD (aritmetico/reale/storico).
   function levelCompareTableHtml(): string {
     if (!levelCompare) return ''
-    const real = (ddBudget * DECORR).toFixed(1)
-    const ddNote = `<b>Probabilità di drawdown, tre metri.</b> <b>Aritmetico (tetto duro): ${ddBudget}%</b>, il 95° percentile assumendo che tutte le strategie perdano insieme (correlazione = 1): il numero su cui non sforare. <b>Reale (decorrelazione): circa ${real}%</b>, se il book resta decorrelato come nella storia (cuscino ~${(DECORR * 100).toFixed(0)}% misurato su PTF_SIM col block-bootstrap), circa un quarto dell'aritmetico. <b>Storico: circa 1,4%</b>, il peggio visto nel 2022. Il Max Drawdown della sezione Rischio è calcolato sulla curva combinata dei backtest mensili e cade tra il reale e lo storico: misura diversa dall'aritmetico, che resta un tetto prudenziale e non una previsione.<br><br>`
+    const ddNote = `<b>Drawdown: due metri.</b> <b>MC95 aritmetico (${ddBudget}%)</b> = tetto paranoico che assume che TUTTE le strategie perdano insieme (correlazione=1): mai osservato. <b>DD reale al 99° percentile</b> = drawdown effettivo del portafoglio (bootstrap 20gg su 2021-2026 incl. orso 2022), ~${(DD99_RATIO * 100).toFixed(0)}% dell'aritmetico. Il <b>worst-day reale</b> tiene conto della decorrelazione TEMPORALE (magic 3 lavora lunedì, 6 martedì → non vanno in DD lo stesso giorno): ~${(TEMPORAL_FLOOR * 100).toFixed(0)}% del worst-day aritmetico. Sizing operativo consigliato: DD99 reale + margine, con overlay VIX come guardia dinamica.<br><br>`
     const body = levelCompare.map(r => {
       const hl = r.name === levelName ? ' style="background:#eef2ff;font-weight:600"' : ''
-      return `<tr${hl}><td style="padding:2px 6px">${r.name}</td><td style="padding:2px 6px;text-align:right">${r.arith.toFixed(1)}%${r.overTot ? ' &#9888;' : ''}</td><td style="padding:2px 6px;text-align:right">${r.real.toFixed(1)}%</td><td style="padding:2px 6px;text-align:right">${r.daily.toFixed(2)}%${r.overDay ? ' &#9888;' : ''}</td><td style="padding:2px 6px;text-align:right">${r.monthly.toFixed(2)}%</td><td style="padding:2px 6px;text-align:right">${r.annual.toFixed(1)}%</td></tr>`
+      return `<tr${hl}><td style="padding:2px 6px">${r.name}</td><td style="padding:2px 6px;text-align:right;color:#94a3b8">${r.arith.toFixed(1)}%</td><td style="padding:2px 6px;text-align:right">${r.ddReal.toFixed(1)}%${r.overReal ? ' &#9888;' : ''}</td><td style="padding:2px 6px;text-align:right">${r.dailyReal.toFixed(2)}%${r.overDayReal ? ' &#9888;' : ''}</td><td style="padding:2px 6px;text-align:right">${r.mult.toFixed(1)}×</td><td style="padding:2px 6px;text-align:right">${r.monthly.toFixed(2)}%</td><td style="padding:2px 6px;text-align:right">${r.mesiChallenge.toFixed(1)}</td></tr>`
     }).join('')
-    return `${ddNote}Livelli di sizing e limiti del conto. MC95 aritmetico = tetto duro (tutto correla); reale = con la decorrelazione ~${(DECORR * 100).toFixed(0)}% misurata su PTF_SIM; il simbolo di allerta segnala oltre-limite. Livello attivo evidenziato.<table style="width:100%;border-collapse:collapse;margin-top:8px;font-size:11px"><thead><tr style="text-align:left;color:#64748b;border-bottom:1px solid #e2e8f0"><th style="padding:2px 6px">Livello</th><th style="padding:2px 6px;text-align:right">MC95 aritm.</th><th style="padding:2px 6px;text-align:right">MC95 reale</th><th style="padding:2px 6px;text-align:right">DD-day open</th><th style="padding:2px 6px;text-align:right">~ Mensile</th><th style="padding:2px 6px;text-align:right">~ Annuo</th></tr></thead><tbody>${body}</tbody></table>`
+    return `${ddNote}Livelli di sizing. MC95 aritmetico = riferimento paranoico; DD99 reale e worst-day reale = i numeri veri; il simbolo di allerta segnala oltre il limite del conto. Livello attivo evidenziato.<table style="width:100%;border-collapse:collapse;margin-top:8px;font-size:11px"><thead><tr style="text-align:left;color:#64748b;border-bottom:1px solid #e2e8f0"><th style="padding:2px 6px">Livello</th><th style="padding:2px 6px;text-align:right">MC95 aritm.</th><th style="padding:2px 6px;text-align:right">DD99 reale</th><th style="padding:2px 6px;text-align:right">Worst-day reale</th><th style="padding:2px 6px;text-align:right">×neutro</th><th style="padding:2px 6px;text-align:right">~ Mensile</th><th style="padding:2px 6px;text-align:right">Mesi/challenge</th></tr></thead><tbody>${body}</tbody></table>`
   }
   function exportScheda() {
     const trades = buildVirtualTrades()
@@ -463,29 +477,32 @@ export default function PortfolioBuilderPage() {
       {/* Confronto livelli + valutazione limiti */}
       {levelCompare && (
         <div className="bg-white border border-slate-200 rounded-xl p-4">
-          <div className="text-sm font-semibold text-slate-900 mb-2">Livelli di sizing e limiti (su 100k = {fmt(equity, 0)}; le metriche scalano col budget)</div>
+          <div className="text-sm font-semibold text-slate-900 mb-2">Curva di sizing — rischio reale vs paranoico (su 100k = {fmt(equity, 0)})</div>
           <table className="w-full text-sm">
             <thead><tr className="text-left text-xs text-slate-500 border-b border-slate-200">
               <th className="px-2 py-1">Livello</th>
-              <th className="px-2 py-1 text-right">MC95 aritm.<span className="text-slate-300"> /{fmt(maxTot, 0)}</span></th>
-              <th className="px-2 py-1 text-right">MC95 reale*</th>
-              <th className="px-2 py-1 text-right">DD-day open<span className="text-slate-300"> /{fmt(maxDay, 0)}</span></th>
-              <th className="px-2 py-1 text-right">~ Mensile</th><th className="px-2 py-1 text-right">~ Annuo</th>
+              <th className="px-2 py-1 text-right">MC95 aritm.<br /><span className="text-slate-300 font-normal">(paranoico)</span></th>
+              <th className="px-2 py-1 text-right">DD99 reale<span className="text-slate-300"> /{fmt(maxTot, 0)}</span></th>
+              <th className="px-2 py-1 text-right">Worst-day reale<span className="text-slate-300"> /{fmt(maxDay, 0)}</span></th>
+              <th className="px-2 py-1 text-right">×neutro</th>
+              <th className="px-2 py-1 text-right">~ Mensile</th>
+              <th className="px-2 py-1 text-right">Mesi/challenge</th>
             </tr></thead>
             <tbody>
               {levelCompare.map(r => (
                 <tr key={r.name} className={`border-b border-slate-50 ${r.name === levelName ? 'bg-blue-50' : ''}`}>
                   <td className="px-2 py-1 font-medium text-slate-800">{r.name}{r.name === levelName && <span className="text-xs text-blue-600"> (attivo)</span>}</td>
-                  <td className={`px-2 py-1 text-right font-medium ${r.overTot ? 'text-red-600' : 'text-slate-900'}`}>{fmt(r.arith, 1)}%{r.overTot && ' ⚠'}</td>
-                  <td className="px-2 py-1 text-right text-slate-500">{fmt(r.real, 1)}%</td>
-                  <td className={`px-2 py-1 text-right ${r.overDay ? 'text-red-600' : 'text-slate-600'}`}>{fmt(r.daily, 2)}%{r.overDay && ' ⚠'}</td>
+                  <td className="px-2 py-1 text-right text-slate-400">{fmt(r.arith, 1)}%</td>
+                  <td className={`px-2 py-1 text-right font-medium ${r.overReal ? 'text-red-600' : 'text-slate-900'}`}>{fmt(r.ddReal, 1)}%{r.overReal && ' ⚠'}</td>
+                  <td className={`px-2 py-1 text-right ${r.overDayReal ? 'text-red-600' : 'text-slate-600'}`}>{fmt(r.dailyReal, 2)}%{r.overDayReal && ' ⚠'}</td>
+                  <td className="px-2 py-1 text-right text-slate-500">{fmt(r.mult, 1)}×</td>
                   <td className="px-2 py-1 text-right font-semibold text-slate-900">{fmt(r.monthly, 2)}%</td>
-                  <td className="px-2 py-1 text-right">{fmt(r.annual, 1)}%</td>
+                  <td className="px-2 py-1 text-right">{fmt(r.mesiChallenge, 1)}</td>
                 </tr>
               ))}
             </tbody>
           </table>
-          <p className="text-xs text-slate-400 mt-2"><b>MC95 aritmetico</b> = somma worst-case (tetto duro: assume che tutto correli) — è il numero su cui NON sforare. <b>DD-day open</b> = floating del cluster long sul giorno peggiore (somma lotti×MAE). <b>*MC95 reale</b> = se la decorrelazione regge come nel 2022 (cuscino ~{fmt(DECORR * 100, 0)}% misurato su PTF_SIM): è un riferimento, non licenza per sovra-sizzare. Operativo = i 3 livelli sopra; Challenge/Spinto sono per valutare i limiti.</p>
+          <p className="text-xs text-slate-400 mt-2"><b>MC95 aritmetico</b> = tetto paranoico (assume che TUTTE correlino insieme — mai avvenuto), mostrato solo come riferimento. <b>DD99 reale</b> = drawdown effettivo al 99° percentile (bootstrap 2021-2026 incl. 2022) ≈ {fmt(DD99_RATIO * 100, 0)}% dell'aritmetico. <b>Worst-day reale</b> = floating tenendo conto della decorrelazione temporale (magic 3 lun, 6 mar disgiunte) ≈ {fmt(TEMPORAL_FLOOR * 100, 0)}% dell'aritmetico. <b>Raccomandato</b>: <i>Reale DD99+30%</i> (~3,5× neutro) — DD99 reale ~6%, worst-day ~3%, entrambi sotto i limiti. ⚠ = oltre il limite del conto. <b>Richiede l'overlay VIX (in arrivo) come guardia dinamica prima del live sui livelli alti.</b> Costanti dal book attuale (PTF_SIM/potenziale_reale.py) — ricalcolare se cambia la composizione.</p>
         </div>
       )}
 
