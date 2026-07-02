@@ -33,7 +33,20 @@ const RISK_LEVELS = [
   { key: 'aggressive', name: 'Aggressivo', mc95: 9 },
   { key: 'challenge', name: 'Challenge', mc95: 12 },
   { key: 'spinto', name: 'Spinto', mc95: 15 },
+  // Livello operativo REALISTICO (scelto da Angelo 2 lug 2026): DD99 reale + margine 30% ~= 21,3% aritmetico ~3,5x neutro.
+  // Da usare con la guardia VIX (advisory in pannello, azione manuale). DD99 reale ~6%, worst-day reale ~3%: sotto i limiti.
+  { key: 'reale30', name: 'Reale DD99+30%', mc95: 21.3 },
 ] as const
+
+// Overlay VIX term structure (soglie DERIVATE dal backtest, PTF_SIM/vix_overlay.py). ratio = ^VIX/^VIX3M.
+// Advisory: dial suggerito sul cluster LONG (short tenuti pieni). Azione MANUALE (Angelo spegne gli EA a mano).
+function vixState(ratio: number | null): { label: string; longDial: number; color: string; cadence: string } {
+  if (ratio == null) return { label: 'n/d', longDial: 1, color: 'slate', cadence: '—' }
+  if (ratio >= 1.03) return { label: 'STRESS (backwardation)', longDial: 0, color: 'red', cadence: 'intraday' }
+  if (ratio >= 0.98) return { label: 'Allarme alto', longDial: 0.33, color: 'orange', cadence: 'giornaliera' }
+  if (ratio >= 0.97) return { label: 'Allarme', longDial: 0.66, color: 'amber', cadence: 'ogni 2 giorni' }
+  return { label: 'Contango (calma)', longDial: 1, color: 'green', cadence: 'settimanale' }
+}
 type Level = typeof RISK_LEVELS[number]['key']
 const levelInfo = (k: string) => RISK_LEVELS.find(l => l.key === k) ?? RISK_LEVELS[1]
 // Tabella di valutazione: i 5 livelli + i punti REALISTICI (sizing sul DD reale, non sull'aritmetico).
@@ -72,6 +85,7 @@ export default function PortfolioBuilderPage() {
   const [backtestMonthly, setBacktestMonthly] = useState<BtMonth[]>([])
   const [acctComp, setAcctComp] = useState<Map<string, Set<string>>>(new Map())
   const [acctPolicy, setAcctPolicy] = useState<Map<string, 'reduced' | 'full'>>(new Map())
+  const [vix, setVix] = useState<{ ratio: number; ts: string; vix: number; vix3m: number } | null>(null)
   const [sel, setSel] = useState<Set<string>>(new Set())
   const [equity, setEquity] = useState(100000)
   const [level, setLevel] = useState<Level>('neutral')
@@ -104,6 +118,10 @@ export default function PortfolioBuilderPage() {
     setAccounts((aRes.data as Account[]) || [])
     setSignals((sigRes.data as Signal[]) || [])
     setBacktestMonthly((btmRes.data as BtMonth[]) || [])
+    // VIX term structure (advisory overlay): ultima riga
+    const vRes = await supabase.from('qel_vix_term').select('ts,vix,vix3m,ratio').order('ts', { ascending: false }).limit(1)
+    const vr = ((vRes.data as { ts: string; vix: number; vix3m: number; ratio: number }[]) || [])[0]
+    if (vr) setVix({ ratio: Number(vr.ratio), ts: vr.ts, vix: Number(vr.vix), vix3m: Number(vr.vix3m) })
     // composizione salvata per conto (per caricarla quando si seleziona il conto)
     const pfAcc = new Map<string, string>()
     const pol = new Map<string, 'reduced' | 'full'>()
@@ -419,8 +437,8 @@ export default function PortfolioBuilderPage() {
         <label className="text-sm"><span className="block text-xs text-slate-500 mb-1">Equity</span>
           <input type="number" value={equity} onChange={e => setEquity(Number(e.target.value) || 0)} className="border border-slate-300 rounded-lg px-2 py-1.5 text-sm w-32" /></label>
         <label className="text-sm"><span className="block text-xs text-slate-500 mb-1">Livello rischio (guida size + scheda)</span>
-          <select value={level} onChange={e => setLevel(e.target.value as Level)} className={`border rounded-lg px-2 py-1.5 text-sm ${aggMc95 > maxTot ? 'border-red-400 text-red-600' : 'border-slate-300'}`}>
-            {RISK_LEVELS.map(l => <option key={l.key} value={l.key}>{l.name} ({l.mc95}%){l.mc95 > maxTot ? ' — oltre limite' : ''}</option>)}
+          <select value={level} onChange={e => setLevel(e.target.value as Level)} className={`border rounded-lg px-2 py-1.5 text-sm ${aggMc95 * DD99_RATIO > maxTot ? 'border-red-400 text-red-600' : 'border-slate-300'}`}>
+            {RISK_LEVELS.map(l => <option key={l.key} value={l.key}>{l.name} ({l.mc95}%){l.mc95 * DD99_RATIO > maxTot ? ' — DD reale oltre limite' : ''}</option>)}
           </select></label>
         <div className="text-sm"><span className="block text-xs text-slate-500 mb-1" title="Ridotta = haircut 0,7 alle 0-live (prudente). Piena = tutte come proven.">Modalità size</span>
           <div className="flex gap-1">
@@ -429,10 +447,26 @@ export default function PortfolioBuilderPage() {
             ))}
           </div></div>
         <div className="ml-auto text-sm flex gap-6">
-          <span>MC95 aggregato <b className={aggMc95 > maxTot ? 'text-red-600' : 'text-slate-900'}>{fmt(aggMc95, 1)}%</b> <span className="text-xs text-slate-400">/ {fmt(maxTot, 0)}%</span></span>
-          <span>Worst-day <b className={worstDayPct > maxDay ? 'text-red-600' : 'text-slate-900'}>{fmt(worstDayPct, 2)}%</b> <span className="text-xs text-slate-400">/ {fmt(maxDay, 0)}%</span></span>
+          <span title="Tetto paranoico (correlazione=1)">MC95 aritm. <b className="text-slate-400">{fmt(aggMc95, 1)}%</b></span>
+          <span title="Drawdown reale al 99° pct (bootstrap) — il numero vero">DD99 reale <b className={aggMc95 * DD99_RATIO > maxTot ? 'text-red-600' : 'text-slate-900'}>{fmt(aggMc95 * DD99_RATIO, 1)}%</b> <span className="text-xs text-slate-400">/ {fmt(maxTot, 0)}%</span></span>
+          <span title="Worst-day reale (decorrelazione temporale)">Worst-day <b className={worstDayPct * TEMPORAL_FLOOR > maxDay ? 'text-red-600' : 'text-slate-900'}>{fmt(worstDayPct * TEMPORAL_FLOOR, 2)}%</b> <span className="text-xs text-slate-400">/ {fmt(maxDay, 0)}%</span></span>
         </div>
       </div>
+
+      {/* Overlay VIX term structure (advisory — azione manuale) */}
+      {vix && (() => {
+        const vs = vixState(vix.ratio)
+        const c = { green: 'bg-green-50 border-green-200 text-green-800', amber: 'bg-amber-50 border-amber-200 text-amber-800', orange: 'bg-orange-50 border-orange-200 text-orange-800', red: 'bg-red-50 border-red-300 text-red-800', slate: 'bg-slate-50 border-slate-200 text-slate-600' }[vs.color]
+        return (
+          <div className={`flex flex-wrap items-center gap-x-6 gap-y-1 border rounded-xl p-3 text-sm ${c}`}>
+            <span className="font-semibold">Guardia crash VIX: {vs.label}</span>
+            <span>ratio ^VIX/^VIX3M <b>{fmt(vix.ratio, 3)}</b> <span className="text-xs opacity-70">(VIX {fmt(vix.vix, 1)} / VIX3M {fmt(vix.vix3m, 1)})</span></span>
+            <span>Size LONG suggerita <b>{(vs.longDial * 100).toFixed(0)}%</b> <span className="text-xs opacity-70">(short pieni)</span></span>
+            <span className="text-xs opacity-70">controllo {vs.cadence} · ultimo dato {vix.ts}</span>
+            {vs.longDial < 1 && <span className="text-xs font-medium">⚠ Backwardation: valuta di ridurre/spegnere i LONG a mano (gli short guadagnano nei selloff)</span>}
+          </div>
+        )
+      })()}
 
       {/* Regime di mercato (analisi mensile) */}
       {regimeBySym.size > 0 && (
