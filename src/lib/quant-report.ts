@@ -14,6 +14,7 @@ export interface ReportTrade {
   strat?: string     // nome strategia (solo report interni)
   lots?: number      // volume dell'operazione (per analisi position sizing)
   sid?: string       // chiave strategia (magic) per contare le strategie attive; mai mostrata
+  nTrades?: number   // trade REALI rappresentati da questo campione (scheda mensile); default 1 (report per-trade)
 }
 
 export interface ReportPhase { label: string; base: number; pl: number; n: number }
@@ -53,8 +54,7 @@ function esc(s: string): string {
 export function buildReportHtml(tradesIn: ReportTrade[], o: ReportOptions): string {
   const cur = o.currency === 'EUR' ? '€' : '$'
   const smp = o.sampleNoun || 'operazione'                       // singolare (scheda: 'mese')
-  const smpPl = o.sampleNoun === 'mese' ? 'campioni (strategia-mese)' : 'operazioni'
-  const oc = o.sampleNoun === 'mese' ? 'Camp.' : 'Oper.'         // header colonna conteggio
+  const oc = 'Oper.'                                             // header colonna conteggio (trade reali)
   const T = [...tradesIn].filter(t => t.d).sort((a, b) => a.d.localeCompare(b.d))
   const BASE = o.base
   const fmt = (n: number) => (n < 0 ? '-' : '') + cur + Math.abs(n).toLocaleString('it-IT', { maximumFractionDigits: 0 })
@@ -124,9 +124,11 @@ export function buildReportHtml(tradesIn: ReportTrade[], o: ReportOptions): stri
   const posDays = dvals.filter(x => x > 0).length
   const tDays = dvals.length
 
-  // mensile
-  const mm: Record<string, { pl: number; n: number; w: number }> = {}
-  for (const t of T) { const m = t.d.slice(0, 7); if (!mm[m]) mm[m] = { pl: 0, n: 0, w: 0 }; mm[m].pl += t.pl; mm[m].n++; if (t.pl > 0) mm[m].w++ }
+  // trade REALI (per i conteggi): t.nTrades se presente (scheda mensile), altrimenti 1 (report per-trade)
+  const realN = T.reduce((a, t) => a + (t.nTrades ?? 1), 0)
+  // mensile — n = campioni mensili (per le stat); nt = trade reali (per il conteggio a schermo)
+  const mm: Record<string, { pl: number; n: number; w: number; nt: number }> = {}
+  for (const t of T) { const m = t.d.slice(0, 7); if (!mm[m]) mm[m] = { pl: 0, n: 0, w: 0, nt: 0 }; mm[m].pl += t.pl; mm[m].n++; mm[m].nt += (t.nTrades ?? 1); if (t.pl > 0) mm[m].w++ }
   const months = Object.keys(mm).sort()
   const mret = months.map(m => BASE > 0 ? mm[m].pl / BASE * 100 : 0)
   const mMean = mret.length ? mret.reduce((a, b) => a + b, 0) / mret.length : 0
@@ -144,14 +146,14 @@ export function buildReportHtml(tradesIn: ReportTrade[], o: ReportOptions): stri
 
   // ---- raggruppamenti ----
   function group(key: 'type' | 'cls' | 'strat') {
-    const g: Record<string, { pl: number; n: number; w: number }> = {}
+    const g: Record<string, { pl: number; n: number; w: number; nt: number }> = {}
     for (const t of T) {
       const k = (key === 'strat' ? (t.strat || 'Manuale') : t[key]) as string
-      if (!g[k]) g[k] = { pl: 0, n: 0, w: 0 }
-      g[k].pl += t.pl; g[k].n++; if (t.pl > 0) g[k].w++
+      if (!g[k]) g[k] = { pl: 0, n: 0, w: 0, nt: 0 }
+      g[k].pl += t.pl; g[k].n++; g[k].nt += (t.nTrades ?? 1); if (t.pl > 0) g[k].w++
     }
     return Object.keys(g).sort((a, b) => g[b].pl - g[a].pl)
-      .map(k => ({ k, n: g[k].n, wr: g[k].n > 0 ? g[k].w / g[k].n * 100 : 0, pl: g[k].pl, quota: net !== 0 ? g[k].pl / net * 100 : 0 }))
+      .map(k => ({ k, n: g[k].n, nt: g[k].nt, wr: g[k].n > 0 ? g[k].w / g[k].n * 100 : 0, pl: g[k].pl, quota: net !== 0 ? g[k].pl / net * 100 : 0 }))
   }
   const TC: Record<string, string> = { 'Mean Reversion': '#7c3aed', 'Seasonal': '#0d9488', 'Trend Following': '#f59e0b', 'Tattico': '#94a3b8' }
 
@@ -191,7 +193,7 @@ export function buildReportHtml(tradesIn: ReportTrade[], o: ReportOptions): stri
     ['Rendimento totale netto', pc(totRet * 100)],
     ['Rendimento annualizzato (CAGR)', pc(annRet)],
     ['Rendimento medio mensile', pc(mMean, 2)],
-    [o.sampleNoun === 'mese' ? 'Campioni (strategia-mese)' : 'Operazioni totali', `${n} (${months.length ? (n / months.length).toFixed(0) : 0}/mese)`],
+    [o.sampleNoun === 'mese' ? 'Operazioni (trade reali)' : 'Operazioni totali', `${realN} (${months.length ? (realN / months.length).toFixed(0) : 0}/mese)`],
     ['Win rate', `${wr.toFixed(1)}% (${wins}/${n})`],
     ['Profit factor', pf.toFixed(2)],
     ['Payoff ratio', payoff.toFixed(2)],
@@ -228,11 +230,11 @@ export function buildReportHtml(tradesIn: ReportTrade[], o: ReportOptions): stri
   const maxAbs = Math.max(1, ...months.map(m => Math.abs(mm[m].pl)))
   const monthlyRows = months.map(m => {
     const ob = mm[m]; mc += ob.pl; const r = BASE > 0 ? ob.pl / BASE * 100 : 0; const bw = Math.abs(ob.pl) / maxAbs * 120
-    return `<tr><td class="b">${m}</td><td class="r b ${clsN(r)}">${pc(r, 2)}</td><td class="r ${clsN(ob.pl)}">${fmt(ob.pl)}</td><td class="r">${pc(BASE > 0 ? mc / BASE * 100 : 0, 1)}</td><td class="r">${ob.n}</td><td class="r">${(ob.w / ob.n * 100).toFixed(0)}%</td><td><span class="bar" style="width:${bw.toFixed(0)}px;background:${ob.pl >= 0 ? '#16a34a' : '#dc2626'}"></span></td></tr>`
-  }).join('') + `<tr style="border-top:2px solid #e2e8f0"><td class="b">TOTALE</td><td class="r b ${clsN(net)}">${pc(totRet * 100, 1)}</td><td class="r b ${clsN(net)}">${fmt(net)}</td><td class="r"></td><td class="r b">${n}</td><td class="r">${wr.toFixed(0)}%</td><td></td></tr>`
+    return `<tr><td class="b">${m}</td><td class="r b ${clsN(r)}">${pc(r, 2)}</td><td class="r ${clsN(ob.pl)}">${fmt(ob.pl)}</td><td class="r">${pc(BASE > 0 ? mc / BASE * 100 : 0, 1)}</td><td class="r">${ob.nt}</td><td class="r">${(ob.w / ob.n * 100).toFixed(0)}%</td><td><span class="bar" style="width:${bw.toFixed(0)}px;background:${ob.pl >= 0 ? '#16a34a' : '#dc2626'}"></span></td></tr>`
+  }).join('') + `<tr style="border-top:2px solid #e2e8f0"><td class="b">TOTALE</td><td class="r b ${clsN(net)}">${pc(totRet * 100, 1)}</td><td class="r b ${clsN(net)}">${fmt(net)}</td><td class="r"></td><td class="r b">${realN}</td><td class="r">${wr.toFixed(0)}%</td><td></td></tr>`
 
   const allocRows = (rows: ReturnType<typeof group>, color: boolean) => rows.map(r =>
-    `<tr><td>${color ? `<span class="bar" style="width:9px;background:${TC[r.k] || '#cbd5e1'}"></span> ` : ''}${esc(r.k)}</td><td class="r">${r.n}</td><td class="r">${r.wr.toFixed(0)}%</td><td class="r b ${clsN(r.pl)}">${fmt(r.pl)}</td><td class="r">${r.quota.toFixed(1)}%</td></tr>`).join('')
+    `<tr><td>${color ? `<span class="bar" style="width:9px;background:${TC[r.k] || '#cbd5e1'}"></span> ` : ''}${esc(r.k)}</td><td class="r">${r.nt}</td><td class="r">${r.wr.toFixed(0)}%</td><td class="r b ${clsN(r.pl)}">${fmt(r.pl)}</td><td class="r">${r.quota.toFixed(1)}%</td></tr>`).join('')
 
   // costi
   const gross = net - o.swap - o.comm
@@ -262,12 +264,12 @@ export function buildReportHtml(tradesIn: ReportTrade[], o: ReportOptions): stri
   const hasLots = T.some(t => (t.lots || 0) > 0)
   let sizingHtml = ''
   if (hasLots) {
-    const sm: Record<string, { strats: Set<string>; n: number; lots: number; pl: number }> = {}
+    const sm: Record<string, { strats: Set<string>; n: number; nt: number; lots: number; pl: number }> = {}
     for (const t of T) {
       const m = t.d.slice(0, 7)
-      if (!sm[m]) sm[m] = { strats: new Set<string>(), n: 0, lots: 0, pl: 0 }
+      if (!sm[m]) sm[m] = { strats: new Set<string>(), n: 0, nt: 0, lots: 0, pl: 0 }
       if (t.sid) sm[m].strats.add(t.sid)
-      sm[m].n++; sm[m].lots += t.lots || 0; sm[m].pl += t.pl
+      sm[m].n++; sm[m].nt += (t.nTrades ?? 1); sm[m].lots += t.lots || 0; sm[m].pl += t.pl
     }
     const sMonths = Object.keys(sm).sort()
     const activeCounts = sMonths.map(m => sm[m].strats.size)
@@ -279,7 +281,7 @@ export function buildReportHtml(tradesIn: ReportTrade[], o: ReportOptions): stri
       const ob = sm[m]
       const avgLot = ob.n > 0 ? ob.lots / ob.n : 0
       const lotsPerStrat = ob.strats.size > 0 ? ob.lots / ob.strats.size : 0
-      return `<tr><td class="b">${m}</td><td class="r b">${ob.strats.size}</td><td class="r">${ob.n}</td><td class="r">${ob.lots.toFixed(2)}</td><td class="r">${avgLot.toFixed(2)}</td><td class="r">${lotsPerStrat.toFixed(2)}</td><td class="r ${clsN(ob.pl)}">${fmt(ob.pl)}</td></tr>`
+      return `<tr><td class="b">${m}</td><td class="r b">${ob.strats.size}</td><td class="r">${ob.nt}</td><td class="r">${ob.lots.toFixed(2)}</td><td class="r">${avgLot.toFixed(2)}</td><td class="r">${lotsPerStrat.toFixed(2)}</td><td class="r ${clsN(ob.pl)}">${fmt(ob.pl)}</td></tr>`
     }).join('')
     sizingHtml = `<div class="sec">Evoluzione Strategie Attive &amp; Position Sizing</div>` +
       `<div class="method" style="margin-bottom:8px">Monitoraggio cadenzato del numero di strategie attive e del dimensionamento (lotti) mese per mese. Serve a valutare nel tempo gli effetti del <b>dynamic position sizing</b> applicato periodicamente al portafoglio: come variano i motori attivi, il volume e il lotto medio, e l'impatto sul P/L. Nel periodo: <b>${minA}-${maxA} strategie attive/mese</b> (media ${avgA.toFixed(1)}), ${totalDistinct} distinte complessive.</div>` +
@@ -318,7 +320,7 @@ td.r,th.r{text-align:right;font-variant-numeric:tabular-nums}td.b{font-weight:70
 <div class="head"><div>
 <div class="logo">VELQOR<span> Quant</span><div class="tag">SYSTEMATIC TRADING</div></div>
 <h1>${esc(o.title)}</h1><div class="sub">${esc(o.subtitle)}</div>
-<div class="sub">Periodo: ${T.length ? T[0].d : '-'} → ${T.length ? T[n - 1].d : '-'} · ${Math.round(days)} giorni · ${months.length} mesi · ${n} ${smpPl}${o.realTradesNote ? ` · ${esc(o.realTradesNote)}` : ''}</div>
+<div class="sub">Periodo: ${T.length ? T[0].d : '-'} → ${T.length ? T[n - 1].d : '-'} · ${Math.round(days)} giorni · ${months.length} mesi · ${realN} operazioni</div>
 </div><div class="meta">${o.badge ? `<div class="conf">${esc(o.badge)}</div><br>` : ''}${o.metaRight.map(esc).join('<br>')}</div></div>
 ${o.intro ? `<div class="intro">${o.intro}</div>` : ''}
 <div class="kpis">${kpiCards.map(x => `<div class="kpi"><div class="l">${x[0]}</div><div class="v ${x[3]}">${x[1]}</div><div class="s">${x[2]}</div></div>`).join('')}</div>
