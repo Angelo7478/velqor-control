@@ -34,6 +34,8 @@ export interface ReportOptions {
   groupNote?: string       // nota finale firmata
   costNote?: boolean       // includi nota CFD -> futures
   hideCostAnalysis?: boolean // backtest: i costi sono gia' nel P/L -> nascondi la tabella "lordo/pre-costi"
+  sampleNoun?: string        // scheda a risoluzione mensile: ogni "trade" e' un campione strategia-mese -> 'mese'
+  realTradesNote?: string    // nota col conteggio dei TRADE reali (la scheda mostra campioni mensili, non trade)
 }
 
 // ---- helpers numerici ----
@@ -50,6 +52,9 @@ function esc(s: string): string {
 
 export function buildReportHtml(tradesIn: ReportTrade[], o: ReportOptions): string {
   const cur = o.currency === 'EUR' ? '€' : '$'
+  const smp = o.sampleNoun || 'operazione'                       // singolare (scheda: 'mese')
+  const smpPl = o.sampleNoun === 'mese' ? 'campioni (strategia-mese)' : 'operazioni'
+  const oc = o.sampleNoun === 'mese' ? 'Camp.' : 'Oper.'         // header colonna conteggio
   const T = [...tradesIn].filter(t => t.d).sort((a, b) => a.d.localeCompare(b.d))
   const BASE = o.base
   const fmt = (n: number) => (n < 0 ? '-' : '') + cur + Math.abs(n).toLocaleString('it-IT', { maximumFractionDigits: 0 })
@@ -186,14 +191,14 @@ export function buildReportHtml(tradesIn: ReportTrade[], o: ReportOptions): stri
     ['Rendimento totale netto', pc(totRet * 100)],
     ['Rendimento annualizzato (CAGR)', pc(annRet)],
     ['Rendimento medio mensile', pc(mMean, 2)],
-    ['Operazioni totali', `${n} (${months.length ? (n / months.length).toFixed(0) : 0}/mese)`],
+    [o.sampleNoun === 'mese' ? 'Campioni (strategia-mese)' : 'Operazioni totali', `${n} (${months.length ? (n / months.length).toFixed(0) : 0}/mese)`],
     ['Win rate', `${wr.toFixed(1)}% (${wins}/${n})`],
     ['Profit factor', pf.toFixed(2)],
     ['Payoff ratio', payoff.toFixed(2)],
-    ['Expectancy / operazione', fmt(avgt)],
+    [`Expectancy / ${smp}`, fmt(avgt)],
     ['Vincita media', fmt(aw)],
     ['Perdita media', fmt(-al)],
-    ['Miglior / peggior operazione', `${fmt(best)} / ${fmt(worst)}`],
+    [`Miglior / peggior ${smp}`, `${fmt(best)} / ${fmt(worst)}`],
     ['Max vincite / perdite consec.', `${mcw} / ${mcl}`],
     ['Mesi profittevoli', `${posM}/${months.length} (${months.length ? (posM / months.length * 100).toFixed(0) : 0}%)`],
     ['Miglior / peggior mese', `${pc(bestM, 1)} / ${pc(worstM, 1)}`],
@@ -208,7 +213,7 @@ export function buildReportHtml(tradesIn: ReportTrade[], o: ReportOptions): stri
     ['Recovery factor', recovery.toFixed(2)],
     ['Ulcer index', ulcer.toFixed(2)],
     ['% tempo in drawdown', `${timeInDD.toFixed(0)}%`],
-    ['VaR 95% (operazione)', fmt(var95)],
+    [`VaR 95% (${smp})`, fmt(var95)],
     ['CVaR 95% (coda)', fmt(cvar)],
     ['Tail ratio (95/5)', tail.toFixed(2)],
     ['Skewness / Kurtosis', `${skew.toFixed(2)} / ${kurt.toFixed(2)}`],
@@ -245,13 +250,13 @@ export function buildReportHtml(tradesIn: ReportTrade[], o: ReportOptions): stri
 
   // fasi (lineage)
   const phaseHtml = o.phases && o.phases.length > 1
-    ? `<div class="sec">Riepilogo per Fase</div><table><thead><tr><th>Fase</th><th class="r">Capitale</th><th class="r">P/L</th><th class="r">Saldo</th><th class="r">Rendim.</th><th class="r">Oper.</th></tr></thead><tbody>${o.phases.map(p => `<tr><td>${esc(p.label)}</td><td class="r">${fmt(p.base)}</td><td class="r b ${clsN(p.pl)}">${(p.pl >= 0 ? '+' : '') + fmt(p.pl)}</td><td class="r b">${fmt(p.base + p.pl)}</td><td class="r ${clsN(p.pl)}">${pc(p.base > 0 ? p.pl / p.base * 100 : 0, 1)}</td><td class="r">${p.n}</td></tr>`).join('')}</tbody></table>` : ''
+    ? `<div class="sec">Riepilogo per Fase</div><table><thead><tr><th>Fase</th><th class="r">Capitale</th><th class="r">P/L</th><th class="r">Saldo</th><th class="r">Rendim.</th><th class="r">${oc}</th></tr></thead><tbody>${o.phases.map(p => `<tr><td>${esc(p.label)}</td><td class="r">${fmt(p.base)}</td><td class="r b ${clsN(p.pl)}">${(p.pl >= 0 ? '+' : '') + fmt(p.pl)}</td><td class="r b">${fmt(p.base + p.pl)}</td><td class="r ${clsN(p.pl)}">${pc(p.base > 0 ? p.pl / p.base * 100 : 0, 1)}</td><td class="r">${p.n}</td></tr>`).join('')}</tbody></table>` : ''
 
   const costNoteHtml = o.costNote
     ? `<div class="sec">Perche i costi pesano: l'inefficienza dei CFD</div><div class="method">I costi incidono per il <b>${costRatio.toFixed(1)}% del lordo</b>, quasi tutti <b>swap</b> (finanziamento overnight). Non e un difetto delle strategie: e la dimostrazione concreta dell'<b>inefficienza strutturale dei CFD</b>, gli strumenti su cui opera la stragrande maggioranza dei trader retail. Il dato che conta: <b>anche pagando questa tassa, il netto e ${pc(totRet * 100, 1)}</b>, segno di un edge solido. La direzione sono i <b>future CME</b> (E-mini/Micro): costi trasparenti e molto piu bassi, <b>nessuno swap giornaliero</b> (solo roll trimestrale). Sui future i ${fmt(Math.abs(o.swap))} di swap di questo periodo semplicemente non esisterebbero.</div>` : ''
 
   const stratSection = (!o.isPublic && T.some(t => t.strat))
-    ? `<div class="sec">Per Strategia</div><table><thead><tr><th>Strategia</th><th class="r">Oper.</th><th class="r">Win%</th><th class="r">Contributo</th><th class="r">Quota</th></tr></thead><tbody>${allocRows(group('strat'), false)}</tbody></table>` : ''
+    ? `<div class="sec">Per Strategia</div><table><thead><tr><th>Strategia</th><th class="r">${oc}</th><th class="r">Win%</th><th class="r">Contributo</th><th class="r">Quota</th></tr></thead><tbody>${allocRows(group('strat'), false)}</tbody></table>` : ''
 
   // Evoluzione strategie attive & position sizing (per mese) — per valutare il dynamic sizing nel tempo
   const hasLots = T.some(t => (t.lots || 0) > 0)
@@ -278,7 +283,7 @@ export function buildReportHtml(tradesIn: ReportTrade[], o: ReportOptions): stri
     }).join('')
     sizingHtml = `<div class="sec">Evoluzione Strategie Attive &amp; Position Sizing</div>` +
       `<div class="method" style="margin-bottom:8px">Monitoraggio cadenzato del numero di strategie attive e del dimensionamento (lotti) mese per mese. Serve a valutare nel tempo gli effetti del <b>dynamic position sizing</b> applicato periodicamente al portafoglio: come variano i motori attivi, il volume e il lotto medio, e l'impatto sul P/L. Nel periodo: <b>${minA}-${maxA} strategie attive/mese</b> (media ${avgA.toFixed(1)}), ${totalDistinct} distinte complessive.</div>` +
-      `<table><thead><tr><th>Mese</th><th class="r">Strat. attive</th><th class="r">Oper.</th><th class="r">Lotti tot.</th><th class="r">Lotto medio</th><th class="r">Lotti/strat.</th><th class="r">P/L</th></tr></thead><tbody>${szRows}</tbody></table>`
+      `<table><thead><tr><th>Mese</th><th class="r">Strat. attive</th><th class="r">${oc}</th><th class="r">Lotti tot.</th><th class="r">Lotto medio</th><th class="r">Lotti/strat.</th><th class="r">P/L</th></tr></thead><tbody>${szRows}</tbody></table>`
   }
 
   const methodTxt = 'Operativita basata su un <b>portafoglio multi-strategia sistematico</b>, governato da regole, su indici azionari, energia, valute e crypto. Stili complementari (mean reversion, stagionalita, trend following, breakout) combinati per de-correlazione e validati su backtest fuori campione (walk-forward, Monte Carlo, stress test di regime) e su operativita live. Gestione del rischio istituzionale: <b>dimensionamento a budget di drawdown ripartito per l\'MC95</b> di ogni strategia, pesato per robustezza e risultati live, con guardrail rigidi (perdita giornaliera max 5%, totale max 10%).'
@@ -313,16 +318,16 @@ td.r,th.r{text-align:right;font-variant-numeric:tabular-nums}td.b{font-weight:70
 <div class="head"><div>
 <div class="logo">VELQOR<span> Quant</span><div class="tag">SYSTEMATIC TRADING</div></div>
 <h1>${esc(o.title)}</h1><div class="sub">${esc(o.subtitle)}</div>
-<div class="sub">Periodo: ${T.length ? T[0].d : '-'} → ${T.length ? T[n - 1].d : '-'} · ${Math.round(days)} giorni · ${months.length} mesi · ${n} operazioni</div>
+<div class="sub">Periodo: ${T.length ? T[0].d : '-'} → ${T.length ? T[n - 1].d : '-'} · ${Math.round(days)} giorni · ${months.length} mesi · ${n} ${smpPl}${o.realTradesNote ? ` · ${esc(o.realTradesNote)}` : ''}</div>
 </div><div class="meta">${o.badge ? `<div class="conf">${esc(o.badge)}</div><br>` : ''}${o.metaRight.map(esc).join('<br>')}</div></div>
 ${o.intro ? `<div class="intro">${o.intro}</div>` : ''}
 <div class="kpis">${kpiCards.map(x => `<div class="kpi"><div class="l">${x[0]}</div><div class="v ${x[3]}">${x[1]}</div><div class="s">${x[2]}</div></div>`).join('')}</div>
 <div class="sec">Curva Equity</div><div style="background:#fcfcfd;border:1px solid #e2e8f0;border-radius:10px;padding:12px 8px 4px">${chart}</div>
 ${phaseHtml}
 <div class="grid2"><div><div class="sec">Metriche di Performance</div><table><tbody>${row2(perf)}</tbody></table></div><div><div class="sec">Metriche di Rischio</div><table><tbody>${row2(risk)}</tbody></table></div></div>
-<div class="sec">Rendimento Mese per Mese</div><table><thead><tr><th>Mese</th><th class="r">Rendimento</th><th class="r">P/L</th><th class="r">Cumulato</th><th class="r">Oper.</th><th class="r">Win%</th><th></th></tr></thead><tbody>${monthlyRows}</tbody></table>
+<div class="sec">Rendimento Mese per Mese</div><table><thead><tr><th>Mese</th><th class="r">Rendimento</th><th class="r">P/L</th><th class="r">Cumulato</th><th class="r">${oc}</th><th class="r">Win%</th><th></th></tr></thead><tbody>${monthlyRows}</tbody></table>
 ${sizingHtml}
-<div class="grid2"><div><div class="sec">Per Tipologia</div><table><thead><tr><th>Tipologia</th><th class="r">Oper.</th><th class="r">Win%</th><th class="r">Contributo</th><th class="r">Quota</th></tr></thead><tbody>${allocRows(group('type'), true)}</tbody></table></div><div><div class="sec">Per Classe di Asset</div><table><thead><tr><th>Classe</th><th class="r">Oper.</th><th class="r">Win%</th><th class="r">Contributo</th><th class="r">Quota</th></tr></thead><tbody>${allocRows(group('cls'), false)}</tbody></table></div></div>
+<div class="grid2"><div><div class="sec">Per Tipologia</div><table><thead><tr><th>Tipologia</th><th class="r">${oc}</th><th class="r">Win%</th><th class="r">Contributo</th><th class="r">Quota</th></tr></thead><tbody>${allocRows(group('type'), true)}</tbody></table></div><div><div class="sec">Per Classe di Asset</div><table><thead><tr><th>Classe</th><th class="r">${oc}</th><th class="r">Win%</th><th class="r">Contributo</th><th class="r">Quota</th></tr></thead><tbody>${allocRows(group('cls'), false)}</tbody></table></div></div>
 ${stratSection}
 ${o.hideCostAnalysis
     ? `<div class="sec">Costi di Transazione</div><div class="note">P/L al <b>netto dei costi reali FTMO</b> (spread e commissioni): sono gia' inclusi nei backtest a 1 lotto. Nessuna voce lordo/pre-costi: il netto e' ${fmt(net)}.</div>`

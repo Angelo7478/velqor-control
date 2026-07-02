@@ -15,7 +15,7 @@ type Strat = {
 }
 type Account = { id: string; name: string; account_size: number | null; currency: string | null; max_daily_loss_pct: number | null; max_total_loss_pct: number | null }
 type Signal = { base_magic: number; sig_time: string; pl_per_lot: number }
-type BtMonth = { magic: number; month: string; pl_per_lot: number }
+type BtMonth = { magic: number; month: string; pl_per_lot: number; n_trades: number }
 
 // Cuscino di decorrelazione misurato sul book attuale (PTF_SIM, block-bootstrap): DD reale ~1/4 dell'aritmetico.
 // E un RIFERIMENTO, non licenza per sovra-sizzare; rivedere se cambia la composizione del portafoglio.
@@ -109,7 +109,7 @@ export default function PortfolioBuilderPage() {
       supabase.from('v_signal_trades').select('base_magic,sig_time,pl_per_lot').order('sig_time'),
       supabase.from('qel_portfolios').select('id,account_id,size_policy'),
       supabase.from('qel_portfolio_strategies').select('portfolio_id,strategy_id'),
-      supabase.from('qel_strategy_backtest_monthly').select('magic,month,pl_per_lot').order('month'),
+      supabase.from('qel_strategy_backtest_monthly').select('magic,month,pl_per_lot,n_trades').order('month'),
     ])
     const list = (sRes.data as Strat[]) || []
     setStrats(list)
@@ -364,7 +364,7 @@ export default function PortfolioBuilderPage() {
         ? 'Size RIDOTTA: haircut prudenziale (0,7) alle strategie senza storico live consistente — finché un edge non prova di reggere dal vivo (slippage, regime, costi reali) non gli si affida capitale pieno. La colonna "Piena" è la size-obiettivo quando matureranno (promozione a validate).'
         : 'Size PIENA: haircut rimosso, tutte le strategie trattate come validate. La colonna "Ridotta" è la size prudenziale operativa di default. Usare la Piena solo su strategie con validazione live sufficiente.'}</div>`
       : ''
-    const windowNote = `<div style="margin-top:6px;font-size:10.5px;color:#64748b">Media mensile calcolata sulla <b>finestra a book pieno</b> (da ${fullBookStart || '—'}, quando tutte le strategie selezionate sono attive): esclude il rodaggio iniziale che abbassava la media. ${compounding ? '<b>Interessi composti ON</b>: i rendimenti reinvestono e la size cresce con l\'equity (conto reale).' : '<b>Interessi composti OFF</b>: additivo su base fissa (prop: pagato sul profitto, size fissa).'}</div>`
+    const windowNote = `<div style="margin-top:6px;font-size:10.5px;color:#64748b"><b>Risoluzione mensile</b>: ogni campione è il P/L di una strategia in un mese (backtest a 1 lotto), non un singolo trade — i trade reali sono molti di più (conteggio in testa). Media mensile sulla <b>finestra a book pieno</b> (da ${fullBookStart || '—'}, quando tutte le strategie selezionate sono attive): esclude il rodaggio iniziale che abbassava la media. ${compounding ? '<b>Interessi composti ON</b>: i rendimenti reinvestono e la size cresce con l\'equity (conto reale).' : '<b>Interessi composti OFF</b>: additivo su base fissa (prop: pagato sul profitto, size fissa).'}</div>`
     return `<b>Sizing ${modeName} · livello ${levelName} — ${ddBudget}% di MC95${compounding ? ' · composti' : ''}.</b> Backtest combinato delle strategie selezionate, scalati ai lotti operativi (costi broker reali già inclusi nei trade-list). <b>Composizione del portafoglio:</b>${table}${modeNote}${windowNote}`
   }
   // Tabella 5-livelli (riuso della memo levelCompare) + spiegazione probabilità-DD (aritmetico/reale/storico).
@@ -399,6 +399,8 @@ export default function PortfolioBuilderPage() {
       intro: introHtml(levelName),
       groupNote: levelCompareTableHtml(),
       costNote: false, hideCostAnalysis: true,
+      sampleNoun: 'mese',
+      realTradesNote: `~${opRows.filter(r => r.lots > 0).reduce((a, r) => a + backtestMonthly.filter(m => m.magic === r.s.magic && m.month >= fullBookStart).reduce((b, m) => b + (m.n_trades || 0), 0), 0).toLocaleString('it-IT')} trade reali`,
     })
     const win = window.open('', '_blank')
     if (!win) { setMsg('Abilita i popup per esportare la scheda.'); return }
