@@ -53,24 +53,20 @@ const levelInfo = (k: string) => RISK_LEVELS.find(l => l.key === k) ?? RISK_LEVE
 // Reale DD99+margine = punti raccomandati da Fase 1 (richiedono l'overlay VIX come guardia dinamica prima del live).
 const EVAL_LEVELS = [
   ...RISK_LEVELS.map(l => ({ name: l.name, mc95: l.mc95 })),
-  { name: 'Reale DD99+30%', mc95: 21.3 },
-  { name: 'Reale DD99 nudo', mc95: 30.4 },
+  { name: 'Reale DD99 nudo', mc95: 30.4 }, // 'Reale DD99+30%' e' gia' in RISK_LEVELS (key reale30)
 ]
+// Cap per singola strategia: nessuna oltre questa quota del MC95 aggregato (trim, NO redistribuzione).
+// Evita la concentrazione su una sola strategia (es. magic 3). Tunabile.
+const MAX_SINGLE_SHARE = 0.35
 // fattore di rischio per il cap di correlazione (le US-equity contano come un cluster)
 const RISK_FACTOR = (g: string | null): string => (g === 'INDICI_US' || g === 'SP500' || g === 'GER40') ? 'EQUITY' : (g || 'ALTRO')
 
-// Peso qualita: robustezza (test ret/DD, cap 10) x fattore live.
-// Pesa di piu le strategie robuste E con buoni risultati live, non solo nei test;
-// le 0-live prendono un haircut prudenziale (0.7). Niente Kelly/HRP (scartati dai dati).
-// asIfProven = scenario "a regime": tutte le strategie trattate come live-proven (haircut rimosso).
-// Serve a mostrare la size-obiettivo quando le 0-live matureranno, accanto a quella prudente operativa.
-function qualityWeight(s: Strat, asIfProven = false): number {
-  const robust = Math.min(Number(s.test_ret_dd) || 1, 10)
-  // Fattore live basato sulla versione DEPLOYATA (live_status), non sui real_* aggregati
-  // (es. la magic 6 ha real_* della vecchia versione H1, ma la M15 deployata e 0-live).
-  // proven = track record live consistente; building/none = haircut prudenziale finche non matura.
-  const live = (asIfProven || s.live_status === 'proven') ? 1.15 : 0.7
-  return robust * live
+// Peso di DISTRIBUZIONE = robustezza (test ret/DD, cap 10). Model B (2 lug 2026): il fattore live NON entra
+// piu' nella distribuzione. La PIENA distribuisce il budget per robustezza; la RIDOTTA applica un haircut
+// ASSOLUTO 0,7 alle strategie non-proven SENZA redistribuire (→ totale piu' basso, la provata non si gonfia).
+// Cosi' "Ridotta" e' davvero meno rischio, non "tutto sulla provata". Niente Kelly/HRP (scartati dai dati).
+function robustBase(s: Strat): number {
+  return Math.min(Number(s.test_ret_dd) || 1, 10)
 }
 
 function fmt(n: number | null | undefined, d = 2): string {
@@ -164,32 +160,55 @@ export default function PortfolioBuilderPage() {
   // ---- Sizing istituzionale: budget MC95 = livello% equity, equal-risk tra le selezionate ----
   const ddBudget = levelInfo(level).mc95
   const levelName = levelInfo(level).name
+  // Peso di distribuzione = robustezza × regime (se attivo). Gate regime -> 0 (OFF).
+  const distWeight = (s: Strat): number => {
+    const base = robustBase(s)
+    if (!applyRegime) return base
+    const m = regimeMultiplier(s.strategy_style, regimeBySym.get(s.asset || '') || null)
+    if (s.regime_gated && m < 1) return 0
+    return base * m
+  }
+  // Model B: allocazione robust-share del budget; in Ridotta haircut ASSOLUTO 0,7 alle non-proven (no redistribuzione);
+  // poi cap per singola strategia (trim, no redistribuzione). Ritorna lotti per id. Condiviso da sizing e perLevelLots.
+  const modelBLots = (selected: Strat[], levelPct: number, reduced: boolean): Map<string, number> => {
+    const budgetUsd = (levelPct / 100) * equity
+    const wTot = selected.reduce((a, s) => a + distWeight(s), 0) || 1
+    const prelim = selected.map(s => {
+      const mc95 = Number(s.test_mc95_dd) || 0
+      const w = distWeight(s)
+      const fullLots = (w === 0 || mc95 === 0) ? 0 : Math.max(0.01, Math.round((budgetUsd * w / wTot / mc95) * 100) / 100)
+      const haircut = (reduced && s.live_status !== 'proven') ? 0.7 : 1
+      const lots = w === 0 ? 0 : Math.max(0.01, Math.round((fullLots * haircut) * 100) / 100)
+      return { s, mc95, lots }
+    })
+    const agg = prelim.reduce((a, r) => a + r.lots * r.mc95 / equity * 100, 0)
+    const capPct = MAX_SINGLE_SHARE * agg
+    const out = new Map<string, number>()
+    for (const r of prelim) {
+      let lots = r.lots
+      if (r.mc95 > 0 && capPct > 0 && (lots * r.mc95 / equity * 100) > capPct) {
+        lots = Math.max(0.01, Math.round((capPct / 100 * equity / r.mc95) * 100) / 100)
+      }
+      out.set(r.s.id, lots)
+    }
+    return out
+  }
+
   const sizing = useMemo(() => {
     const selected = strats.filter(s => sel.has(s.id) && (s.test_mc95_dd || 0) > 0)
-    const budgetUsd = (ddBudget / 100) * equity
-    // build(asIfProven): calcola le righe di sizing. false = prudente/operativa (haircut 0.7 alle 0-live);
-    // true = "a regime" (tutte proven), size-obiettivo quando le 0-live matureranno.
-    const build = (asIfProven: boolean) => {
-      const effW = (s: Strat) => {
-        const base = qualityWeight(s, asIfProven)
-        if (!applyRegime) return base
-        const m = regimeMultiplier(s.strategy_style, regimeBySym.get(s.asset || '') || null)
-        if (s.regime_gated && m < 1) return 0 // gated + regime sfavorevole -> OFF (spenta, non ridotta)
-        return base * m
-      }
-      const wTot = selected.reduce((a, s) => a + effW(s), 0) || 1
+    // reduced=true -> Ridotta (operativa prudente); reduced=false -> Piena (a regime)
+    const build = (reduced: boolean) => {
+      const lotsMap = modelBLots(selected, ddBudget, reduced)
       return selected.map(s => {
         const mc95 = Number(s.test_mc95_dd) || 0
-        const w = effW(s)
-        const budgetStrat = budgetUsd * w / wTot
-        const lots = w === 0 ? 0 : Math.max(0.01, Math.round((budgetStrat / mc95) * 100) / 100)
+        const lots = lotsMap.get(s.id) || 0
         const mc95Pct = (lots * mc95 / equity) * 100
         const mae = Number(s.test_max_open_dd) || 0
         const dayFloat = s.direction === 'short' ? 0 : lots * mae
-        return { s, lots, mc95Pct, dayFloat, w }
+        return { s, lots, mc95Pct, dayFloat, w: distWeight(s) }
       })
     }
-    return { rows: build(false), regimeRows: build(true) }
+    return { rows: build(true), regimeRows: build(false) }
   }, [strats, sel, equity, ddBudget, applyRegime, regimeBySym])
 
   // opRows = size OPERATIVA della modalità scelta; cmpRows = l'altra modalità (colonna di confronto).
@@ -273,21 +292,11 @@ export default function PortfolioBuilderPage() {
   }, [btSim, backtestMonthly, ddBudget, worstDayPct, maxTot, maxDay])
 
   // ---- Scheda PDF ricca: backtest combinato delle strategie, scalato ai lotti operativi ----
-  // Lotti per livello (%MC95) nella modalità scelta (asIfProven=full). Condivisa con savePTF per i 3 livelli base.
+  // Lotti per livello (%MC95) nella modalità scelta (Model B: robust-share + haircut assoluto in Ridotta + cap).
+  // asIfProven=true -> Piena (nessun haircut). Condivisa con savePTF per i 3 livelli base.
   function perLevelLots(r: { s: Strat }, levelPct: number, asIfProven: boolean): number {
     const selected = strats.filter(s => sel.has(s.id) && (Number(s.test_mc95_dd) || 0) > 0)
-    const effW = (s: Strat) => {
-      const base = qualityWeight(s, asIfProven)
-      if (!applyRegime) return base
-      const m = regimeMultiplier(s.strategy_style, regimeBySym.get(s.asset || '') || null)
-      if (s.regime_gated && m < 1) return 0
-      return base * m
-    }
-    const w = effW(r.s)
-    if (w === 0) return 0
-    const wTot = selected.reduce((a, s) => a + effW(s), 0) || 1
-    const mc95 = Number(r.s.test_mc95_dd) || 1
-    return Math.max(0.01, Math.round(((levelPct / 100) * equity * w / wTot / mc95) * 100) / 100)
+    return modelBLots(selected, levelPct, !asIfProven).get(r.s.id) ?? 0
   }
   const styleLbl = (st?: string | null) =>
     st === 'seasonal' ? 'Seasonal' : st === 'mean_reversion' ? 'Mean Reversion'
@@ -367,7 +376,7 @@ export default function PortfolioBuilderPage() {
       isPublic: false, badge: 'INTERNO',
       intro: introHtml(levelName),
       groupNote: levelCompareTableHtml(),
-      costNote: false,
+      costNote: false, hideCostAnalysis: true,
     })
     const win = window.open('', '_blank')
     if (!win) { setMsg('Abilita i popup per esportare la scheda.'); return }
@@ -593,7 +602,7 @@ export default function PortfolioBuilderPage() {
           </tbody>
         </table>
       </div>
-      <p className="text-xs text-slate-400">Sizing quality-weighted: budget MC95 = {ddBudget}% equity distribuito per peso qualita (robustezza test ret/DD × fattore live: premia chi ha dato anche dal vivo, haircut 0,7 alle 0-live), non equal-risk. Niente Kelly/HRP (scartati dai dati). Worst-day floating = somma (lotti × MAE) delle long (le US-equity correlate sommano = conservativo). Live deduplicato (un campione per segnale, vista v_signal_trades), include il track record storico 10K/80K.</p>
+      <p className="text-xs text-slate-400">Sizing per <b>robustezza</b> (Model B): budget MC95 = {ddBudget}% equity distribuito per ret/DD test (non equal-risk, niente Kelly/HRP). In <b>Ridotta</b> le non-provate prendono un haircut assoluto 0,7 senza redistribuire (totale più basso, la provata non si gonfia); in <b>Piena</b> tutte a target. Cap per singola strategia al {fmt(MAX_SINGLE_SHARE * 100, 0)}% del MC95 (niente concentrazione). Worst-day floating = somma (lotti × MAE) delle long. Live deduplicato (un campione per segnale), include lo storico 10K/80K.</p>
       <p className="text-xs text-slate-400"><b>Modalità operativa: {modeName}.</b> {sizeMode === 'reduced'
         ? <>La size operativa applica il haircut 0,7 alle strategie senza storico live (building/0-live): finché un edge non ha provato di reggere dal vivo — slippage, regime, costi reali (cfr. magic 12 breakeven live) — non gli si affida capitale pieno. La colonna <b>Piena</b> mostra la size-obiettivo quando matureranno (validazione live → promozione). Il 0,7 premia la prova sul campo e lascia crescere la size <i>man mano che la strategia se la guadagna</i>.</>
         : <>Size PIENA: haircut rimosso, tutte le strategie trattate come validate (size-obiettivo). La colonna <b>Ridotta</b> è la size prudenziale operativa di default. Usare la Piena solo dove la validazione live è sufficiente (vedi Schede Conto: avviso se strategie non ancora validate).</>}
