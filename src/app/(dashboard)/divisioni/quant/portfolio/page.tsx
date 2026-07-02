@@ -88,6 +88,8 @@ export default function PortfolioBuilderPage() {
   // Asse modalità (ortogonale al livello): reduced = haircut 0,7 alle 0-live (operativa prudente);
   // full = tutte trattate come proven (size "a regime"). Salvata per conto in qel_portfolios.size_policy.
   const [sizeMode, setSizeMode] = useState<'reduced' | 'full'>('reduced')
+  // Interessi composti nella scheda: off = additivo su base fissa (prop); on = reinveste (conto reale, size cresce con l'equity).
+  const [compounding, setCompounding] = useState(false)
   const [acctId, setAcctId] = useState('')
   const [ptfName, setPtfName] = useState('')
   const [msg, setMsg] = useState('')
@@ -258,18 +260,29 @@ export default function PortfolioBuilderPage() {
     }
   }, [signals, sizing, sizeMode, equity])
 
-  // ---- Backtest combinato (per la scheda e il confronto livelli): net/mesi dai backtest scalati ai lotti ----
-  // monthlyPct = net / (equity * mesi) * 100, identico al "Rendimento medio mensile" del report body.
-  // NB: diverso dalla sim live-dedup sopra (dominata dalla magic 3, sovrastima); qui e la verita full-book.
+  // ---- Finestra a BOOK PIENO: mese da cui TUTTE le strategie selezionate hanno dati ----
+  // Toglie il "rodaggio" (2021: solo 3-4 strategie su 6) che abbassava la media mensile artificialmente.
+  const fullBookStart = useMemo(() => {
+    const magics = [...new Set(opRows.map(r => r.s.magic).filter((m): m is number => m != null))]
+    let start = ''
+    for (const mag of magics) {
+      let earliest = ''
+      for (const m of backtestMonthly) if (m.magic === mag && (earliest === '' || m.month < earliest)) earliest = m.month
+      if (earliest && (start === '' || earliest > start)) start = earliest
+    }
+    return start
+  }, [opRows, backtestMonthly])
+
+  // ---- Backtest combinato (media mensile REALE = solo finestra book-pieno; il report body la ricalcola sui trade virtuali) ----
   const btSim = useMemo(() => {
     const monthsSet = new Set<string>(); let net = 0
     for (const r of opRows) {
       if (r.s.magic == null) continue
-      for (const m of backtestMonthly) if (m.magic === r.s.magic) { monthsSet.add(m.month); net += m.pl_per_lot * r.lots }
+      for (const m of backtestMonthly) if (m.magic === r.s.magic && m.month >= fullBookStart) { monthsSet.add(m.month); net += m.pl_per_lot * r.lots }
     }
     const months = monthsSet.size || 1
     return { net, months, monthlyPct: net / (equity * months) * 100 }
-  }, [sizing, sizeMode, backtestMonthly, equity])
+  }, [sizing, sizeMode, backtestMonthly, equity, fullBookStart])
 
   // ---- Confronto livelli + valutazione limiti (ddopen daily, MC95 totale). Scalano col budget ----
   // Mensile/annuo dal BACKTEST combinato (btSim), coerente col corpo della scheda; non dalla sim live.
@@ -309,20 +322,28 @@ export default function PortfolioBuilderPage() {
     : /USD(JPY|CAD)|EURUSD/.test(sym) ? 'Forex'
     : /UKOIL|USOIL/.test(sym) ? 'Energia'
     : sym
-  // Un trade virtuale per strategia-per-mese, ai lotti OPERATIVI (modalità scelta): la somma combina il PTF.
+  // Trade virtuali per strategia-per-mese ai lotti operativi. Solo finestra book-pieno (media reale).
+  // Se compounding: i $ di ogni mese scalano col fattore di equity cumulata (reinvestimento, conto reale).
   function buildVirtualTrades(): ReportTrade[] {
-    const out: ReportTrade[] = []
+    const raw: { month: string; pl: number; r: SizeRow }[] = []
     for (const r of opRows) {
       if (r.s.magic == null || r.lots === 0) continue
-      for (const m of backtestMonthly.filter(x => x.magic === r.s.magic)) {
-        out.push({
-          d: m.month + '-15', pl: m.pl_per_lot * r.lots,
-          type: styleLbl(r.s.strategy_style), cls: symCls(r.s.asset || ''),
-          strat: r.s.name, lots: r.lots, sid: String(r.s.magic),
-        })
+      for (const m of backtestMonthly) if (m.magic === r.s.magic && m.month >= fullBookStart) {
+        raw.push({ month: m.month, pl: m.pl_per_lot * r.lots, r })
       }
     }
-    return out
+    const factor = new Map<string, number>()
+    if (compounding) {
+      const monthTot = new Map<string, number>()
+      for (const x of raw) monthTot.set(x.month, (monthTot.get(x.month) || 0) + x.pl)
+      let eq = equity
+      for (const mo of [...monthTot.keys()].sort()) { factor.set(mo, eq / equity); eq += (monthTot.get(mo) || 0) * (eq / equity) }
+    }
+    return raw.map(x => ({
+      d: x.month + '-15', pl: x.pl * (compounding ? (factor.get(x.month) || 1) : 1),
+      type: styleLbl(x.r.s.strategy_style), cls: symCls(x.r.s.asset || ''),
+      strat: x.r.s.name, lots: x.r.lots, sid: String(x.r.s.magic),
+    }))
   }
   // Box intro: composizione (strategie scelte, size operativa della modalità + colonna dell'altra modalità).
   function introHtml(levelName: string): string {
@@ -343,7 +364,8 @@ export default function PortfolioBuilderPage() {
         ? 'Size RIDOTTA: haircut prudenziale (0,7) alle strategie senza storico live consistente — finché un edge non prova di reggere dal vivo (slippage, regime, costi reali) non gli si affida capitale pieno. La colonna "Piena" è la size-obiettivo quando matureranno (promozione a validate).'
         : 'Size PIENA: haircut rimosso, tutte le strategie trattate come validate. La colonna "Ridotta" è la size prudenziale operativa di default. Usare la Piena solo su strategie con validazione live sufficiente.'}</div>`
       : ''
-    return `<b>Sizing ${modeName} · livello ${levelName} — ${ddBudget}% di MC95.</b> Backtest combinato delle strategie selezionate, scalati ai lotti operativi (costi broker reali già inclusi nei trade-list). <b>Composizione del portafoglio:</b>${table}${modeNote}`
+    const windowNote = `<div style="margin-top:6px;font-size:10.5px;color:#64748b">Media mensile calcolata sulla <b>finestra a book pieno</b> (da ${fullBookStart || '—'}, quando tutte le strategie selezionate sono attive): esclude il rodaggio iniziale che abbassava la media. ${compounding ? '<b>Interessi composti ON</b>: i rendimenti reinvestono e la size cresce con l\'equity (conto reale).' : '<b>Interessi composti OFF</b>: additivo su base fissa (prop: pagato sul profitto, size fissa).'}</div>`
+    return `<b>Sizing ${modeName} · livello ${levelName} — ${ddBudget}% di MC95${compounding ? ' · composti' : ''}.</b> Backtest combinato delle strategie selezionate, scalati ai lotti operativi (costi broker reali già inclusi nei trade-list). <b>Composizione del portafoglio:</b>${table}${modeNote}${windowNote}`
   }
   // Tabella 5-livelli (riuso della memo levelCompare) + spiegazione probabilità-DD (aritmetico/reale/storico).
   function levelCompareTableHtml(): string {
@@ -555,6 +577,7 @@ export default function PortfolioBuilderPage() {
         <button onClick={savePTF} className="px-4 py-1.5 text-sm rounded-lg bg-blue-600 text-white hover:bg-blue-700">Salva PTF</button>
         <button onClick={exportConfig} className="px-4 py-1.5 text-sm rounded-lg border border-slate-300 text-slate-700 hover:bg-slate-50">Esporta file</button>
         <div className="flex items-center gap-1 ml-auto">
+          <button onClick={() => setCompounding(c => !c)} title="Interessi composti nella scheda: OFF = additivo (prop) · ON = reinveste, size cresce con l'equity (conto reale)" className={`px-3 py-1.5 text-sm rounded-lg border ${compounding ? 'bg-emerald-600 text-white border-emerald-600' : 'border-slate-300 text-slate-600 hover:bg-slate-50'}`}>Composti: {compounding ? 'ON' : 'OFF'}</button>
           <select value={level} onChange={e => setLevel(e.target.value as Level)} className="border border-slate-300 rounded-lg px-2 py-1.5 text-sm" title="Livello rischio (guida size in tabella e scheda)">
             {RISK_LEVELS.map(l => <option key={l.key} value={l.key}>{l.name} ({l.mc95}%)</option>)}
           </select>
