@@ -33,6 +33,7 @@ export interface ReportOptions {
   intro?: string           // box introduttivo (HTML semplice)
   groupNote?: string       // nota finale firmata
   costNote?: boolean       // includi nota CFD -> futures
+  hideCostAnalysis?: boolean // backtest: i costi sono gia' nel P/L -> nascondi la tabella "lordo/pre-costi"
 }
 
 // ---- helpers numerici ----
@@ -323,7 +324,9 @@ ${phaseHtml}
 ${sizingHtml}
 <div class="grid2"><div><div class="sec">Per Tipologia</div><table><thead><tr><th>Tipologia</th><th class="r">Oper.</th><th class="r">Win%</th><th class="r">Contributo</th><th class="r">Quota</th></tr></thead><tbody>${allocRows(group('type'), true)}</tbody></table></div><div><div class="sec">Per Classe di Asset</div><table><thead><tr><th>Classe</th><th class="r">Oper.</th><th class="r">Win%</th><th class="r">Contributo</th><th class="r">Quota</th></tr></thead><tbody>${allocRows(group('cls'), false)}</tbody></table></div></div>
 ${stratSection}
-<div class="sec">Analisi Costi di Transazione</div><table>${costHtml}</table>
+${o.hideCostAnalysis
+    ? `<div class="sec">Costi di Transazione</div><div class="note">P/L al <b>netto dei costi reali FTMO</b> (spread e commissioni): sono gia' inclusi nei backtest a 1 lotto. Nessuna voce lordo/pre-costi: il netto e' ${fmt(net)}.</div>`
+    : `<div class="sec">Analisi Costi di Transazione</div><table>${costHtml}</table>`}
 ${costNoteHtml}
 <div class="sec">Metodologia &amp; Gestione del Rischio</div><div class="method">${methodTxt}</div>
 ${o.groupNote ? `<div class="sec">Una nota</div><div class="note">${o.groupNote}</div>` : ''}
