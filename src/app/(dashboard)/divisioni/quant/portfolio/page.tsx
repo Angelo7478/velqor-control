@@ -403,7 +403,7 @@ export default function PortfolioBuilderPage() {
       intro: introHtml(levelName),
       groupNote: levelCompareTableHtml(),
       costNote: false, hideCostAnalysis: true,
-      sampleNoun: 'mese',
+      sampleNoun: 'mese', glossary: true,
     })
     const win = window.open('', '_blank')
     if (!win) { setMsg('Abilita i popup per esportare la scheda.'); return }
