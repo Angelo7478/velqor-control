@@ -2,6 +2,8 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import { createClient } from '@/lib/supabase-browser'
+import { withTimeout } from '@/lib/utils'
+import { useToast } from '@/components/ui/Toast'
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts'
 import { detectMarketRegimes4Q, regimeMultiplier, REGIME_4Q_LABELS, type MarketRegime4Q } from '@/lib/quant-utils'
 import { buildReportHtml, type ReportTrade } from '@/lib/quant-report'
@@ -93,6 +95,8 @@ export default function PortfolioBuilderPage() {
   const [acctId, setAcctId] = useState('')
   const [ptfName, setPtfName] = useState('')
   const [msg, setMsg] = useState('')
+  const [saving, setSaving] = useState(false)
+  const { showToast, toastNode } = useToast()
   const [loading, setLoading] = useState(true)
   const [regimeBySym, setRegimeBySym] = useState<Map<string, MarketRegime4Q>>(new Map())
   const [applyRegime, setApplyRegime] = useState(false)
@@ -428,18 +432,25 @@ export default function PortfolioBuilderPage() {
   // ---- Salva PTF (qel_portfolios + composizione coi 3 livelli, modalità piena/ridotta) ----
   async function savePTF() {
     if (opRows.length === 0 || !ptfName.trim()) { setMsg('Dai un nome e seleziona almeno una strategia'); return }
+    if (saving) return
+    setSaving(true)
     setMsg('Salvataggio…')
     const supabase = createClient()
-    const asIfProven = sizeMode === 'full'
-    const redById = new Map(sizing.rows.map(r => [r.s.id, r.lots]))
-    const fullById = new Map(sizing.regimeRows.map(r => [r.s.id, r.lots]))
-    const orgId = acct ? (await supabase.from('qel_accounts').select('org_id').eq('id', acct.id).single()).data?.org_id
-      : (await supabase.from('qel_strategies').select('org_id').limit(1).single()).data?.org_id
-    const { data: ptf } = await supabase.from('qel_portfolios').insert({
-      org_id: orgId, account_id: acctId || null, name: ptfName.trim(), sizing_mode: 'risk_budget', size_policy: sizeMode,
-      equity_base: equity, max_dd_target_pct: ddBudget, daily_dd_limit_pct: maxDay, safety_factor: 1.0, is_active: true,
-    }).select('id').single()
-    if (ptf) {
+    try {
+      const asIfProven = sizeMode === 'full'
+      const redById = new Map(sizing.rows.map(r => [r.s.id, r.lots]))
+      const fullById = new Map(sizing.regimeRows.map(r => [r.s.id, r.lots]))
+      const orgRes = acct
+        ? await withTimeout(supabase.from('qel_accounts').select('org_id').eq('id', acct.id).single(), 10000, 'Lettura org del conto')
+        : await withTimeout(supabase.from('qel_strategies').select('org_id').limit(1).single(), 10000, 'Lettura org')
+      if (orgRes.error) throw new Error(`lettura org_id: ${orgRes.error.message}`)
+      const orgId = orgRes.data?.org_id
+      if (!orgId) throw new Error('org_id non trovato (conto/strategie senza org)')
+      const { data: ptf, error: ptfErr } = await withTimeout(supabase.from('qel_portfolios').insert({
+        org_id: orgId, account_id: acctId || null, name: ptfName.trim(), sizing_mode: 'risk_budget', size_policy: sizeMode,
+        equity_base: equity, max_dd_target_pct: ddBudget, daily_dd_limit_pct: maxDay, safety_factor: 1.0, is_active: true,
+      }).select('id').single(), 10000, 'Insert portafoglio')
+      if (ptfErr || !ptf) throw new Error(`insert qel_portfolios: ${ptfErr?.message || 'nessuna riga restituita'}`)
       // 3 lotti base (3,5/6/9%) nella modalità scelta; final_lots = livello selezionato; target_lots = entrambe le modalità
       const rows = opRows.map(r => ({
         portfolio_id: ptf.id, strategy_id: r.s.id, is_active: true, active_level: level,
@@ -447,11 +458,23 @@ export default function PortfolioBuilderPage() {
         final_lots: r.lots, lot_suggested: r.lots, dd_budget_allocation_pct: Number(r.mc95Pct.toFixed(2)),
         target_lots: { reduced: redById.get(r.s.id) ?? null, full: fullById.get(r.s.id) ?? null },
       }))
-      await supabase.from('qel_portfolio_strategies').insert(rows)
+      const { error: rowsErr } = await withTimeout(supabase.from('qel_portfolio_strategies').insert(rows), 10000, 'Insert strategie')
+      if (rowsErr) {
+        // niente PTF orfano senza composizione: cleanup best-effort prima di mostrare l'errore
+        await withTimeout(supabase.from('qel_portfolios').delete().eq('id', ptf.id), 10000, 'Cleanup').catch(() => null)
+        throw new Error(`insert qel_portfolio_strategies: ${rowsErr.message}`)
+      }
       const overWarn = aggMc95 > maxTot ? ` ⚠ MC95 aggregato ${fmt(aggMc95, 1)}% oltre il limite ${fmt(maxTot, 0)}% del conto` : ''
       setMsg(`Salvato "${ptfName}" (${rows.length} strategie, ${modeName}, livello ${levelName})${overWarn}`)
+      showToast('success', `PTF "${ptfName.trim()}" salvato (${rows.length} strategie)`)
       setPtfName('')
-    } else setMsg('Errore salvataggio')
+    } catch (e) {
+      const m = e instanceof Error ? e.message : String(e)
+      setMsg(`Errore salvataggio — ${m}`)
+      showToast('error', `Errore salvataggio PTF — ${m}`)
+    } finally {
+      setSaving(false)
+    }
   }
 
   if (loading) return <div className="text-slate-500 p-4">Caricamento…</div>
@@ -579,7 +602,7 @@ export default function PortfolioBuilderPage() {
       {/* Azioni */}
       <div className="flex flex-wrap items-center gap-3 bg-white border border-slate-200 rounded-xl p-4">
         <input value={ptfName} onChange={e => setPtfName(e.target.value)} placeholder="Nome PTF" className="border border-slate-300 rounded-lg px-3 py-1.5 text-sm" />
-        <button onClick={savePTF} className="px-4 py-1.5 text-sm rounded-lg bg-blue-600 text-white hover:bg-blue-700">Salva PTF</button>
+        <button onClick={savePTF} disabled={saving} className="px-4 py-1.5 text-sm rounded-lg bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed">{saving ? 'Salvataggio…' : 'Salva PTF'}</button>
         <button onClick={exportConfig} className="px-4 py-1.5 text-sm rounded-lg border border-slate-300 text-slate-700 hover:bg-slate-50">Esporta file</button>
         <div className="flex items-center gap-1 ml-auto">
           <button onClick={() => setCompounding(c => !c)} title="Interessi composti nella scheda: OFF = additivo (prop) · ON = reinveste, size cresce con l'equity (conto reale)" className={`px-3 py-1.5 text-sm rounded-lg border ${compounding ? 'bg-emerald-600 text-white border-emerald-600' : 'border-slate-300 text-slate-600 hover:bg-slate-50'}`}>Composti: {compounding ? 'ON' : 'OFF'}</button>
@@ -588,7 +611,7 @@ export default function PortfolioBuilderPage() {
           </select>
           <button onClick={() => exportScheda()} className="px-4 py-1.5 text-sm rounded-lg bg-violet-600 text-white hover:bg-violet-700">Scheda PDF</button>
         </div>
-        {msg && <span className="text-sm text-slate-500 w-full">{msg}</span>}
+        {msg && <span className={`text-sm w-full ${msg.startsWith('Errore') ? 'text-red-600' : 'text-slate-500'}`}>{msg}</span>}
       </div>
 
       {/* Tabella */}
@@ -635,6 +658,7 @@ export default function PortfolioBuilderPage() {
         ? <>La size operativa applica il haircut 0,7 alle strategie senza storico live (building/0-live): finché un edge non ha provato di reggere dal vivo — slippage, regime, costi reali (cfr. magic 12 breakeven live) — non gli si affida capitale pieno. La colonna <b>Piena</b> mostra la size-obiettivo quando matureranno (validazione live → promozione). Il 0,7 premia la prova sul campo e lascia crescere la size <i>man mano che la strategia se la guadagna</i>.</>
         : <>Size PIENA: haircut rimosso, tutte le strategie trattate come validate (size-obiettivo). La colonna <b>Ridotta</b> è la size prudenziale operativa di default. Usare la Piena solo dove la validazione live è sufficiente (vedi Schede Conto: avviso se strategie non ancora validate).</>}
         {' '}La scelta si salva col PTF (<b>size_policy</b>) e si aggancia al conto. Sistema di sizing invariato: cambia quale delle due size è operativa.</p>
+      {toastNode}
     </div>
   )
 }
