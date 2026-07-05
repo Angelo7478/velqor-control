@@ -6,6 +6,7 @@ import { QelStrategy, QelPortfolio, QelAccount } from '@/types/database'
 import {
   fmt, fmtUsd, fmtPct, plColor, groupColor, styleColor, styleLabel,
   fitnessColor, calcHealthReport, HealthReport,
+  detectMarketRegimes4Q, REGIME_COHERENCE, REGIME_4Q_LABELS, type MarketRegime4Q,
 } from '@/lib/quant-utils'
 import QuantNav from '../quant-nav'
 import InfoTooltip from '@/components/ui/InfoTooltip'
@@ -40,12 +41,19 @@ const FLAG_IT: Record<string, { label: string; color: string }> = {
   early_stage:         { label: '🕐 Fase iniziale',                 color: 'bg-slate-50 text-slate-500' },
 }
 
-// Extended report with per-account performance
+// Extended report with per-account performance + contesto (composizione, regime, globale per-lotto)
 interface HealthCardData extends HealthReport {
   recentWinPct: number | null
   avgTrade: number | null
   totalTrades: number
   totalPnl: number
+  inPtf: boolean                     // e nella composizione ATTUALE del conto?
+  deployMagic: number | null
+  regimeLabel: string | null         // regime 4Q corrente del sottostante
+  regimeTone: 'fav' | 'unfav' | 'neu' | null
+  gatedOff: boolean                  // regime_gated + regime sfavorevole -> dovrebbe essere OFF
+  globalTrades: number | null        // campione live GLOBALE dedup (tutti i conti)
+  globalAvgLot: number | null        // avg $/lotto globale — la verita statistica
 }
 
 export default function HealthPage() {
@@ -72,10 +80,34 @@ export default function HealthPage() {
     const supabase = createClient()
     const accountId = selectedAccountId
 
-    const [stratRes, perfRes] = await Promise.all([
+    const [stratRes, perfRes, pfRes] = await Promise.all([
       supabase.from('qel_strategies').select('*').in('status', ['active', 'paused']).order('magic'),
       supabase.from('v_strategy_recent_performance').select('*').eq('account_id', accountId),
+      supabase.from('qel_portfolios').select('id').eq('account_id', accountId),
     ])
+
+    // Composizione ATTUALE del conto: strategie in portafoglio + magic di deploy
+    const ptfIds = ((pfRes.data as { id: string }[]) || []).map(p => p.id)
+    const inPtfMap = new Map<string, number | null>()
+    if (ptfIds.length) {
+      const { data: comp } = await supabase.from('qel_portfolio_strategies')
+        .select('strategy_id, deploy_magic, is_active').in('portfolio_id', ptfIds)
+      for (const c of ((comp as { strategy_id: string; deploy_magic: number | null; is_active: boolean | null }[]) || [])) {
+        if (c.is_active !== false) inPtfMap.set(c.strategy_id, c.deploy_magic)
+      }
+    }
+
+    // Regime 4Q corrente per sottostante (stesso pattern del Builder)
+    const symbols = [...new Set(((stratRes.data as QelStrategy[]) || []).map(s => s.asset).filter(Boolean) as string[])]
+    const bRes = await Promise.all(symbols.map(sym =>
+      supabase.from('qel_benchmarks').select('symbol,ts,high,low,close_price').eq('symbol', sym).order('ts', { ascending: false }).limit(220)
+    ))
+    const regimeBySym = new Map<string, MarketRegime4Q>()
+    bRes.forEach((r, i) => {
+      const pts = (((r.data as { ts: string; high: number | null; low: number | null; close_price: number }[]) || [])).slice().reverse()
+      const zones = detectMarketRegimes4Q(pts)
+      if (zones.length) regimeBySym.set(symbols[i], zones[zones.length - 1].regime)
+    })
 
     const { data: equityCurve } = await supabase
       .from('v_strategy_equity_curve')
@@ -161,12 +193,25 @@ export default function HealthPage() {
           totalTrades: perf?.totalTrades ?? 0,
         })
 
+        // Contesto regime: stile della strategia vs regime corrente del suo sottostante
+        const sx = s as unknown as { asset?: string | null; strategy_style?: string | null; regime_gated?: boolean | null; real_trades?: number | null; real_avg_per_lot?: number | null }
+        const reg = sx.asset ? regimeBySym.get(sx.asset) ?? null : null
+        const coh = REGIME_COHERENCE[sx.strategy_style || 'hybrid'] || REGIME_COHERENCE.hybrid
+        const tone: 'fav' | 'unfav' | 'neu' | null = !reg ? null : coh.favorable.includes(reg) ? 'fav' : coh.unfavorable.includes(reg) ? 'unfav' : 'neu'
+
         return {
           ...report,
           recentWinPct: perf?.recentWinPct ?? null,
           avgTrade: perf?.avgTrade ?? null,
           totalTrades: perf?.totalTrades ?? 0,
           totalPnl: perf?.totalPnl ?? 0,
+          inPtf: inPtfMap.has(s.id),
+          deployMagic: inPtfMap.get(s.id) ?? null,
+          regimeLabel: reg ? (REGIME_4Q_LABELS[reg] || reg) : null,
+          regimeTone: tone,
+          gatedOff: Boolean(sx.regime_gated) && tone === 'unfav',
+          globalTrades: sx.real_trades ?? null,
+          globalAvgLot: sx.real_avg_per_lot != null ? Number(sx.real_avg_per_lot) : null,
         }
       })
 
@@ -178,14 +223,18 @@ export default function HealthPage() {
 
   if (loading) return <div className="p-8 text-slate-500">Caricamento...</div>
 
-  const healthy = cards.filter(r => r.healthStatus === 'healthy').length
-  const warning = cards.filter(r => r.healthStatus === 'warning').length
-  const critical = cards.filter(r => r.healthStatus === 'critical').length
-  const regime = cards.filter(r => r.healthStatus === 'regime_mismatch').length
-  const early = cards.filter(r => r.healthStatus === 'insufficient_data').length
+  // I conteggi valutano solo la composizione ATTUALE; le rimosse vanno in coda come storico
+  const ptfCards = cards.filter(r => r.inPtf)
+  const outCards = cards.filter(r => !r.inPtf)
+  const healthy = ptfCards.filter(r => r.healthStatus === 'healthy').length
+  const warning = ptfCards.filter(r => r.healthStatus === 'warning').length
+  const critical = ptfCards.filter(r => r.healthStatus === 'critical').length
+  const regime = ptfCards.filter(r => r.healthStatus === 'regime_mismatch').length
+  const early = ptfCards.filter(r => r.healthStatus === 'insufficient_data').length
 
   const sortOrder: Record<string, number> = { critical: 0, warning: 1, regime_mismatch: 2, healthy: 3, insufficient_data: 4 }
-  const sorted = [...cards].sort((a, b) => (sortOrder[a.healthStatus] ?? 5) - (sortOrder[b.healthStatus] ?? 5))
+  const bySeverity = (a: HealthCardData, b: HealthCardData) => (sortOrder[a.healthStatus] ?? 5) - (sortOrder[b.healthStatus] ?? 5)
+  const sorted = [...ptfCards.sort(bySeverity), ...outCards.sort(bySeverity)]
 
   return (
     <div className="p-4 sm:p-6 space-y-4">
@@ -243,9 +292,13 @@ function SummaryBox({ emoji, count, label, border, color }: { emoji: string; cou
 function StrategyCard({ card }: { card: HealthCardData }) {
   const cfg = STATUS_IT[card.healthStatus] || STATUS_IT.healthy
   const pdl = PENDULUM_IT[card.pendulumState] || PENDULUM_IT.base
+  // Contesto globale: il campione locale del conto puo ingannare (finestra favorevole
+  // su size grande != edge). La verita statistica e il dedup per-lotto su tutti i conti.
+  const thinGlobal = card.globalAvgLot != null && card.globalTrades != null && card.globalTrades >= 60 && Math.abs(card.globalAvgLot) < 25
+  const smallLocal = card.totalTrades > 0 && card.totalTrades < 30 && card.globalTrades != null && card.globalTrades > card.totalTrades
 
   return (
-    <div className={`bg-white rounded-xl border ${cfg.border} p-4`}>
+    <div className={`bg-white rounded-xl border ${cfg.border} p-4 ${!card.inPtf ? 'opacity-70' : ''}`}>
       {/* Riga superiore: nome + stato + pendulum */}
       <div className="flex items-start justify-between">
         <div className="flex items-center gap-3">
@@ -265,14 +318,27 @@ function StrategyCard({ card }: { card: HealthCardData }) {
             </span>
           </div>
           <div>
-            <div className="font-semibold text-slate-800">M{card.magic} — {card.name}</div>
-            <div className="flex items-center gap-2 mt-0.5">
+            <div className="font-semibold text-slate-800">M{card.magic} — {card.name}
+              {card.inPtf && card.deployMagic != null && card.deployMagic !== card.magic && <span className="ml-1 text-[10px] font-mono text-slate-400">deploy {card.deployMagic}</span>}
+            </div>
+            <div className="flex items-center gap-2 mt-0.5 flex-wrap">
               <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${styleColor(card.family?.includes('RSI2') ? 'mean_reversion' : card.family?.includes('TREND') ? 'trend_following' : 'seasonal')}`}>
                 {card.family || '—'}
               </span>
               <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-medium ${cfg.bg} ${cfg.color}`}>
                 {cfg.emoji} {cfg.label}
               </span>
+              {!card.inPtf && (
+                <span className="text-[10px] px-1.5 py-0.5 rounded-full font-semibold bg-slate-200 text-slate-600" title="Ha trade storici su questo conto ma non è nella composizione attuale del portafoglio: solo storico, non operativa.">
+                  ⛔ FUORI DAL PORTAFOGLIO
+                </span>
+              )}
+              {card.regimeLabel && (
+                <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-medium ${card.regimeTone === 'fav' ? 'bg-green-50 text-green-700' : card.regimeTone === 'unfav' ? 'bg-red-50 text-red-600' : 'bg-slate-100 text-slate-500'}`}
+                  title="Regime 4Q corrente del sottostante vs lo stile della strategia (REGIME_COHERENCE)">
+                  Regime: {card.regimeLabel} · {card.regimeTone === 'fav' ? 'favorevole' : card.regimeTone === 'unfav' ? 'CONTRO' : 'neutro'}{card.gatedOff ? ' → GATED (dovrebbe essere OFF)' : ''}
+                </span>
+              )}
             </div>
           </div>
         </div>
@@ -338,12 +404,24 @@ function StrategyCard({ card }: { card: HealthCardData }) {
         </div>
       )}
 
+      {/* Contesto globale per-lotto: la verita statistica oltre la finestra locale */}
+      {card.globalTrades != null && card.globalTrades > 0 && (
+        <div className={`mt-3 px-3 py-2 rounded-lg text-[11px] flex items-start gap-2 ${thinGlobal || smallLocal ? 'bg-amber-50 text-amber-800' : 'bg-slate-50 text-slate-500'}`}>
+          <span className="mt-0.5">🌐</span>
+          <div>
+            <span className="font-medium">Campione globale (tutti i conti, dedup, per-lotto): {card.globalTrades} trade · {card.globalAvgLot != null ? `${fmtUsd(card.globalAvgLot, 2)}/lotto medio` : 'avg n/d'}.</span>
+            {thinGlobal && <span> ⚠ Edge per-lotto SOTTILE sul campione lungo: la finestra positiva di questo conto (size grande × periodo favorevole) non è l&apos;edge — giudicare sul globale.</span>}
+            {!thinGlobal && smallLocal && <span> Campione locale piccolo ({card.totalTrades} trade): il giudizio affidabile è quello globale.</span>}
+          </div>
+        </div>
+      )}
+
       {/* Raccomandazione */}
       <div className={`mt-3 px-3 py-2 ${cfg.bg} rounded-lg text-sm ${cfg.color} flex items-start gap-2`}>
         <span className="text-base mt-0.5">{cfg.emoji}</span>
         <div>
-          <div className="font-medium">{card.recommendation}</div>
-          <div className="text-[11px] opacity-75 mt-0.5">{cfg.desc}</div>
+          <div className="font-medium">{!card.inPtf ? 'Fuori dalla composizione attuale del conto: card mostrata solo come storico.' : card.recommendation}</div>
+          <div className="text-[11px] opacity-75 mt-0.5">{!card.inPtf ? 'Rimossa nella riconfigurazione del portafoglio. I trade passati restano attribuiti.' : cfg.desc}</div>
         </div>
       </div>
     </div>
