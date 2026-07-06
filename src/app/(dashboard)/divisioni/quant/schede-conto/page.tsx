@@ -31,6 +31,7 @@ type Strategy = {
   real_trades: number | null
   real_profit_factor: number | null
   validation_target_trades: number | null
+  validation_baseline_trades: number | null
 }
 
 type PortStrat = {
@@ -67,14 +68,17 @@ const LEVEL_LABEL: Record<string, string> = { conservative: 'Conservativo', neut
 const PF_FLOOR = 1.2 // PF live minimo per considerare una strategia "validata dai dati" (MASTER sez. 6.15)
 
 // Stato validazione live di una strategia: progresso trade vs obiettivo + gate PF.
+// I trade di VERSIONI PRECEDENTI (validation_baseline_trades) restano nelle statistiche
+// ma non contano per la validazione della versione deployata (caso magic 6 H1 -> M15).
 function validationOf(s: Strategy | null) {
   if (!s) return null
   const target = s.validation_target_trades ?? 40
-  const trades = s.real_trades ?? 0
-  const pf = s.real_profit_factor
+  const baseline = s.validation_baseline_trades ?? 0
+  const trades = Math.max(0, (s.real_trades ?? 0) - baseline)
+  const pf = s.real_profit_factor // NB: con baseline > 0 il PF resta misto vecchia+nuova finche la nuova non domina il campione
   const pct = target > 0 ? Math.min(100, (trades / target) * 100) : 0
   const byData = trades >= target && pf != null && pf >= PF_FLOOR
-  return { target, trades, pf, pct, byData, proven: s.live_status === 'proven' }
+  return { target, trades, pf, pct, byData, proven: s.live_status === 'proven', baseline }
 }
 
 function fmt(n: number | null | undefined, d = 2): string {
@@ -97,7 +101,7 @@ export default function SchedeContoPage() {
     const [accRes, pfRes, psRes, llRes, varRes] = await Promise.all([
       supabase.from('qel_accounts').select('id,name,login,server,account_size,currency,status,challenge_phase,max_daily_loss_pct,max_total_loss_pct,vps_name').neq('status', 'inactive').neq('status', 'breached').order('account_size', { ascending: false }),
       supabase.from('qel_portfolios').select('id,account_id,name,max_dd_target_pct,daily_dd_limit_pct,size_policy'),
-      supabase.from('qel_portfolio_strategies').select('id,portfolio_id,is_active,active_level,lot_conservative,lot_neutral,lot_aggressive,final_lots,dd_budget_allocation_pct,sizing_notes,target_lots,lots_applied,variant_id,deploy_magic,qel_strategies(id,magic,name,asset_group,direction,strategy_style,parameters,test_mc95_dd,test_max_open_dd,live_status,real_trades,real_profit_factor,validation_target_trades)'),
+      supabase.from('qel_portfolio_strategies').select('id,portfolio_id,is_active,active_level,lot_conservative,lot_neutral,lot_aggressive,final_lots,dd_budget_allocation_pct,sizing_notes,target_lots,lots_applied,variant_id,deploy_magic,qel_strategies(id,magic,name,asset_group,direction,strategy_style,parameters,test_mc95_dd,test_max_open_dd,live_status,real_trades,real_profit_factor,validation_target_trades,validation_baseline_trades)'),
       supabase.from('v_account_strategy_live_lot').select('account_id,base_magic,last_lot'),
       supabase.from('qel_strategy_variants').select('id,base_magic,variant_label'),
     ])
@@ -281,7 +285,7 @@ export default function SchedeContoPage() {
                               {v && !v.proven && (
                                 <div className="mt-1 flex items-center gap-2">
                                   <div className="h-1.5 w-24 rounded bg-slate-100 overflow-hidden"><div className={`h-full ${v.byData ? 'bg-amber-500' : 'bg-slate-400'}`} style={{ width: `${v.pct}%` }} /></div>
-                                  <span className="text-[10px] text-slate-400">{v.trades}/{v.target} trade{v.pf != null ? ` · PF ${fmt(v.pf, 2)}` : ' · no PF'}</span>
+                                  <span className="text-[10px] text-slate-400">{v.trades}/{v.target} trade{v.baseline > 0 ? ` (da 0, ${v.baseline} della versione precedente esclusi)` : ''}{v.pf != null ? ` · PF ${fmt(v.pf, 2)}` : ' · no PF'}</span>
                                 </div>
                               )}
                               <div className="text-xs text-slate-400">{s?.parameters}</div>
