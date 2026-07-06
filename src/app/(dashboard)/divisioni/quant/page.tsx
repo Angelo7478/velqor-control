@@ -17,6 +17,7 @@ import {
 } from 'recharts'
 import AccountDashboard from './account-dashboard'
 import InfoTooltip from '@/components/ui/InfoTooltip'
+import VixGuardBanner from '@/components/quant/VixGuardBanner'
 import { VELQOR_LOGO_BASE64 } from '@/lib/velqor-logo'
 
 type Tab = 'overview' | 'strategies' | 'accounts'
@@ -742,6 +743,8 @@ export default function QuantPage() {
       {/* ===== OVERVIEW ===== */}
       {tab === 'overview' && (
         <div className="space-y-6">
+          {/* Guardia crash VIX (advisory — stesso banner del Builder) */}
+          <VixGuardBanner />
           {/* KPI row 1: Money */}
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
             <div className="bg-white rounded-xl border border-slate-200 p-4">

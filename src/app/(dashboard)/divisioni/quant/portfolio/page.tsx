@@ -5,6 +5,7 @@ import { createClient } from '@/lib/supabase-browser'
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts'
 import { detectMarketRegimes4Q, regimeMultiplier, REGIME_4Q_LABELS, type MarketRegime4Q } from '@/lib/quant-utils'
 import { buildReportHtml, type ReportTrade } from '@/lib/quant-report'
+import VixGuardBanner from '@/components/quant/VixGuardBanner'
 
 type Strat = {
   id: string; magic: number | null; name: string; asset: string | null; asset_group: string | null
@@ -38,15 +39,7 @@ const RISK_LEVELS = [
   { key: 'reale30', name: 'Reale DD99+30%', mc95: 21.3 },
 ] as const
 
-// Overlay VIX term structure (soglie DERIVATE dal backtest, PTF_SIM/vix_overlay.py). ratio = ^VIX/^VIX3M.
-// Advisory: dial suggerito sul cluster LONG (short tenuti pieni). Azione MANUALE (Angelo spegne gli EA a mano).
-function vixState(ratio: number | null): { label: string; longDial: number; color: string; cadence: string } {
-  if (ratio == null) return { label: 'n/d', longDial: 1, color: 'slate', cadence: '—' }
-  if (ratio >= 1.03) return { label: 'STRESS (backwardation)', longDial: 0, color: 'red', cadence: 'intraday' }
-  if (ratio >= 0.98) return { label: 'Allarme alto', longDial: 0.33, color: 'orange', cadence: 'giornaliera' }
-  if (ratio >= 0.97) return { label: 'Allarme', longDial: 0.66, color: 'amber', cadence: 'ogni 2 giorni' }
-  return { label: 'Contango (calma)', longDial: 1, color: 'green', cadence: 'settimanale' }
-}
+// Overlay VIX term structure: logica e banner spostati in @/components/quant/VixGuardBanner (condiviso con la Overview).
 type Level = typeof RISK_LEVELS[number]['key']
 const levelInfo = (k: string) => RISK_LEVELS.find(l => l.key === k) ?? RISK_LEVELS[1]
 // Tabella di valutazione: i 5 livelli + i punti REALISTICI (sizing sul DD reale, non sull'aritmetico).
@@ -81,7 +74,6 @@ export default function PortfolioBuilderPage() {
   const [backtestMonthly, setBacktestMonthly] = useState<BtMonth[]>([])
   const [acctComp, setAcctComp] = useState<Map<string, Set<string>>>(new Map())
   const [acctPolicy, setAcctPolicy] = useState<Map<string, 'reduced' | 'full'>>(new Map())
-  const [vix, setVix] = useState<{ ratio: number; ts: string; vix: number; vix3m: number } | null>(null)
   const [sel, setSel] = useState<Set<string>>(new Set())
   const [equity, setEquity] = useState(100000)
   const [level, setLevel] = useState<Level>('neutral')
@@ -116,10 +108,6 @@ export default function PortfolioBuilderPage() {
     setAccounts((aRes.data as Account[]) || [])
     setSignals((sigRes.data as Signal[]) || [])
     setBacktestMonthly((btmRes.data as BtMonth[]) || [])
-    // VIX term structure (advisory overlay): ultima riga
-    const vRes = await supabase.from('qel_vix_term').select('ts,vix,vix3m,ratio').order('ts', { ascending: false }).limit(1)
-    const vr = ((vRes.data as { ts: string; vix: number; vix3m: number; ratio: number }[]) || [])[0]
-    if (vr) setVix({ ratio: Number(vr.ratio), ts: vr.ts, vix: Number(vr.vix), vix3m: Number(vr.vix3m) })
     // composizione salvata per conto (per caricarla quando si seleziona il conto)
     const pfAcc = new Map<string, string>()
     const pol = new Map<string, 'reduced' | 'full'>()
@@ -489,20 +477,8 @@ export default function PortfolioBuilderPage() {
         </div>
       </div>
 
-      {/* Overlay VIX term structure (advisory — azione manuale) */}
-      {vix && (() => {
-        const vs = vixState(vix.ratio)
-        const c = { green: 'bg-green-50 border-green-200 text-green-800', amber: 'bg-amber-50 border-amber-200 text-amber-800', orange: 'bg-orange-50 border-orange-200 text-orange-800', red: 'bg-red-50 border-red-300 text-red-800', slate: 'bg-slate-50 border-slate-200 text-slate-600' }[vs.color]
-        return (
-          <div className={`flex flex-wrap items-center gap-x-6 gap-y-1 border rounded-xl p-3 text-sm ${c}`}>
-            <span className="font-semibold">Guardia crash VIX: {vs.label}</span>
-            <span>ratio ^VIX/^VIX3M <b>{fmt(vix.ratio, 3)}</b> <span className="text-xs opacity-70">(VIX {fmt(vix.vix, 1)} / VIX3M {fmt(vix.vix3m, 1)})</span></span>
-            <span>Size LONG suggerita <b>{(vs.longDial * 100).toFixed(0)}%</b> <span className="text-xs opacity-70">(short pieni)</span></span>
-            <span className="text-xs opacity-70">controllo {vs.cadence} · ultimo dato {vix.ts}</span>
-            {vs.longDial < 1 && <span className="text-xs font-medium">⚠ Backwardation: valuta di ridurre/spegnere i LONG a mano (gli short guadagnano nei selloff)</span>}
-          </div>
-        )
-      })()}
+      {/* Overlay VIX term structure (advisory — azione manuale). Banner condiviso con la Overview. */}
+      <VixGuardBanner />
 
       {/* Regime di mercato (analisi mensile) */}
       {regimeBySym.size > 0 && (
