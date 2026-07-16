@@ -6,6 +6,9 @@ import { cn } from '@/lib/utils'
 import { useUI } from '@/stores/ui'
 import { MARKET_TYPES, MARKET_LABELS } from '@/lib/market'
 
+/** Arancio-oro ufficiale Bitcoin: e' il colore del rebranding Velqor Quant (la Q del logo). */
+const BITCOIN_ORANGE = '#F7931A'
+
 // scope: 'macro'  = la pagina mostra i dati del mercato selezionato dal toggle (CFD | FUTURE)
 //        'global' = la pagina e' trasversale ai due mondi e sta fuori dal toggle.
 //                   Research legge solo le tabelle qre_ (conoscenza, metodo, robustezza):
@@ -68,7 +71,10 @@ export function Sidebar() {
         {/* Logo */}
         <div className="p-4 border-b border-slate-700">
           <Link href="/divisioni/quant" onClick={closeSidebar}>
-            <h1 className="text-xl font-bold tracking-tight">VELQOR QUANT</h1>
+            {/* La Q in arancio-oro Bitcoin (#F7931A), come il rebranding del sito. */}
+            <h1 className="text-xl font-bold tracking-tight">
+              VELQOR <span style={{ color: BITCOIN_ORANGE }}>Q</span>UANT
+            </h1>
             <span className="text-xs text-slate-400">Control Room</span>
           </Link>
         </div>
