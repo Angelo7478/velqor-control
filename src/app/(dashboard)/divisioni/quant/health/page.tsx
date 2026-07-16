@@ -63,20 +63,40 @@ export default function HealthPage() {
   const [cards, setCards] = useState<HealthCardData[]>([])
   const [loading, setLoading] = useState(true)
 
-  useEffect(() => { loadAccounts() }, [marketType])
-  useEffect(() => { if (selectedAccountId) loadData() }, [selectedAccountId])
+  // L'asse macro e' interamente di questo effetto: azzera lo stato e ricarica i conti.
+  // loadData resta sull'asse conto — selectedAccountId e' sempre della macro corrente o ''.
+  // L'azzeramento di selectedAccountId deve restare SINCRONO qui: una loadAccounts cancellata
+  // non lo scrive, e senza reset un toggle andata-e-ritorno rapido riscriverebbe lo stesso id
+  // -> bail-out di React -> l'effetto sotto non rifira e le card non si ricaricano piu'.
+  useEffect(() => {
+    let cancelled = false
+    setLoading(true)
+    setCards([])
+    setSelectedAccountId('')
+    loadAccounts(() => cancelled)
+    return () => { cancelled = true }
+  }, [marketType])
 
-  async function loadAccounts() {
-    const supabase = createClient()
-    const { data } = await supabase.from('qel_accounts').select('*').eq('market_type', marketType).order('name')
-    if (data && data.length > 0) {
-      setAccounts(data)
-      setSelectedAccountId(data[0].id)
+  useEffect(() => {
+    if (!selectedAccountId) return
+    let cancelled = false
+    loadData(() => cancelled)
+    return () => { cancelled = true }
+  }, [selectedAccountId])
+
+  async function loadAccounts(isStale: () => boolean) {
+    try {
+      const supabase = createClient()
+      const { data } = await supabase.from('qel_accounts').select('*').eq('market_type', marketType).order('name')
+      if (isStale()) return
+      setAccounts(data ?? [])
+      setSelectedAccountId(data?.[0]?.id ?? '')
+    } finally {
+      if (!isStale()) setLoading(false)
     }
-    setLoading(false)
   }
 
-  async function loadData() {
+  async function loadData(isStale: () => boolean) {
     setLoading(true)
     const supabase = createClient()
     const accountId = selectedAccountId
@@ -168,6 +188,8 @@ export default function HealthPage() {
       }
     }
 
+    if (isStale()) return
+
     if (stratRes.data) {
       // Only show strategies that have trades on this account
       const activeStrats = stratRes.data.filter(s => perfMap.has(s.id))
@@ -217,6 +239,8 @@ export default function HealthPage() {
       })
 
       setCards(result)
+    } else {
+      setCards([])
     }
 
     setLoading(false)

@@ -50,11 +50,16 @@ export default function AccountDashboard({ account, lineageAccounts, onClose }: 
   const limitDDD = Number(account.max_daily_loss_pct || 5)
   const limitTDD = Number(account.max_total_loss_pct || 10)
 
-  useEffect(() => {
-    loadAccountData()
-  }, [account.id, lineageIds.join(','), marketType])
+  const outOfMarket = account.market_type !== marketType
 
-  async function loadAccountData() {
+  useEffect(() => {
+    if (outOfMarket) return
+    let cancelled = false
+    loadAccountData(() => cancelled)
+    return () => { cancelled = true }
+  }, [account.id, lineageIds.join(','), marketType, outOfMarket])
+
+  async function loadAccountData(isCancelled: () => boolean = () => false) {
     setLoadingData(true)
     setError(null)
     try {
@@ -64,6 +69,7 @@ export default function AccountDashboard({ account, lineageAccounts, onClose }: 
         supabase.from('qel_trades').select('*').in('account_id', lineageIds).order('open_time', { ascending: false }),
         supabase.from('qel_strategies').select('*').eq('market_type', marketType).order('magic'),
       ])
+      if (isCancelled()) return
       if (snapRes.error) throw snapRes.error
       if (tradeRes.error) throw tradeRes.error
       if (stratRes.error) throw stratRes.error
@@ -71,13 +77,18 @@ export default function AccountDashboard({ account, lineageAccounts, onClose }: 
       setTrades(tradeRes.data || [])
       setStrategies(stratRes.data || [])
     } catch (err) {
+      if (isCancelled()) return
       const msg = err instanceof Error ? err.message : String(err)
       console.error('loadAccountData failed:', err)
       setError(msg)
     } finally {
-      setLoadingData(false)
+      if (!isCancelled()) setLoadingData(false)
     }
   }
+
+  // La compartimentazione non puo' dipendere dal fatto che il chiamante si ricordi
+  // di azzerare la selezione al cambio macro: il conto fuori macro non renderizza mai.
+  if (outOfMarket) return null
 
   // Trade stats
   const closedTrades = trades.filter(t => !t.is_open && t.close_time)

@@ -38,7 +38,7 @@ export default function QuantPage() {
   const [selectedStratId, setSelectedStratId] = useState<string | null>(null)
   const [groupFilter, setGroupFilter] = useState<string>('all')
   const [expandedAcc, setExpandedAcc] = useState<string | null>(null)
-  const [selectedAcc, setSelectedAcc] = useState<QelAccount | null>(null)
+  const [selectedAccId, setSelectedAccId] = useState<string | null>(null)
   const [benchLoading, setBenchLoading] = useState(false)
   const [benchResult, setBenchResult] = useState<string | null>(null)
   const [stratBenchData, setStratBenchData] = useState<BenchmarkPoint[]>([])
@@ -55,6 +55,13 @@ export default function QuantPage() {
   const selectedStrat = useMemo<QelStrategy | null>(
     () => selectedStratId ? strategies.find(s => s.id === selectedStratId) ?? null : null,
     [selectedStratId, strategies]
+  )
+
+  // Derivato da accounts (che e' filtrato per market_type): tenendo qui l'oggetto conto
+  // intero, al cambio macro la dashboard restava aperta sul conto dell'altra macro.
+  const selectedAcc = useMemo<QelAccount | null>(
+    () => selectedAccId ? accounts.find(a => a.id === selectedAccId) ?? null : null,
+    [selectedAccId, accounts]
   )
 
   // Resolve all account_ids in the same challenge lineage as the selected one.
@@ -80,27 +87,42 @@ export default function QuantPage() {
     }
   }, [lineageAccountIds, accounts])
 
-  useEffect(() => { loadInitial() }, [marketType])
+  // Il reset di selectedAccountId deve restare SINCRONO qui: una loadInitial cancellata esce
+  // prima di scriverlo, e senza reset un toggle andata-e-ritorno rapido riscriverebbe lo stesso
+  // id -> bail-out di React -> loadAccountPerf non rifira e le strategie restano con i real_*
+  // globali invece degli override per-conto.
+  useEffect(() => {
+    let cancelled = false
+    setSelectedAccountId('')
+    loadInitial(() => cancelled)
+    return () => { cancelled = true }
+  }, [marketType])
   useEffect(() => { if (selectedAccountId) loadAccountPerf() }, [selectedAccountId])
   useEffect(() => { if (selectedStrat && selectedAccountId) loadStratBenchmark(selectedStrat) }, [selectedStrat, selectedAccountId])
 
-  async function loadInitial() {
-    const supabase = createClient()
-    const [stratRes, accRes, pfRes, szRes] = await Promise.all([
-      supabase.from('qel_strategies').select('*').eq('market_type', marketType).order('magic'),
-      supabase.from('qel_accounts').select('*').eq('market_type', marketType).order('name'),
-      supabase.from('qel_portfolios').select('id, account_id'),
-      supabase.from('qel_strategy_sizing').select('portfolio_id, strategy_id, current_lots, recommended_lots, status, created_at').order('created_at', { ascending: false }),
-    ])
-    setBaseStrategies(stratRes.data || [])
-    setStrategies(stratRes.data || [])
-    setAccounts(accRes.data || [])
-    setPortfolios((pfRes.data as { id: string; account_id: string }[]) || [])
-    setSizingRows((szRes.data as { portfolio_id: string; strategy_id: string; current_lots: number | null; recommended_lots: number | null; status: string | null; created_at: string }[]) || [])
-    // Sempre riassegnato, anche a null: col vecchio `if (length > 0)` cambiando macro su una
-    // senza conti restava selezionato quello dell'altra -> leak di dati cross-macro.
-    setSelectedAccountId(accRes.data?.[0]?.id ?? '')
-    setLoading(false)
+  async function loadInitial(isCancelled: () => boolean) {
+    setLoading(true)
+    try {
+      const supabase = createClient()
+      const [stratRes, accRes, pfRes, szRes] = await Promise.all([
+        supabase.from('qel_strategies').select('*').eq('market_type', marketType).order('magic'),
+        supabase.from('qel_accounts').select('*').eq('market_type', marketType).order('name'),
+        supabase.from('qel_portfolios').select('id, account_id'),
+        supabase.from('qel_strategy_sizing').select('portfolio_id, strategy_id, current_lots, recommended_lots, status, created_at').order('created_at', { ascending: false }),
+      ])
+      // Due toggle rapidi: la risposta della macro vecchia non deve atterrare per ultima.
+      if (isCancelled()) return
+      setBaseStrategies(stratRes.data || [])
+      setStrategies(stratRes.data || [])
+      setAccounts(accRes.data || [])
+      setPortfolios((pfRes.data as { id: string; account_id: string }[]) || [])
+      setSizingRows((szRes.data as { portfolio_id: string; strategy_id: string; current_lots: number | null; recommended_lots: number | null; status: string | null; created_at: string }[]) || [])
+      // Sempre riassegnato, anche a null: col vecchio `if (length > 0)` cambiando macro su una
+      // senza conti restava selezionato quello dell'altra -> leak di dati cross-macro.
+      setSelectedAccountId(accRes.data?.[0]?.id ?? '')
+    } finally {
+      if (!isCancelled()) setLoading(false)
+    }
   }
 
   /** Load per-account performance and OVERRIDE real_* fields.
@@ -1034,7 +1056,7 @@ export default function QuantPage() {
       )}
 
       {/* ===== STRATEGIES LIST ===== */}
-      {tab === 'strategies' && stratView === 'list' && (
+      {tab === 'strategies' && (stratView === 'list' || !selectedStrat) && (
         <div className="space-y-4">
           {/* Filter pills */}
           <div className="flex gap-2 flex-wrap">
@@ -1422,7 +1444,7 @@ export default function QuantPage() {
           <AccountDashboard
             account={selectedAcc}
             lineageAccounts={linAccs.length > 1 ? linAccs : undefined}
-            onClose={() => setSelectedAcc(null)}
+            onClose={() => setSelectedAccId(null)}
           />
         )
       })()}
@@ -1458,7 +1480,7 @@ export default function QuantPage() {
               const bText = bOnline ? 'Online' : bWarn ? `${Math.round(syncMin)}m fa` : synced ? `Offline` : ''
 
               return (
-                <div key={acc.id} onClick={() => synced && setSelectedAcc(acc)}
+                <div key={acc.id} onClick={() => synced && setSelectedAccId(acc.id)}
                   className={`bg-white rounded-xl border p-4 transition-all ${synced ? 'border-slate-200 hover:border-violet-300 hover:shadow-md cursor-pointer' : 'border-dashed border-slate-300'}`}>
                   <div className="flex justify-between items-start mb-3">
                     <div className="flex items-center gap-2">
