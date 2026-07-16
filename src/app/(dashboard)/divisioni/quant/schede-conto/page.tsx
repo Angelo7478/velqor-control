@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react'
 import { createClient } from '@/lib/supabase-browser'
+import { useUI } from '@/stores/ui'
 
 type Account = {
   id: string
@@ -87,6 +88,7 @@ function fmt(n: number | null | undefined, d = 2): string {
 }
 
 export default function SchedeContoPage() {
+  const marketType = useUI((s) => s.marketType)
   const [accounts, setAccounts] = useState<Account[]>([])
   const [portfolios, setPortfolios] = useState<Portfolio[]>([])
   const [strats, setStrats] = useState<PortStrat[]>([])
@@ -94,12 +96,12 @@ export default function SchedeContoPage() {
   const [liveLots, setLiveLots] = useState<Map<string, number>>(new Map())
   const [loading, setLoading] = useState(true)
 
-  useEffect(() => { load() }, [])
+  useEffect(() => { load() }, [marketType])
 
   async function load() {
     const supabase = createClient()
     const [accRes, pfRes, psRes, llRes, varRes] = await Promise.all([
-      supabase.from('qel_accounts').select('id,name,login,server,account_size,currency,status,challenge_phase,max_daily_loss_pct,max_total_loss_pct,vps_name').neq('status', 'inactive').neq('status', 'breached').order('account_size', { ascending: false }),
+      supabase.from('qel_accounts').select('id,name,login,server,account_size,currency,status,challenge_phase,max_daily_loss_pct,max_total_loss_pct,vps_name').eq('market_type', marketType).neq('status', 'inactive').neq('status', 'breached').order('account_size', { ascending: false }),
       supabase.from('qel_portfolios').select('id,account_id,name,max_dd_target_pct,daily_dd_limit_pct,size_policy'),
       supabase.from('qel_portfolio_strategies').select('id,portfolio_id,is_active,active_level,lot_conservative,lot_neutral,lot_aggressive,final_lots,dd_budget_allocation_pct,sizing_notes,target_lots,lots_applied,variant_id,deploy_magic,qel_strategies(id,magic,name,asset_group,direction,strategy_style,parameters,test_mc95_dd,test_max_open_dd,live_status,real_trades,real_profit_factor,validation_target_trades,validation_baseline_trades)'),
       supabase.from('v_account_strategy_live_lot').select('account_id,base_magic,last_lot'),

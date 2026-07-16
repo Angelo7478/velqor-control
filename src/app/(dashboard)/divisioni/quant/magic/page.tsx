@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react'
 import { createClient } from '@/lib/supabase-browser'
+import { useUI } from '@/stores/ui'
 
 type Variant = {
   id: string
@@ -49,6 +50,7 @@ function statusBadge(s: string | null): string {
 }
 
 export default function StatoMagicPage() {
+  const marketType = useUI((s) => s.marketType)
   const [variants, setVariants] = useState<Variant[]>([])
   const [accounts, setAccounts] = useState<Account[]>([])
   const [strats, setStrats] = useState<Strat[]>([])
@@ -56,14 +58,14 @@ export default function StatoMagicPage() {
   const [deploys, setDeploys] = useState<Deploy[]>([])
   const [loading, setLoading] = useState(true)
 
-  useEffect(() => { load() }, [])
+  useEffect(() => { load() }, [marketType])
 
   async function load() {
     const supabase = createClient()
     const [v, a, s, pf, dp] = await Promise.all([
       supabase.from('qel_strategy_variants').select('*').order('base_magic').order('deploy_magic'),
-      supabase.from('qel_accounts').select('id, name, status, account_size'),
-      supabase.from('qel_strategies').select('id, magic, name'),
+      supabase.from('qel_accounts').select('id, name, status, account_size').eq('market_type', marketType),
+      supabase.from('qel_strategies').select('id, magic, name').eq('market_type', marketType),
       supabase.from('qel_portfolios').select('id, account_id'),
       supabase.from('qel_portfolio_strategies').select('id,portfolio_id,is_active,final_lots,variant_id,deploy_magic,qel_strategies(magic,name)'),
     ])

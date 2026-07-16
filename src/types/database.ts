@@ -1,3 +1,5 @@
+import type { MarketType } from '@/lib/market'
+
 export type OrgType = 'internal' | 'client' | 'partner' | 'fund' | 'white_label'
 export type MemberRole = 'owner' | 'admin' | 'member' | 'viewer' | 'client' | 'api'
 export type ModuleType = 'real_estate' | 'quant' | 'engineering' | 'ai' | 'ops' | 'ecommerce'
@@ -150,6 +152,8 @@ export interface QelAccount {
   org_id: string
   name: string
   broker: string
+  /** Macro mercato (migration 005). NON e' il broker: Darwinex ha sia CFD sia futures. */
+  market_type: MarketType
   server: string | null
   login: string | null
   investor_password: string | null
@@ -199,6 +203,8 @@ export interface QelStrategy {
   name: string | null
   asset: string
   asset_group: string | null
+  /** Macro mercato (migration 005), derivato dall'asset: US100.cash -> cfd, NQ -> futures. */
+  market_type: MarketType
   timeframe: string
   description: string | null
   logic_summary: string | null

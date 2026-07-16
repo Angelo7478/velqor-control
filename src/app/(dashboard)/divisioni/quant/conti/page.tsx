@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react'
 import { createClient } from '@/lib/supabase-browser'
+import { useUI } from '@/stores/ui'
 import { QelAccount } from '@/types/database'
 
 function fmt(n: number | null, decimals = 2): string {
@@ -19,6 +20,7 @@ function timeAgo(dateStr: string | null): { text: string; isOnline: boolean; isW
 }
 
 export default function ContiConfigPage() {
+  const marketType = useUI((s) => s.marketType)
   const [accounts, setAccounts] = useState<QelAccount[]>([])
   const [loading, setLoading] = useState(true)
   const [editing, setEditing] = useState<string | null>(null)
@@ -31,7 +33,7 @@ export default function ContiConfigPage() {
   const [addMsg, setAddMsg] = useState('')
   const [copiedCmd, setCopiedCmd] = useState<string | null>(null)
 
-  useEffect(() => { loadAccounts() }, [])
+  useEffect(() => { loadAccounts() }, [marketType])
 
   // Auto-refresh ogni 30 secondi per aggiornare le spie
   useEffect(() => {
@@ -41,7 +43,7 @@ export default function ContiConfigPage() {
 
   async function loadAccounts() {
     const supabase = createClient()
-    const { data } = await supabase.from('qel_accounts').select('*').order('account_size')
+    const { data } = await supabase.from('qel_accounts').select('*').eq('market_type', marketType).order('account_size')
     setAccounts(data || [])
     setLoading(false)
   }
@@ -102,6 +104,8 @@ export default function ContiConfigPage() {
       const { data, error } = await supabase.from('qel_accounts').insert({
         org_id: orgId,
         name: addForm.name.trim(),
+        // il conto nasce nella macro correntemente selezionata
+        market_type: marketType,
         broker: addForm.broker || 'FTMO',
         account_size: Number(addForm.account_size) || 10000,
         currency: addForm.currency || 'USD',
