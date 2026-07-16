@@ -152,8 +152,19 @@ export default function MonthlyPage() {
   const monthOptions = useMemo(() => getMonthOptions(), [])
 
   // ---- Load accounts ----
+  // Guardia e reset vanno INSIEME: la guardia da sola farebbe uscire la init cancellata senza
+  // scrivere selectedAccountId, e un toggle andata-e-ritorno rapido riscriverebbe lo stesso id
+  // -> bail-out di React -> loadData non rifira.
   useEffect(() => {
-    async function init() {
+    let cancelled = false
+    setLoading(true)
+    setSelectedAccountId('')
+    init(() => cancelled)
+    return () => { cancelled = true }
+  }, [marketType])
+
+  async function init(isStale: () => boolean) {
+    try {
       const supabase = createClient()
       const { data } = await supabase
         .from('qel_accounts')
@@ -161,20 +172,38 @@ export default function MonthlyPage() {
         .eq('market_type', marketType)
         .in('status', ['active', 'funded', 'challenge', 'verification'])
         .order('name')
+      // Due toggle rapidi: la risposta della macro vecchia non deve atterrare per ultima.
+      if (isStale()) return
       // Sempre riassegnati, anche a vuoto: col vecchio `if (length > 0)` cambiando macro su
       // una senza conti restava selezionato quello dell'altra -> leak di dati cross-macro.
       setAccounts(data ?? [])
       setSelectedAccountId(data?.[0]?.id ?? '')
+      // Solo qui si sa che la macro e' DAVVERO vuota. Spegnere lo spinner nel ramo else
+      // dell'effetto sotto lo spegnerebbe al mount, quando accounts e' ancora [] perche'
+      // questa query non e' tornata: la pagina direbbe "nessun conto" con 18 conti a DB.
+      if (!data?.length) setLoading(false)
+    } catch {
+      if (!isStale()) setLoading(false)
     }
-    init()
-  }, [marketType])
+  }
 
   // ---- Load data when account/month/mode changes ----
   useEffect(() => {
-    if (selectedAccountId) loadData()
+    let cancelled = false
+    if (selectedAccountId) {
+      loadData(() => cancelled)
+    } else {
+      // Nessun conto selezionabile: nessuno di questi dati puo' appartenere alla macro
+      // corrente. Senza azzeramento esplicito resterebbe a schermo il report della
+      // macro precedente, perche' loadData e' l'unico scrittore di questi stati.
+      setMonthTrades([]); setPrevMonthTrades([]); setAllTrades([])
+      setStrategies([]); setSnapshots([]); setLineageAccts([])
+      setPerfData(new Map()); setBenchmarks(new Map())
+    }
+    return () => { cancelled = true }
   }, [selectedAccountId, selectedMonth, mode])
 
-  async function loadData() {
+  async function loadData(isCancelled: () => boolean = () => false) {
     setLoading(true)
     const supabase = createClient()
     const { start, end } = getMonthRange(selectedMonth)
@@ -197,6 +226,7 @@ export default function MonthlyPage() {
         lineageIds = linAccts.map(x => x.id)
       }
     }
+    if (isCancelled()) return
     setLineageAccts(linAccts)
 
     // Parallel queries
@@ -238,6 +268,7 @@ export default function MonthlyPage() {
     )
 
     const results = await Promise.all(queries)
+    if (isCancelled()) return
 
     setMonthTrades((results[0].data || []) as TradeRow[])
     setPrevMonthTrades((results[1].data || []) as TradeRow[])
@@ -1155,6 +1186,8 @@ export default function MonthlyPage() {
 
       {loading ? (
         <div className="text-center py-20 text-slate-400">Caricamento dati...</div>
+      ) : accounts.length === 0 ? (
+        <div className="text-center py-20 text-slate-400">Nessun conto configurato in questa macro.</div>
       ) : (
         <>
           {/* KPI Grid */}

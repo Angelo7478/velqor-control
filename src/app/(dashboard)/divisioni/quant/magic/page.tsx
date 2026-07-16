@@ -58,23 +58,34 @@ export default function StatoMagicPage() {
   const [deploys, setDeploys] = useState<Deploy[]>([])
   const [loading, setLoading] = useState(true)
 
-  useEffect(() => { load() }, [marketType])
+  useEffect(() => {
+    let cancelled = false
+    load(() => cancelled)
+    return () => { cancelled = true }
+  }, [marketType])
 
-  async function load() {
-    const supabase = createClient()
-    const [v, a, s, pf, dp] = await Promise.all([
-      supabase.from('qel_strategy_variants').select('*').order('base_magic').order('deploy_magic'),
-      supabase.from('qel_accounts').select('id, name, status, account_size').eq('market_type', marketType),
-      supabase.from('qel_strategies').select('id, magic, name').eq('market_type', marketType),
-      supabase.from('qel_portfolios').select('id, account_id'),
-      supabase.from('qel_portfolio_strategies').select('id,portfolio_id,is_active,final_lots,variant_id,deploy_magic,qel_strategies(magic,name)'),
-    ])
-    setVariants((v.data as Variant[]) || [])
-    setAccounts((a.data as Account[]) || [])
-    setStrats((s.data as Strat[]) || [])
-    setPortfolios((pf.data as Portfolio[]) || [])
-    setDeploys((dp.data as unknown as Deploy[]) || [])
-    setLoading(false)
+  async function load(isCancelled: () => boolean) {
+    setLoading(true)
+    try {
+      const supabase = createClient()
+      const [v, a, s, pf, dp] = await Promise.all([
+        supabase.from('qel_strategy_variants').select('*').order('base_magic').order('deploy_magic'),
+        supabase.from('qel_accounts').select('id, name, status, account_size').eq('market_type', marketType),
+        supabase.from('qel_strategies').select('id, magic, name').eq('market_type', marketType),
+        supabase.from('qel_portfolios').select('id, account_id'),
+        supabase.from('qel_portfolio_strategies').select('id,portfolio_id,is_active,final_lots,variant_id,deploy_magic,qel_strategies(magic,name)'),
+      ])
+      if (isCancelled()) return
+      setVariants((v.data as Variant[]) || [])
+      setAccounts((a.data as Account[]) || [])
+      setStrats((s.data as Strat[]) || [])
+      setPortfolios((pf.data as Portfolio[]) || [])
+      setDeploys((dp.data as unknown as Deploy[]) || [])
+    } finally {
+      // Solo il load ancora vivo puo' spegnere il gate: un load superato lascia
+      // il controllo a quello che lo ha rimpiazzato.
+      if (!isCancelled()) setLoading(false)
+    }
   }
 
   if (loading) return <p className="text-slate-500 p-4">Caricamento...</p>

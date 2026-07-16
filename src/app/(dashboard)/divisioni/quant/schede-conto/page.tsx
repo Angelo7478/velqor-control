@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { createClient } from '@/lib/supabase-browser'
 import { useUI } from '@/stores/ui'
 
@@ -95,28 +95,37 @@ export default function SchedeContoPage() {
   const [variants, setVariants] = useState<Map<string, VariantInfo>>(new Map())
   const [liveLots, setLiveLots] = useState<Map<string, number>>(new Map())
   const [loading, setLoading] = useState(true)
+  const reqIdRef = useRef(0)
 
-  useEffect(() => { load() }, [marketType])
+  // Lo splash sta qui e non dentro load(): load() e' condivisa con promote(), che deve
+  // aggiornare in place senza far sparire la pagina.
+  useEffect(() => { setLoading(true); load() }, [marketType])
 
   async function load() {
+    const my = ++reqIdRef.current
     const supabase = createClient()
-    const [accRes, pfRes, psRes, llRes, varRes] = await Promise.all([
-      supabase.from('qel_accounts').select('id,name,login,server,account_size,currency,status,challenge_phase,max_daily_loss_pct,max_total_loss_pct,vps_name').eq('market_type', marketType).neq('status', 'inactive').neq('status', 'breached').order('account_size', { ascending: false }),
-      supabase.from('qel_portfolios').select('id,account_id,name,max_dd_target_pct,daily_dd_limit_pct,size_policy'),
-      supabase.from('qel_portfolio_strategies').select('id,portfolio_id,is_active,active_level,lot_conservative,lot_neutral,lot_aggressive,final_lots,dd_budget_allocation_pct,sizing_notes,target_lots,lots_applied,variant_id,deploy_magic,qel_strategies(id,magic,name,asset_group,direction,strategy_style,parameters,test_mc95_dd,test_max_open_dd,live_status,real_trades,real_profit_factor,validation_target_trades,validation_baseline_trades)'),
-      supabase.from('v_account_strategy_live_lot').select('account_id,base_magic,last_lot'),
-      supabase.from('qel_strategy_variants').select('id,base_magic,variant_label'),
-    ])
-    setAccounts((accRes.data as Account[]) || [])
-    setPortfolios((pfRes.data as Portfolio[]) || [])
-    setStrats((psRes.data as unknown as PortStrat[]) || [])
-    const vm = new Map<string, VariantInfo>()
-    for (const v of ((varRes.data as VariantInfo[]) || [])) vm.set(v.id, v)
-    setVariants(vm)
-    const ll = new Map<string, number>()
-    for (const r of ((llRes.data as { account_id: string; base_magic: number; last_lot: number }[]) || [])) ll.set(`${r.account_id}:${r.base_magic}`, Number(r.last_lot))
-    setLiveLots(ll)
-    setLoading(false)
+    try {
+      const [accRes, pfRes, psRes, llRes, varRes] = await Promise.all([
+        supabase.from('qel_accounts').select('id,name,login,server,account_size,currency,status,challenge_phase,max_daily_loss_pct,max_total_loss_pct,vps_name').eq('market_type', marketType).neq('status', 'inactive').neq('status', 'breached').order('account_size', { ascending: false }),
+        supabase.from('qel_portfolios').select('id,account_id,name,max_dd_target_pct,daily_dd_limit_pct,size_policy'),
+        supabase.from('qel_portfolio_strategies').select('id,portfolio_id,is_active,active_level,lot_conservative,lot_neutral,lot_aggressive,final_lots,dd_budget_allocation_pct,sizing_notes,target_lots,lots_applied,variant_id,deploy_magic,qel_strategies(id,magic,name,asset_group,direction,strategy_style,parameters,test_mc95_dd,test_max_open_dd,live_status,real_trades,real_profit_factor,validation_target_trades,validation_baseline_trades)'),
+        supabase.from('v_account_strategy_live_lot').select('account_id,base_magic,last_lot'),
+        supabase.from('qel_strategy_variants').select('id,base_magic,variant_label'),
+      ])
+      // Risposta di una macro gia' abbandonata: scartare, o atterra dopo la piu' recente.
+      if (my !== reqIdRef.current) return
+      setAccounts((accRes.data as Account[]) || [])
+      setPortfolios((pfRes.data as Portfolio[]) || [])
+      setStrats((psRes.data as unknown as PortStrat[]) || [])
+      const vm = new Map<string, VariantInfo>()
+      for (const v of ((varRes.data as VariantInfo[]) || [])) vm.set(v.id, v)
+      setVariants(vm)
+      const ll = new Map<string, number>()
+      for (const r of ((llRes.data as { account_id: string; base_magic: number; last_lot: number }[]) || [])) ll.set(`${r.account_id}:${r.base_magic}`, Number(r.last_lot))
+      setLiveLots(ll)
+    } finally {
+      if (my === reqIdRef.current) setLoading(false)
+    }
   }
 
   // Promozione manuale a proven: rimuove il haircut alla strategia OVUNQUE (globale). Conferma obbligatoria.

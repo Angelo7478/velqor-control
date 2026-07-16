@@ -91,53 +91,68 @@ export default function PortfolioBuilderPage() {
   const [regimeBySym, setRegimeBySym] = useState<Map<string, MarketRegime4Q>>(new Map())
   const [applyRegime, setApplyRegime] = useState(false)
 
-  useEffect(() => { load() }, [marketType])
+  useEffect(() => {
+    let cancelled = false
+    setLoading(true)
+    load(() => cancelled)
+    return () => { cancelled = true }
+  }, [marketType])
 
-  async function load() {
+  async function load(isStale: () => boolean) {
     const supabase = createClient()
-    const [sRes, aRes, sigRes, pfRes, psRes, btmRes] = await Promise.all([
-      supabase.from('qel_strategies')
-        .select('id,magic,name,asset,asset_group,direction,strategy_style,status,include_in_portfolio,test_mc95_dd,test_max_open_dd,test_ret_dd,test_profit_factor,real_trades,real_avg_per_lot,real_win_pct,real_profit_factor,live_status,regime_gated')
-        .eq('market_type', marketType).in('status', ['active', 'testing']).order('magic'),
-      supabase.from('qel_accounts').select('id,name,account_size,currency,max_daily_loss_pct,max_total_loss_pct').eq('market_type', marketType).eq('status', 'active').order('account_size', { ascending: false }),
-      supabase.from('v_signal_trades').select('base_magic,sig_time,pl_per_lot').order('sig_time'),
-      supabase.from('qel_portfolios').select('id,account_id,size_policy'),
-      supabase.from('qel_portfolio_strategies').select('portfolio_id,strategy_id'),
-      supabase.from('qel_strategy_backtest_monthly').select('magic,month,pl_per_lot,n_trades').order('month'),
-    ])
-    const list = (sRes.data as Strat[]) || []
-    setStrats(list)
-    setAccounts((aRes.data as Account[]) || [])
-    setSignals((sigRes.data as Signal[]) || [])
-    setBacktestMonthly((btmRes.data as BtMonth[]) || [])
-    // composizione salvata per conto (per caricarla quando si seleziona il conto)
-    const pfAcc = new Map<string, string>()
-    const pol = new Map<string, 'reduced' | 'full'>()
-    for (const p of ((pfRes.data as { id: string; account_id: string | null; size_policy: string | null }[]) || [])) {
-      if (p.account_id) { pfAcc.set(p.id, p.account_id); pol.set(p.account_id, p.size_policy === 'full' ? 'full' : 'reduced') }
+    // Selezione conto ed equity referenziano la macro precedente: vanno azzerate prima del fetch, non dopo.
+    setAcctId('')
+    setEquity(100000)
+    try {
+      const [sRes, aRes, sigRes, pfRes, psRes, btmRes] = await Promise.all([
+        supabase.from('qel_strategies')
+          .select('id,magic,name,asset,asset_group,direction,strategy_style,status,include_in_portfolio,test_mc95_dd,test_max_open_dd,test_ret_dd,test_profit_factor,real_trades,real_avg_per_lot,real_win_pct,real_profit_factor,live_status,regime_gated')
+          .eq('market_type', marketType).in('status', ['active', 'testing']).order('magic'),
+        supabase.from('qel_accounts').select('id,name,account_size,currency,max_daily_loss_pct,max_total_loss_pct').eq('market_type', marketType).eq('status', 'active').order('account_size', { ascending: false }),
+        supabase.from('v_signal_trades').select('base_magic,sig_time,pl_per_lot').order('sig_time'),
+        supabase.from('qel_portfolios').select('id,account_id,size_policy'),
+        supabase.from('qel_portfolio_strategies').select('portfolio_id,strategy_id'),
+        supabase.from('qel_strategy_backtest_monthly').select('magic,month,pl_per_lot,n_trades').order('month'),
+      ])
+      if (isStale()) return
+      const list = (sRes.data as Strat[]) || []
+      setStrats(list)
+      setAccounts((aRes.data as Account[]) || [])
+      setSignals((sigRes.data as Signal[]) || [])
+      // qel_strategy_backtest_monthly non ha market_type: l'unico scope disponibile e' il magic delle strategie della macro.
+      const macroMagics = new Set(list.map(s => s.magic).filter((m): m is number => m != null))
+      setBacktestMonthly(((btmRes.data as BtMonth[]) || []).filter(m => macroMagics.has(m.magic)))
+      // composizione salvata per conto (per caricarla quando si seleziona il conto)
+      const pfAcc = new Map<string, string>()
+      const pol = new Map<string, 'reduced' | 'full'>()
+      for (const p of ((pfRes.data as { id: string; account_id: string | null; size_policy: string | null }[]) || [])) {
+        if (p.account_id) { pfAcc.set(p.id, p.account_id); pol.set(p.account_id, p.size_policy === 'full' ? 'full' : 'reduced') }
+      }
+      const comp = new Map<string, Set<string>>()
+      for (const r of ((psRes.data as { portfolio_id: string; strategy_id: string }[]) || [])) {
+        const acc = pfAcc.get(r.portfolio_id); if (!acc) continue
+        if (!comp.has(acc)) comp.set(acc, new Set())
+        comp.get(acc)!.add(r.strategy_id)
+      }
+      setAcctComp(comp)
+      setAcctPolicy(pol)
+      setSel(new Set(list.filter(s => s.include_in_portfolio).map(s => s.id)))
+      // Regime corrente per sottostante: ultimi ~220 bar daily per simbolo (evita il cap 1000 righe Supabase)
+      const symbols = [...new Set(list.map(s => s.asset).filter(Boolean) as string[])]
+      const bRes = await Promise.all(symbols.map(sym =>
+        supabase.from('qel_benchmarks').select('symbol,ts,high,low,close_price').eq('symbol', sym).order('ts', { ascending: false }).limit(220)
+      ))
+      if (isStale()) return
+      const rmap = new Map<string, MarketRegime4Q>()
+      bRes.forEach((r, i) => {
+        const pts = (((r.data as { ts: string; high: number | null; low: number | null; close_price: number }[]) || [])).slice().reverse()
+        const zones = detectMarketRegimes4Q(pts)
+        if (zones.length) rmap.set(symbols[i], zones[zones.length - 1].regime)
+      })
+      setRegimeBySym(rmap)
+    } finally {
+      if (!isStale()) setLoading(false)
     }
-    const comp = new Map<string, Set<string>>()
-    for (const r of ((psRes.data as { portfolio_id: string; strategy_id: string }[]) || [])) {
-      const acc = pfAcc.get(r.portfolio_id); if (!acc) continue
-      if (!comp.has(acc)) comp.set(acc, new Set())
-      comp.get(acc)!.add(r.strategy_id)
-    }
-    setAcctComp(comp)
-    setAcctPolicy(pol)
-    setSel(new Set(list.filter(s => s.include_in_portfolio).map(s => s.id)))
-    // Regime corrente per sottostante: ultimi ~220 bar daily per simbolo (evita il cap 1000 righe Supabase)
-    const symbols = [...new Set(list.map(s => s.asset).filter(Boolean) as string[])]
-    const bRes = await Promise.all(symbols.map(sym =>
-      supabase.from('qel_benchmarks').select('symbol,ts,high,low,close_price').eq('symbol', sym).order('ts', { ascending: false }).limit(220)
-    ))
-    const rmap = new Map<string, MarketRegime4Q>()
-    bRes.forEach((r, i) => {
-      const pts = (((r.data as { ts: string; high: number | null; low: number | null; close_price: number }[]) || [])).slice().reverse()
-      const zones = detectMarketRegimes4Q(pts)
-      if (zones.length) rmap.set(symbols[i], zones[zones.length - 1].regime)
-    })
-    setRegimeBySym(rmap)
-    setLoading(false)
   }
 
   function toggle(id: string) { setSel(p => { const n = new Set(p); n.has(id) ? n.delete(id) : n.add(id); return n }) }
@@ -307,7 +322,7 @@ export default function PortfolioBuilderPage() {
   // ---- Confronto livelli + valutazione limiti (ddopen daily, MC95 totale). Scalano col budget ----
   // Mensile/annuo dal BACKTEST combinato (btSim), coerente col corpo della scheda; non dalla sim live.
   const levelCompare = useMemo(() => {
-    if (ddBudget <= 0 || backtestMonthly.length === 0) return null
+    if (ddBudget <= 0 || opRows.length === 0) return null
     return EVAL_LEVELS.map(L => {
       const ratio = L.mc95 / ddBudget
       const daily = worstDayPct * ratio                 // worst-day floating ARITMETICO (tutte insieme)
@@ -322,7 +337,7 @@ export default function PortfolioBuilderPage() {
         overTot: L.mc95 > maxTot, overReal: ddReal > maxTot, overDayReal: dailyReal > maxDay,
       }
     })
-  }, [btSim, backtestMonthly, ddBudget, worstDayPct, maxTot, maxDay])
+  }, [btSim, opRows, ddBudget, worstDayPct, maxTot, maxDay])
 
   // ---- Scheda PDF ricca: backtest combinato delle strategie, scalato ai lotti operativi ----
   // Lotti per livello (%MC95) nella modalità scelta (Model B: robust-share + haircut assoluto in Ridotta + cap).
@@ -456,7 +471,8 @@ export default function PortfolioBuilderPage() {
     const orgId = acct ? (await supabase.from('qel_accounts').select('org_id').eq('id', acct.id).single()).data?.org_id
       : (await supabase.from('qel_strategies').select('org_id').limit(1).single()).data?.org_id
     const { data: ptf } = await supabase.from('qel_portfolios').insert({
-      org_id: orgId, account_id: acctId || null, name: ptfName.trim(), sizing_mode: 'risk_budget', size_policy: sizeMode,
+      // account_id derivato da `accounts` (non da acctId grezzo): un conto fuori macro non puo' finire nell'INSERT.
+      org_id: orgId, account_id: acct?.id ?? null, name: ptfName.trim(), sizing_mode: 'risk_budget', size_policy: sizeMode,
       equity_base: equity, max_dd_target_pct: ddBudget, daily_dd_limit_pct: maxDay, safety_factor: 1.0, is_active: true,
     }).select('id').single()
     if (ptf) {

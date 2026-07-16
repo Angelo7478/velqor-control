@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { createClient } from '@/lib/supabase-browser'
 import { useUI } from '@/stores/ui'
 
@@ -62,23 +62,40 @@ export default function SizingStatusPage() {
   const [loading, setLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
   const [refreshMsg, setRefreshMsg] = useState<string | null>(null)
+  const activeMarket = useRef(marketType)
 
-  useEffect(() => { load() }, [marketType])
-  useEffect(() => { const i = setInterval(load, 60000); return () => clearInterval(i) }, [])
+  // L'intervallo deve stare sulla stessa dipendenza del fetch: con deps [] catturava il
+  // marketType del mount e ripopolava la pagina con l'altra macro a ogni tick.
+  // setLoading(true) va qui e non dentro load(), che e' condivisa con questo polling e con
+  // refreshBenchmarks: la' sbiancherebbe la pagina ogni 60s.
+  useEffect(() => {
+    activeMarket.current = marketType
+    setLoading(true)
+    load()
+    const i = setInterval(load, 60000)
+    return () => clearInterval(i)
+  }, [marketType])
 
   async function load() {
-    const supabase = createClient()
-    const [p, a, s, st] = await Promise.all([
-      supabase.from('qel_portfolios').select('id, account_id, name, equity_base, optimization_result, last_optimization_at').eq('is_active', true),
-      supabase.from('qel_accounts').select('id, name, account_size, currency, status').eq('market_type', marketType),
-      supabase.from('qel_strategy_sizing').select('portfolio_id, strategy_id, current_lots, recommended_lots, lots_change_pct, status, dd_budget_usd, dd_budget_pct, correlation_cluster, created_at').order('created_at', { ascending: false }),
-      supabase.from('qel_strategies').select('id, magic, name').eq('market_type', marketType),
-    ])
-    setPortfolios((p.data as Portfolio[]) || [])
-    setAccounts((a.data as Account[]) || [])
-    setSizing((s.data as Sizing[]) || [])
-    setStrats((st.data as Strat[]) || [])
-    setLoading(false)
+    const mt = marketType
+    try {
+      const supabase = createClient()
+      const [p, a, s, st] = await Promise.all([
+        supabase.from('qel_portfolios').select('id, account_id, name, equity_base, optimization_result, last_optimization_at').eq('is_active', true),
+        supabase.from('qel_accounts').select('id, name, account_size, currency, status').eq('market_type', mt),
+        supabase.from('qel_strategy_sizing').select('portfolio_id, strategy_id, current_lots, recommended_lots, lots_change_pct, status, dd_budget_usd, dd_budget_pct, correlation_cluster, created_at').order('created_at', { ascending: false }),
+        supabase.from('qel_strategies').select('id, magic, name').eq('market_type', mt),
+      ])
+      // La risposta di una macro non piu' attiva non deve atterrare: due toggle rapidi
+      // farebbero vincere la risposta piu' lenta.
+      if (activeMarket.current !== mt) return
+      setPortfolios((p.data as Portfolio[]) || [])
+      setAccounts((a.data as Account[]) || [])
+      setSizing((s.data as Sizing[]) || [])
+      setStrats((st.data as Strat[]) || [])
+    } finally {
+      if (activeMarket.current === mt) setLoading(false)
+    }
   }
 
   async function refreshBenchmarks() {

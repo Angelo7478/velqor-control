@@ -1,8 +1,9 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { createClient } from '@/lib/supabase-browser'
 import { useUI } from '@/stores/ui'
+import type { MarketType } from '@/lib/market'
 import { QelAccount } from '@/types/database'
 
 function fmt(n: number | null, decimals = 2): string {
@@ -33,17 +34,23 @@ export default function ContiConfigPage() {
   const [addMsg, setAddMsg] = useState('')
   const [copiedCmd, setCopiedCmd] = useState<string | null>(null)
 
-  useEffect(() => { loadAccounts() }, [marketType])
+  const reqRef = useRef(0)
 
-  // Auto-refresh ogni 30 secondi per aggiornare le spie
+  // Primo fetch e auto-refresh (30s, per aggiornare le spie) nello stesso effetto:
+  // con deps [] l'intervallo terrebbe per sempre la closure del mount e continuerebbe
+  // a interrogare la macro di allora.
   useEffect(() => {
-    const interval = setInterval(loadAccounts, 30000)
+    loadAccounts(marketType, true)
+    const interval = setInterval(() => loadAccounts(marketType), 30000)
     return () => clearInterval(interval)
-  }, [])
+  }, [marketType])
 
-  async function loadAccounts() {
+  async function loadAccounts(mt: MarketType, showSpinner = false) {
+    const req = ++reqRef.current
+    if (showSpinner) setLoading(true)
     const supabase = createClient()
-    const { data } = await supabase.from('qel_accounts').select('*').eq('market_type', marketType).order('account_size')
+    const { data } = await supabase.from('qel_accounts').select('*').eq('market_type', mt).order('account_size')
+    if (req !== reqRef.current) return
     setAccounts(data || [])
     setLoading(false)
   }
@@ -85,7 +92,7 @@ export default function ContiConfigPage() {
       } else {
         setMsg('Salvato!')
         setEditing(null)
-        await loadAccounts()
+        await loadAccounts(marketType)
       }
     } catch (e) {
       setMsg(`Errore: ${e instanceof Error ? e.message : 'sconosciuto'}`)
@@ -132,7 +139,7 @@ export default function ContiConfigPage() {
         setAddMsg('Conto creato!')
         setShowAdd(false)
         setAddForm({ name: '', broker: 'FTMO', account_size: '10000', currency: 'USD', server: '', login: '', investor_password: '', status: 'active' })
-        await loadAccounts()
+        await loadAccounts(marketType)
       }
     } catch (e) {
       setAddMsg(`Errore: ${e instanceof Error ? e.message : 'sconosciuto'}`)
@@ -148,7 +155,7 @@ export default function ContiConfigPage() {
     if (error) {
       setMsg(`Errore eliminazione: ${error.message}`)
     } else {
-      await loadAccounts()
+      await loadAccounts(marketType)
     }
   }
 
