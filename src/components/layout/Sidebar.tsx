@@ -62,14 +62,21 @@ export function Sidebar() {
       )}
 
       {/* Sidebar */}
+      {/* h-screen + sticky: la colonna resta alta quanto lo schermo anche se il contenuto
+          della pagina e' lungo, cosi' logo e toggle restano ancorati in alto (come la Topbar)
+          e scorre solo il menu. */}
       <aside
         className={cn(
-          'fixed top-0 left-0 h-full w-64 bg-slate-900 text-white z-50 transition-transform duration-200 lg:translate-x-0 lg:static lg:z-auto overflow-y-auto',
+          'fixed top-0 left-0 h-screen w-64 bg-slate-900 text-white z-50 transition-transform duration-200',
+          // Su desktop da fixed a sticky (NON static: confliggerebbe con sticky, sono
+          // entrambe utility di position e vincerebbe quella che capita dopo nel CSS).
+          'lg:translate-x-0 lg:sticky lg:top-0 lg:z-auto lg:shrink-0',
+          'flex flex-col',
           sidebarOpen ? 'translate-x-0' : '-translate-x-full'
         )}
       >
-        {/* Logo */}
-        <div className="p-4 border-b border-slate-700">
+        {/* Logo — ancorato */}
+        <div className="p-4 border-b border-slate-700 shrink-0">
           <Link href="/divisioni/quant" onClick={closeSidebar}>
             {/* La Q in arancio-oro Bitcoin (#F7931A), come il rebranding del sito. */}
             <h1 className="text-xl font-bold tracking-tight">
@@ -79,8 +86,8 @@ export function Sidebar() {
           </Link>
         </div>
 
-        {/* Toggle macro mercato: filtra TUTTE le pagine con scope 'macro' */}
-        <div className="p-3 border-b border-slate-700">
+        {/* Toggle macro mercato: filtra TUTTE le pagine con scope 'macro' — ancorato */}
+        <div className="p-3 border-b border-slate-700 shrink-0">
           <div
             role="tablist"
             aria-label="Macro mercato"
@@ -106,8 +113,9 @@ export function Sidebar() {
           </div>
         </div>
 
-        {/* Nav: prima le pagine legate al mercato, poi le trasversali */}
-        <nav className="p-3">
+        {/* Nav: prima le pagine legate al mercato, poi le trasversali. E' l'unica parte che
+            scorre, se il menu non ci sta in altezza. */}
+        <nav className="p-3 flex-1 overflow-y-auto">
           <ul className="space-y-1">
             {NAV_ITEMS.filter((i) => i.scope === 'macro').map(navLink)}
           </ul>
