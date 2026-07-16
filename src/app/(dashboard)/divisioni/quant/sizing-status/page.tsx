@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react'
 import { createClient } from '@/lib/supabase-browser'
+import { useUI } from '@/stores/ui'
 
 type Sizing = {
   portfolio_id: string
@@ -53,6 +54,7 @@ function stratBadge(status: string | null): string {
 }
 
 export default function SizingStatusPage() {
+  const marketType = useUI((s) => s.marketType)
   const [portfolios, setPortfolios] = useState<Portfolio[]>([])
   const [accounts, setAccounts] = useState<Account[]>([])
   const [sizing, setSizing] = useState<Sizing[]>([])
@@ -61,16 +63,16 @@ export default function SizingStatusPage() {
   const [refreshing, setRefreshing] = useState(false)
   const [refreshMsg, setRefreshMsg] = useState<string | null>(null)
 
-  useEffect(() => { load() }, [])
+  useEffect(() => { load() }, [marketType])
   useEffect(() => { const i = setInterval(load, 60000); return () => clearInterval(i) }, [])
 
   async function load() {
     const supabase = createClient()
     const [p, a, s, st] = await Promise.all([
       supabase.from('qel_portfolios').select('id, account_id, name, equity_base, optimization_result, last_optimization_at').eq('is_active', true),
-      supabase.from('qel_accounts').select('id, name, account_size, currency, status'),
+      supabase.from('qel_accounts').select('id, name, account_size, currency, status').eq('market_type', marketType),
       supabase.from('qel_strategy_sizing').select('portfolio_id, strategy_id, current_lots, recommended_lots, lots_change_pct, status, dd_budget_usd, dd_budget_pct, correlation_cluster, created_at').order('created_at', { ascending: false }),
-      supabase.from('qel_strategies').select('id, magic, name'),
+      supabase.from('qel_strategies').select('id, magic, name').eq('market_type', marketType),
     ])
     setPortfolios((p.data as Portfolio[]) || [])
     setAccounts((a.data as Account[]) || [])

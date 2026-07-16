@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import { createClient } from '@/lib/supabase-browser'
+import { useUI } from '@/stores/ui'
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts'
 import { detectMarketRegimes4Q, regimeMultiplier, REGIME_4Q_LABELS, type MarketRegime4Q } from '@/lib/quant-utils'
 import { buildReportHtml, type ReportTrade } from '@/lib/quant-report'
@@ -68,6 +69,7 @@ function fmt(n: number | null | undefined, d = 2): string {
 }
 
 export default function PortfolioBuilderPage() {
+  const marketType = useUI((s) => s.marketType)
   const [strats, setStrats] = useState<Strat[]>([])
   const [accounts, setAccounts] = useState<Account[]>([])
   const [signals, setSignals] = useState<Signal[]>([])
@@ -89,15 +91,15 @@ export default function PortfolioBuilderPage() {
   const [regimeBySym, setRegimeBySym] = useState<Map<string, MarketRegime4Q>>(new Map())
   const [applyRegime, setApplyRegime] = useState(false)
 
-  useEffect(() => { load() }, [])
+  useEffect(() => { load() }, [marketType])
 
   async function load() {
     const supabase = createClient()
     const [sRes, aRes, sigRes, pfRes, psRes, btmRes] = await Promise.all([
       supabase.from('qel_strategies')
         .select('id,magic,name,asset,asset_group,direction,strategy_style,status,include_in_portfolio,test_mc95_dd,test_max_open_dd,test_ret_dd,test_profit_factor,real_trades,real_avg_per_lot,real_win_pct,real_profit_factor,live_status,regime_gated')
-        .in('status', ['active', 'testing']).order('magic'),
-      supabase.from('qel_accounts').select('id,name,account_size,currency,max_daily_loss_pct,max_total_loss_pct').eq('status', 'active').order('account_size', { ascending: false }),
+        .eq('market_type', marketType).in('status', ['active', 'testing']).order('magic'),
+      supabase.from('qel_accounts').select('id,name,account_size,currency,max_daily_loss_pct,max_total_loss_pct').eq('market_type', marketType).eq('status', 'active').order('account_size', { ascending: false }),
       supabase.from('v_signal_trades').select('base_magic,sig_time,pl_per_lot').order('sig_time'),
       supabase.from('qel_portfolios').select('id,account_id,size_policy'),
       supabase.from('qel_portfolio_strategies').select('portfolio_id,strategy_id'),

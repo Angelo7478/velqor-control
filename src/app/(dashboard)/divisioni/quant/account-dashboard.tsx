@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react'
 import { createClient } from '@/lib/supabase-browser'
+import { useUI } from '@/stores/ui'
 import { QelAccount, QelAccountSnapshot, QelTrade, QelStrategy } from '@/types/database'
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, AreaChart, Area, ReferenceLine } from 'recharts'
 import { fmt, fmtUsd, plColor, ddBarColor, MONTHS } from '@/lib/quant-utils'
@@ -18,6 +19,7 @@ interface Props {
 }
 
 export default function AccountDashboard({ account, lineageAccounts, onClose }: Props) {
+  const marketType = useUI((s) => s.marketType)
   const isLineageView = (lineageAccounts?.length || 0) > 1
   const lineageIds = isLineageView ? lineageAccounts!.map(a => a.id) : [account.id]
   // Capitale iniziale di tutta la challenge = account_size del PRIMO conto della lineage (Step 1)
@@ -50,7 +52,7 @@ export default function AccountDashboard({ account, lineageAccounts, onClose }: 
 
   useEffect(() => {
     loadAccountData()
-  }, [account.id, lineageIds.join(',')])
+  }, [account.id, lineageIds.join(','), marketType])
 
   async function loadAccountData() {
     setLoadingData(true)
@@ -60,7 +62,7 @@ export default function AccountDashboard({ account, lineageAccounts, onClose }: 
       const [snapRes, tradeRes, stratRes] = await Promise.all([
         supabase.from('qel_account_snapshots').select('*').in('account_id', lineageIds).order('ts', { ascending: true }),
         supabase.from('qel_trades').select('*').in('account_id', lineageIds).order('open_time', { ascending: false }),
-        supabase.from('qel_strategies').select('*').order('magic'),
+        supabase.from('qel_strategies').select('*').eq('market_type', marketType).order('magic'),
       ])
       if (snapRes.error) throw snapRes.error
       if (tradeRes.error) throw tradeRes.error

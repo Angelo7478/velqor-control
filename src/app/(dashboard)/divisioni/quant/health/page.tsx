@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react'
 import { createClient } from '@/lib/supabase-browser'
+import { useUI } from '@/stores/ui'
 import { QelStrategy, QelPortfolio, QelAccount } from '@/types/database'
 import {
   fmt, fmtUsd, fmtPct, plColor, groupColor, styleColor, styleLabel,
@@ -56,17 +57,18 @@ interface HealthCardData extends HealthReport {
 }
 
 export default function HealthPage() {
+  const marketType = useUI((s) => s.marketType)
   const [accounts, setAccounts] = useState<QelAccount[]>([])
   const [selectedAccountId, setSelectedAccountId] = useState<string>('')
   const [cards, setCards] = useState<HealthCardData[]>([])
   const [loading, setLoading] = useState(true)
 
-  useEffect(() => { loadAccounts() }, [])
+  useEffect(() => { loadAccounts() }, [marketType])
   useEffect(() => { if (selectedAccountId) loadData() }, [selectedAccountId])
 
   async function loadAccounts() {
     const supabase = createClient()
-    const { data } = await supabase.from('qel_accounts').select('*').order('name')
+    const { data } = await supabase.from('qel_accounts').select('*').eq('market_type', marketType).order('name')
     if (data && data.length > 0) {
       setAccounts(data)
       setSelectedAccountId(data[0].id)
@@ -80,7 +82,7 @@ export default function HealthPage() {
     const accountId = selectedAccountId
 
     const [stratRes, perfRes, pfRes] = await Promise.all([
-      supabase.from('qel_strategies').select('*').in('status', ['active', 'paused']).order('magic'),
+      supabase.from('qel_strategies').select('*').eq('market_type', marketType).in('status', ['active', 'paused']).order('magic'),
       supabase.from('v_strategy_recent_performance').select('*').eq('account_id', accountId),
       supabase.from('qel_portfolios').select('id').eq('account_id', accountId),
     ])

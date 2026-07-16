@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import { createClient } from '@/lib/supabase-browser'
+import { useUI } from '@/stores/ui'
 import { QelStrategy, QelAccount } from '@/types/database'
 import {
   fmt, fmtUsd, fmtPct, timeAgo, statusBadge, groupColor, plColor, ddBarColor, fmtAlpha, alphaColor,
@@ -24,6 +25,7 @@ type Tab = 'overview' | 'strategies' | 'accounts'
 type StrategyView = 'list' | 'detail'
 
 export default function QuantPage() {
+  const marketType = useUI((s) => s.marketType)
   const [strategies, setStrategies] = useState<QelStrategy[]>([])
   const [baseStrategies, setBaseStrategies] = useState<QelStrategy[]>([])
   const [accounts, setAccounts] = useState<QelAccount[]>([])
@@ -78,15 +80,15 @@ export default function QuantPage() {
     }
   }, [lineageAccountIds, accounts])
 
-  useEffect(() => { loadInitial() }, [])
+  useEffect(() => { loadInitial() }, [marketType])
   useEffect(() => { if (selectedAccountId) loadAccountPerf() }, [selectedAccountId])
   useEffect(() => { if (selectedStrat && selectedAccountId) loadStratBenchmark(selectedStrat) }, [selectedStrat, selectedAccountId])
 
   async function loadInitial() {
     const supabase = createClient()
     const [stratRes, accRes, pfRes, szRes] = await Promise.all([
-      supabase.from('qel_strategies').select('*').order('magic'),
-      supabase.from('qel_accounts').select('*').order('name'),
+      supabase.from('qel_strategies').select('*').eq('market_type', marketType).order('magic'),
+      supabase.from('qel_accounts').select('*').eq('market_type', marketType).order('name'),
       supabase.from('qel_portfolios').select('id, account_id'),
       supabase.from('qel_strategy_sizing').select('portfolio_id, strategy_id, current_lots, recommended_lots, status, created_at').order('created_at', { ascending: false }),
     ])
@@ -95,9 +97,9 @@ export default function QuantPage() {
     setAccounts(accRes.data || [])
     setPortfolios((pfRes.data as { id: string; account_id: string }[]) || [])
     setSizingRows((szRes.data as { portfolio_id: string; strategy_id: string; current_lots: number | null; recommended_lots: number | null; status: string | null; created_at: string }[]) || [])
-    if (accRes.data && accRes.data.length > 0) {
-      setSelectedAccountId(accRes.data[0].id)
-    }
+    // Sempre riassegnato, anche a null: col vecchio `if (length > 0)` cambiando macro su una
+    // senza conti restava selezionato quello dell'altra -> leak di dati cross-macro.
+    setSelectedAccountId(accRes.data?.[0]?.id ?? '')
     setLoading(false)
   }
 
@@ -607,7 +609,7 @@ export default function QuantPage() {
         setBenchResult(`Benchmark aggiornati: ${json.benchmarks?.reduce((s: number, b: { rows: number }) => s + b.rows, 0)} prezzi, ${json.alpha?.length} strategie`)
         // Reload strategies without resetting account selector
         const supabase = createClient()
-        const { data: strats } = await supabase.from('qel_strategies').select('*').order('magic')
+        const { data: strats } = await supabase.from('qel_strategies').select('*').eq('market_type', marketType).order('magic')
         if (strats) {
           setBaseStrategies(strats)
           // Re-apply per-account data

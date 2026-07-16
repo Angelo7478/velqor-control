@@ -2,6 +2,7 @@
 
 import { useEffect, useState, useMemo } from 'react'
 import { createClient } from '@/lib/supabase-browser'
+import { useUI } from '@/stores/ui'
 import { QelStrategy, QelAccount, QelBenchmark } from '@/types/database'
 import {
   fmt, fmtUsd, fmtPct, plColor, groupColor, styleColor, styleLabel,
@@ -126,6 +127,7 @@ function fmtDateIT(d: string): string {
 // ============================================
 
 export default function MonthlyPage() {
+  const marketType = useUI((s) => s.marketType)
   const [accounts, setAccounts] = useState<QelAccount[]>([])
   const [selectedAccountId, setSelectedAccountId] = useState('')
   const [strategies, setStrategies] = useState<QelStrategy[]>([])
@@ -156,15 +158,16 @@ export default function MonthlyPage() {
       const { data } = await supabase
         .from('qel_accounts')
         .select('*')
+        .eq('market_type', marketType)
         .in('status', ['active', 'funded', 'challenge', 'verification'])
         .order('name')
-      if (data && data.length > 0) {
-        setAccounts(data)
-        setSelectedAccountId(data[0].id)
-      }
+      // Sempre riassegnati, anche a vuoto: col vecchio `if (length > 0)` cambiando macro su
+      // una senza conti restava selezionato quello dell'altra -> leak di dati cross-macro.
+      setAccounts(data ?? [])
+      setSelectedAccountId(data?.[0]?.id ?? '')
     }
     init()
-  }, [])
+  }, [marketType])
 
   // ---- Load data when account/month/mode changes ----
   useEffect(() => {
@@ -209,7 +212,7 @@ export default function MonthlyPage() {
         .not('close_time', 'is', null)
         .gte('close_time', prevStart).lt('close_time', prevEnd).order('close_time'),
       // 3. Strategies
-      supabase.from('qel_strategies').select('*').order('magic'),
+      supabase.from('qel_strategies').select('*').eq('market_type', marketType).order('magic'),
       // 4. Snapshots for equity curve
       supabase.from('qel_account_snapshots').select('ts, equity, account_id')
         .in('account_id', lineageIds)
