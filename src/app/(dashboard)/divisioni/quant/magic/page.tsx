@@ -84,9 +84,15 @@ export default function StatoMagicPage() {
   const stratByMagic: Record<number, Strat> = {}
   strats.forEach(s => { if (s.magic != null) stratByMagic[s.magic] = s })
 
+  // Cascata sul macro: qel_strategy_variants non ha market_type, ma il suo base_magic punta a
+  // una strategia che ce l'ha. Senza questo filtro il catalogo renderizzava TUTTE le varianti
+  // -> su FUTURE comparivano quelle FTMO. Le strategie sono gia' filtrate: basta tenere le
+  // varianti il cui base_magic esiste nel set corrente.
+  const macroVariants = variants.filter(v => stratByMagic[v.base_magic] != null)
+
   // raggruppa per base_magic
   const groups: Record<number, Variant[]> = {}
-  variants.forEach(v => { (groups[v.base_magic] = groups[v.base_magic] || []).push(v) })
+  macroVariants.forEach(v => { (groups[v.base_magic] = groups[v.base_magic] || []).push(v) })
 
   // flag compliance: stessa config identica (magic+ora+ATR) su piu conti attivi
   function isDuplicateConfig(v: Variant, list: Variant[]): boolean {
