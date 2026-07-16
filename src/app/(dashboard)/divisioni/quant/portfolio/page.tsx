@@ -220,33 +220,63 @@ export default function PortfolioBuilderPage() {
     const magics = new Map<number, number>()
     for (const r of opRows) if (r.s.magic != null) magics.set(r.s.magic, r.lots)
     const pts = signals.filter(g => magics.has(g.base_magic))
-    if (pts.length === 0) return null
+    if (pts.length > 0) {
+      let cum = 0, peak = 0, maxDd = 0
+      const byDay = new Map<string, number>()
+      const curve: { t: string; eq: number }[] = []
+      for (const g of pts) {
+        const pnl = g.pl_per_lot * (magics.get(g.base_magic) || 0)
+        cum += pnl
+        peak = Math.max(peak, cum)
+        maxDd = Math.max(maxDd, peak - cum)
+        const day = g.sig_time.slice(0, 10)
+        byDay.set(day, (byDay.get(day) || 0) + pnl)
+        curve.push({ t: g.sig_time.slice(0, 10), eq: Math.round(cum) })
+      }
+      const days = [...byDay.values()]
+      const wins = days.filter(d => d > 0).length
+      const worstDay = Math.min(0, ...days)
+      const first = pts[0].sig_time, last = pts[pts.length - 1].sig_time
+      const months = Math.max(1, (Date.parse(last) - Date.parse(first)) / (1000 * 60 * 60 * 24 * 30.44))
+      // downsample curve a ~120 punti per il grafico
+      const step = Math.max(1, Math.floor(curve.length / 120))
+      const chart = curve.filter((_, i) => i % step === 0 || i === curve.length - 1)
+      return {
+        net: cum, maxDd, retDd: maxDd > 0 ? cum / maxDd : 0,
+        dayWinPct: days.length ? (wins / days.length) * 100 : 0, worstDay,
+        tradingDays: days.length, months, monthlyPct: (cum / months / equity) * 100, chart,
+        source: 'live' as const,
+      }
+    }
+    // Fallback BACKTEST: nessun trade live per le magic selezionate (es. book Darwinex, 0-live).
+    // Curva a risoluzione MENSILE dai backtest (scala nativa della strategia) scalati ai lotti.
+    const byMonth = new Map<string, number>()
+    for (const m of backtestMonthly) {
+      const lots = magics.get(m.magic)
+      if (lots == null) continue
+      byMonth.set(m.month, (byMonth.get(m.month) || 0) + Number(m.pl_per_lot) * lots)
+    }
+    if (byMonth.size === 0) return null
+    const monthsSorted = [...byMonth.keys()].sort()
     let cum = 0, peak = 0, maxDd = 0
-    const byDay = new Map<string, number>()
     const curve: { t: string; eq: number }[] = []
-    for (const g of pts) {
-      const pnl = g.pl_per_lot * (magics.get(g.base_magic) || 0)
-      cum += pnl
+    for (const mo of monthsSorted) {
+      cum += byMonth.get(mo) || 0
       peak = Math.max(peak, cum)
       maxDd = Math.max(maxDd, peak - cum)
-      const day = g.sig_time.slice(0, 10)
-      byDay.set(day, (byDay.get(day) || 0) + pnl)
-      curve.push({ t: g.sig_time.slice(0, 10), eq: Math.round(cum) })
+      curve.push({ t: mo, eq: Math.round(cum) })
     }
-    const days = [...byDay.values()]
-    const wins = days.filter(d => d > 0).length
-    const worstDay = Math.min(0, ...days)
-    const first = pts[0].sig_time, last = pts[pts.length - 1].sig_time
-    const months = Math.max(1, (Date.parse(last) - Date.parse(first)) / (1000 * 60 * 60 * 24 * 30.44))
-    // downsample curve a ~120 punti per il grafico
-    const step = Math.max(1, Math.floor(curve.length / 120))
-    const chart = curve.filter((_, i) => i % step === 0 || i === curve.length - 1)
+    const vals = [...byMonth.values()]
+    const wins = vals.filter(v => v > 0).length
+    const worstMonth = Math.min(0, ...vals)
+    const months = monthsSorted.length
     return {
       net: cum, maxDd, retDd: maxDd > 0 ? cum / maxDd : 0,
-      dayWinPct: days.length ? (wins / days.length) * 100 : 0, worstDay,
-      tradingDays: days.length, months, monthlyPct: (cum / months / equity) * 100, chart,
+      dayWinPct: vals.length ? (wins / vals.length) * 100 : 0, worstDay: worstMonth,
+      tradingDays: months, months, monthlyPct: (cum / months / equity) * 100, chart: curve,
+      source: 'backtest' as const,
     }
-  }, [signals, sizing, sizeMode, equity])
+  }, [signals, sizing, sizeMode, equity, backtestMonthly, opRows])
 
   // ---- Finestra a BOOK PIENO: mese da cui TUTTE le strategie selezionate hanno dati ----
   // Toglie il "rodaggio" (2021: solo 3-4 strategie su 6) che abbassava la media mensile artificialmente.
@@ -500,12 +530,12 @@ export default function PortfolioBuilderPage() {
       {sim && (
         <div className="bg-white border border-slate-200 rounded-xl p-4">
           <div className="flex flex-wrap gap-x-8 gap-y-1 text-sm mb-3">
-            <span className="font-semibold text-slate-900">Simulazione (live deduplicato, scalato ai lotti)</span>
+            <span className="font-semibold text-slate-900">{sim.source === 'backtest' ? 'Simulazione (backtest combinato mensile, scalato ai lotti)' : 'Simulazione (live deduplicato, scalato ai lotti)'}</span>
             <span>Net <b className={sim.net >= 0 ? 'text-green-700' : 'text-red-600'}>{fmt(sim.net, 0)}</b></span>
             <span>Max DD <b>{fmt(sim.maxDd, 0)}</b></span>
             <span>Return/DD <b>{fmt(sim.retDd, 2)}</b></span>
-            <span>Giorni positivi <b>{fmt(sim.dayWinPct, 0)}%</b></span>
-            <span>Worst-day reale <b className="text-red-600">{fmt(sim.worstDay, 0)}</b></span>
+            <span>{sim.source === 'backtest' ? 'Mesi positivi' : 'Giorni positivi'} <b>{fmt(sim.dayWinPct, 0)}%</b></span>
+            <span>{sim.source === 'backtest' ? 'Worst-month' : 'Worst-day reale'} <b className="text-red-600">{fmt(sim.worstDay, 0)}</b></span>
             <span>~ Mensile <b>{fmt(sim.monthlyPct, 2)}%</b></span>
           </div>
           <ResponsiveContainer width="100%" height={220}>
