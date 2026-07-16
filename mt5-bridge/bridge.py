@@ -445,31 +445,61 @@ def calc_historical_dd(acc_id, acc_size):
 # STRATEGY MAP
 # ============================================
 
-def normalize_magic(raw_magic):
-    """SQX encodes magic as strategy_magic * 1000 + variant.
-    Try raw first (for CSV-imported trades with simple magic),
-    then floor(magic/1000) for SQX-encoded 4+ digit magic numbers."""
-    return int(raw_magic)
-
-
 def load_strategy_map():
     strategies = sb_get("qel_strategies", {"select": "id,magic", "org_id": f"eq.{ORG_ID}"})
     base_map = {s["magic"]: s["id"] for s in strategies}
     return base_map
 
 
-def resolve_strategy(raw_magic, strategy_map):
+def load_deploy_map():
+    """Mappa (account_id, deploy_magic) -> strategy_id da qel_portfolio_strategies.
+
+    Serve perche' lo stesso magic significa strategie DIVERSE su conti diversi: il magic 3
+    su un conto FTMO e' la 'NQ H1 Long Monday' (US100.cash), sullo stesso numero su Darwinex
+    e' la riga di scala 'NDX Long H1' (magic 30, point_value 10). Senza questa mappa
+    resolve_strategy attribuisce i trade NDX di Darwinex alla strategia FTMO."""
+    ptf = sb_get("qel_portfolios", {"select": "id,account_id", "org_id": f"eq.{ORG_ID}"})
+    acct_by_ptf = {p["id"]: p["account_id"] for p in ptf}
+    if not acct_by_ptf:
+        return {}
+    rows = sb_get("qel_portfolio_strategies", {"select": "portfolio_id,strategy_id,deploy_magic"})
+    out = {}
+    for r in rows:
+        acc = acct_by_ptf.get(r.get("portfolio_id"))
+        dm = r.get("deploy_magic")
+        if acc and dm is not None and r.get("strategy_id"):
+            out[(acc, int(dm))] = r["strategy_id"]
+    return out
+
+
+def resolve_strategy(raw_magic, strategy_map, deploy_map=None, account_id=None):
     """Resolve MT5 magic to strategy_id.
-    Match esatto, poi base = magic % 100 (coerente con la colonna generata
-    qel_trades.base_magic). Gestisce sia i magic puri (7, 12) sia i compositi
-    con offset multiplo di 100 (es. 54403 -> base 3, 54412 -> base 12).
+
+    Ordine: (1) mappa per-conto da deploy_magic, (2) match esatto globale,
+    (3) fallback base = magic % 100 (coerente con la colonna generata qel_trades.base_magic:
+    gestisce i compositi con offset SQX, es. 54403 -> base 3).
+
+    Il fallback (3) va SEMPRE loggato: e' il punto in cui il bridge tira a indovinare, ed e'
+    da li' che sono passate le due attribuzioni sbagliate del 16 luglio (magic 101-106 -> base
+    1-6 delle FTMO, magic 105 -> BTC Short retired). Un trade non attribuito si vede; un trade
+    attribuito male no.
+
+    Il fallback NON si puo' togliere: 8 conti con ~1000 trade non hanno righe in
+    qel_portfolio_strategies e resterebbero orfani.
+
     Il magic grezzo viene preservato cosi com'e; si risolve solo strategy_id."""
     m = int(raw_magic)
+    if deploy_map and account_id is not None:
+        sid = deploy_map.get((account_id, m))
+        if sid:
+            return m, sid
     if m in strategy_map:
         return m, strategy_map[m]
     base = m % 100
     if base != 0 and base in strategy_map:
+        log.warning(f"MAGIC: {m} sconosciuto, fallback su base {base} (conto {account_id}) — verificare l'EA")
         return m, strategy_map[base]
+    log.warning(f"MAGIC: {m} non attribuito (base {base} inesistente, conto {account_id})")
     return m, None
 
 
@@ -477,7 +507,7 @@ def resolve_strategy(raw_magic, strategy_map):
 # SYNC — SINGOLO CONTO
 # ============================================
 
-def sync_current_account(account, strategy_map):
+def sync_current_account(account, strategy_map, deploy_map=None):
     acc_id = account["id"]
     acc_size = float(account.get("account_size", 100000))
 
@@ -517,7 +547,7 @@ def sync_current_account(account, strategy_map):
     log.info(f"  Posizioni aperte: {len(positions)}")
     for pos in positions:
         pos["account_id"] = acc_id
-        norm_magic, strat_id = resolve_strategy(pos["magic"], strategy_map)
+        norm_magic, strat_id = resolve_strategy(pos["magic"], strategy_map, deploy_map, acc_id)
         pos["magic"] = norm_magic
         if strat_id:
             pos["strategy_id"] = strat_id
@@ -550,7 +580,7 @@ def sync_current_account(account, strategy_map):
     log.info(f"  Trade chiusi: {len(closed)}")
     for trade in closed:
         trade["account_id"] = acc_id
-        norm_magic, strat_id = resolve_strategy(trade["magic"], strategy_map)
+        norm_magic, strat_id = resolve_strategy(trade["magic"], strategy_map, deploy_map, acc_id)
         trade["magic"] = norm_magic
         if strat_id:
             trade["strategy_id"] = strat_id
@@ -594,7 +624,7 @@ def sync_current_account(account, strategy_map):
             if not c:
                 continue  # nessun deal di chiusura: lascia com'e' (sicuro)
             c["account_id"] = acc_id
-            nm, sid = resolve_strategy(c["magic"], strategy_map)
+            nm, sid = resolve_strategy(c["magic"], strategy_map, deploy_map, acc_id)
             c["magic"] = nm
             if sid:
                 c["strategy_id"] = sid
@@ -687,6 +717,7 @@ def run_enrich():
 
         acc_id = account["id"]
         strategy_map = load_strategy_map()
+        deploy_map = load_deploy_map()
         log.info(f"Enrich: {account['name']} ({login})")
 
         date_from = datetime.now(tz=timezone.utc) - timedelta(days=HISTORY_DAYS)
@@ -728,7 +759,7 @@ def run_enrich():
                 except:
                     pass
             if magic:
-                norm_magic, strat_id = resolve_strategy(magic, strategy_map)
+                norm_magic, strat_id = resolve_strategy(magic, strategy_map, deploy_map, acc_id)
                 patch_data = {"magic": norm_magic}
                 if strat_id:
                     patch_data["strategy_id"] = strat_id
@@ -759,8 +790,9 @@ def run_sync():
 
         log.info(f"SYNC: {account['name']} ({login})")
         strategy_map = load_strategy_map()
+        deploy_map = load_deploy_map()
 
-        if sync_current_account(account, strategy_map):
+        if sync_current_account(account, strategy_map, deploy_map):
             try:
                 update_strategy_real_metrics(strategy_map)
             except Exception as e:
