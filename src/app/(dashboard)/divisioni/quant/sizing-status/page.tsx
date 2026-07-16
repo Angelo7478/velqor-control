@@ -114,7 +114,13 @@ export default function SizingStatusPage() {
     byPortfolio[row.portfolio_id].push(row)
   }
 
-  const shown = portfolios.filter(p => p.optimization_result || (byPortfolio[p.id] && byPortfolio[p.id].length))
+  // Cascata sul macro: qel_portfolios non ha market_type, ma il suo conto si'. Senza questo
+  // filtro la pagina renderizzava DIRETTAMENTE dai portfolios -> su FUTURE mostrava tutti
+  // quelli CFD (i conti erano gia' filtrati, ma qui non ci passava).
+  const shown = portfolios.filter(p =>
+    accById[p.account_id] &&
+    (p.optimization_result || (byPortfolio[p.id] && byPortfolio[p.id].length))
+  )
 
   return (
     <div className="p-4 sm:p-6 space-y-4">
