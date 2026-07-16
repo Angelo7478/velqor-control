@@ -2,6 +2,8 @@
 
 import { useEffect, useState } from 'react'
 import { createClient } from '@/lib/supabase-browser'
+import { withTimeout } from '@/lib/utils'
+import { useToast } from '@/components/ui/Toast'
 import { QelAccount } from '@/types/database'
 
 function fmt(n: number | null, decimals = 2): string {
@@ -30,6 +32,7 @@ export default function ContiConfigPage() {
   const [addSaving, setAddSaving] = useState(false)
   const [addMsg, setAddMsg] = useState('')
   const [copiedCmd, setCopiedCmd] = useState<string | null>(null)
+  const { showToast, toastNode } = useToast()
 
   useEffect(() => { loadAccounts() }, [])
 
@@ -66,7 +69,8 @@ export default function ContiConfigPage() {
     setMsg('')
     try {
       const supabase = createClient()
-      const { data, error } = await supabase.from('qel_accounts').update({
+      // timeout: senza tetto una chiamata appesa lascia il bottone su "Salvataggio..." per sempre
+      const { data, error } = await withTimeout(supabase.from('qel_accounts').update({
         name: form.name,
         server: form.server || null,
         login: form.login || null,
@@ -74,19 +78,24 @@ export default function ContiConfigPage() {
         status: form.status as QelAccount['status'],
         vps_name: form.vps_name || null,
         mt5_terminal_path: form.mt5_terminal_path || null,
-      }).eq('id', editing).select()
+      }).eq('id', editing).select(), 10000, 'Salvataggio conto')
 
       if (error) {
         setMsg(`Errore: ${error.message}`)
+        showToast('error', `Errore salvataggio conto — ${error.message}`)
       } else if (!data || data.length === 0) {
         setMsg('Errore: nessun record aggiornato')
+        showToast('error', 'Errore salvataggio conto — nessun record aggiornato (controlla i permessi)')
       } else {
         setMsg('Salvato!')
+        showToast('success', 'Conto salvato')
         setEditing(null)
         await loadAccounts()
       }
     } catch (e) {
-      setMsg(`Errore: ${e instanceof Error ? e.message : 'sconosciuto'}`)
+      const m = e instanceof Error ? e.message : 'sconosciuto'
+      setMsg(`Errore: ${m}`)
+      showToast('error', `Errore salvataggio conto — ${m}`)
     } finally {
       setSaving(false)
     }
@@ -99,7 +108,7 @@ export default function ContiConfigPage() {
     try {
       const supabase = createClient()
       const orgId = accounts.length > 0 ? accounts[0].org_id : 'a0000000-0000-0000-0000-000000000001'
-      const { data, error } = await supabase.from('qel_accounts').insert({
+      const { data, error } = await withTimeout(supabase.from('qel_accounts').insert({
         org_id: orgId,
         name: addForm.name.trim(),
         broker: addForm.broker || 'FTMO',
@@ -118,20 +127,25 @@ export default function ContiConfigPage() {
         margin_used: 0,
         daily_dd_pct: 0,
         total_dd_pct: 0,
-      }).select()
+      }).select(), 10000, 'Creazione conto')
 
       if (error) {
         setAddMsg(`Errore: ${error.message}`)
+        showToast('error', `Errore creazione conto — ${error.message}`)
       } else if (!data || data.length === 0) {
         setAddMsg('Errore: conto non creato')
+        showToast('error', 'Errore creazione conto — nessuna riga restituita (controlla i permessi)')
       } else {
         setAddMsg('Conto creato!')
+        showToast('success', 'Conto creato')
         setShowAdd(false)
         setAddForm({ name: '', broker: 'FTMO', account_size: '10000', currency: 'USD', server: '', login: '', investor_password: '', status: 'active' })
         await loadAccounts()
       }
     } catch (e) {
-      setAddMsg(`Errore: ${e instanceof Error ? e.message : 'sconosciuto'}`)
+      const m = e instanceof Error ? e.message : 'sconosciuto'
+      setAddMsg(`Errore: ${m}`)
+      showToast('error', `Errore creazione conto — ${m}`)
     } finally {
       setAddSaving(false)
     }
@@ -139,12 +153,20 @@ export default function ContiConfigPage() {
 
   async function deleteAccount(id: string, name: string) {
     if (!confirm(`Eliminare il conto "${name}"? Tutti i dati associati verranno persi.`)) return
-    const supabase = createClient()
-    const { error } = await supabase.from('qel_accounts').delete().eq('id', id)
-    if (error) {
-      setMsg(`Errore eliminazione: ${error.message}`)
-    } else {
-      await loadAccounts()
+    try {
+      const supabase = createClient()
+      const { error } = await withTimeout(supabase.from('qel_accounts').delete().eq('id', id), 10000, 'Eliminazione conto')
+      if (error) {
+        setMsg(`Errore eliminazione: ${error.message}`)
+        showToast('error', `Errore eliminazione conto — ${error.message}`)
+      } else {
+        showToast('success', `Conto "${name}" eliminato`)
+        await loadAccounts()
+      }
+    } catch (e) {
+      const m = e instanceof Error ? e.message : 'sconosciuto'
+      setMsg(`Errore eliminazione: ${m}`)
+      showToast('error', `Errore eliminazione conto — ${m}`)
     }
   }
 
@@ -546,6 +568,7 @@ export default function ContiConfigPage() {
           </div>
         </div>
       </div>
+      {toastNode}
     </div>
   )
 }
