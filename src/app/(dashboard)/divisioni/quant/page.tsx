@@ -700,19 +700,15 @@ export default function QuantPage() {
           )}
         </div>
         <div className="flex flex-wrap gap-2">
-          <a href="/divisioni/quant/sizing"
+          <a href="/divisioni/quant/sizing-status"
             className="px-3 py-2 bg-indigo-600 text-white text-xs sm:text-sm font-medium rounded-lg hover:bg-indigo-700 transition">
-            Sizing
+            Stato Sizing
           </a>
           <a href="/divisioni/quant/health"
             className="px-3 py-2 bg-white border border-slate-200 text-slate-700 text-xs sm:text-sm font-medium rounded-lg hover:bg-slate-50 transition">
             Health
           </a>
-          <a href="/divisioni/quant/scenarios"
-            className="px-3 py-2 bg-white border border-slate-200 text-slate-700 text-xs sm:text-sm font-medium rounded-lg hover:bg-slate-50 transition">
-            Scenari
-          </a>
-          <a href="/divisioni/quant/builder"
+          <a href="/divisioni/quant/portfolio"
             className="px-3 py-2 bg-white border border-slate-200 text-slate-700 text-xs sm:text-sm font-medium rounded-lg hover:bg-slate-50 transition">
             Builder
           </a>

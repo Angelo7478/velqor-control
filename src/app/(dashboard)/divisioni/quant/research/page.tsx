@@ -678,7 +678,7 @@ function CandidateDetail({ c }: { c: QreStrategyCandidate }) {
         )}
         {inPipeline && (
           <>
-            <a href="/divisioni/quant/builder"
+            <a href="/divisioni/quant/portfolio"
               className="text-xs px-3 py-1.5 rounded-md bg-violet-600 text-white hover:bg-violet-700">
               Apri nel Builder →
             </a>
