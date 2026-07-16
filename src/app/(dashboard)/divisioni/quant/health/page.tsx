@@ -8,7 +8,6 @@ import {
   fitnessColor, calcHealthReport, HealthReport,
   detectMarketRegimes4Q, REGIME_COHERENCE, REGIME_4Q_LABELS, type MarketRegime4Q,
 } from '@/lib/quant-utils'
-import QuantNav from '../quant-nav'
 import InfoTooltip from '@/components/ui/InfoTooltip'
 
 // --- Italian labels ---
@@ -241,7 +240,6 @@ export default function HealthPage() {
       {/* Intestazione */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
         <div>
-          <QuantNav />
           <h1 className="text-2xl font-bold text-slate-900 mt-1">Monitor Salute Strategie</h1>
           <p className="text-sm text-slate-500 mt-0.5">
             Confronto test/reale per conto, pendulum, segnali di allarme

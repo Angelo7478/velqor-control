@@ -5,7 +5,6 @@ import { createClient } from '@/lib/supabase-browser'
 import {
   QreSource, QreContent, QreTaxonomy, QreStrategyCandidate, QreChunk,
 } from '@/types/database'
-import QuantNav from '../quant-nav'
 
 // ============================================================
 // Quant Research — libreria della conoscenza (tabelle qre_*)
@@ -239,7 +238,6 @@ export default function ResearchPage() {
     <div className="p-4 sm:p-6 space-y-4">
       {/* Intestazione */}
       <div>
-        <QuantNav />
         <div className="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-2 mt-1">
           <div>
             <h1 className="text-2xl font-bold text-slate-900">Quant Research</h1>
