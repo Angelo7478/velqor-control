@@ -3,7 +3,6 @@
 import { useEffect, useState } from 'react'
 import { createClient } from '@/lib/supabase-browser'
 import { QelAccount } from '@/types/database'
-import QuantNav from '../quant-nav'
 
 function fmt(n: number | null, decimals = 2): string {
   if (n === null || n === undefined) return '—'
@@ -166,7 +165,6 @@ export default function ContiConfigPage() {
   return (
     <div className="p-4 sm:p-6 space-y-4">
       <div>
-        <QuantNav />
         <div className="flex justify-between items-start mt-1">
           <div>
             <h1 className="text-2xl font-bold text-slate-900">Configurazione Conti</h1>

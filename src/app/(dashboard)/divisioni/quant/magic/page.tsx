@@ -2,7 +2,6 @@
 
 import { useEffect, useState } from 'react'
 import { createClient } from '@/lib/supabase-browser'
-import QuantNav from '../quant-nav'
 
 type Variant = {
   id: string
@@ -130,7 +129,6 @@ export default function StatoMagicPage() {
   return (
     <div className="p-4 sm:p-6 space-y-4">
       <div>
-        <QuantNav />
         <div className="mt-1">
           <h1 className="text-2xl font-bold text-slate-900">Stato Magic & Varianti</h1>
           <p className="text-sm text-slate-500 mt-0.5">

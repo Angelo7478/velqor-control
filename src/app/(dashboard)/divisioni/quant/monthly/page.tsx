@@ -16,7 +16,6 @@ import {
 } from '@/lib/quant-utils'
 import { VELQOR_LOGO_BASE64 } from '@/lib/velqor-logo'
 import { myfxbookUrlFor } from '@/lib/myfxbook'
-import QuantNav from '../quant-nav'
 import {
   AreaChart, Area, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend,
   ResponsiveContainer, ReferenceLine, Cell,
@@ -1092,7 +1091,6 @@ export default function MonthlyPage() {
 
   return (
     <div className="p-4 md:p-6 max-w-7xl mx-auto">
-      <QuantNav />
 
       {/* Title + Controls */}
       <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4 mb-6">

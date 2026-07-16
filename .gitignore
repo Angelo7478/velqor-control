@@ -37,3 +37,6 @@ mt5-bridge/*.log
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# Backup datati dei file operativi (convenzione MASTER sez. 5.3) — mai in git
+*.bak-*
