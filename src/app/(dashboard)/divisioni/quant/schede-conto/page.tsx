@@ -64,22 +64,34 @@ type Portfolio = {
   size_policy: string | null
 }
 
+// Campione live DEDUPLICATO per segnale (vista v_strategy_live), chiave = base_magic.
+type LiveStats = { signals: number; profit_factor: number | null }
+
 const LEVELS = ['conservative', 'neutral', 'aggressive'] as const
 const LEVEL_LABEL: Record<string, string> = { conservative: 'Conservativo', neutral: 'Neutro', aggressive: 'Aggressivo' }
 const PF_FLOOR = 1.2 // PF live minimo per considerare una strategia "validata dai dati" (MASTER sez. 6.15)
 
-// Stato validazione live di una strategia: progresso trade vs obiettivo + gate PF.
-// I trade di VERSIONI PRECEDENTI (validation_baseline_trades) restano nelle statistiche
+// Stato validazione live di una strategia: progresso segnali vs obiettivo + gate PF.
+// I segnali di VERSIONI PRECEDENTI (validation_baseline_trades) restano nelle statistiche
 // ma non contano per la validazione della versione deployata (caso magic 6 H1 -> M15).
-function validationOf(s: Strategy | null) {
+//
+// UNITA': si conta per SEGNALE (v_strategy_live), non per trade-conto. La stessa strategia su
+// N conti prende lo STESSO segnale, quindi i campi grezzi qel_strategies.real_* contano N volte
+// un solo evento di mercato e gonfiano il campione 3-4x (magic 23: 48 grezzi vs 15 segnali).
+// L'obiettivo e' calcolato dal backtest a 1 lotto, che e' un flusso di SEGNALI: leggere il grezzo
+// significava confrontare due unita' diverse e far sembrare pronta una strategia al terzo dei dati.
+// Fallback ai campi grezzi solo se la vista non ha la riga (strategia 0-live): li' i due valori
+// coincidono comunque, perche' senza segnali non c'e' nulla da deduplicare.
+function validationOf(s: Strategy | null, live?: LiveStats) {
   if (!s) return null
   const target = s.validation_target_trades ?? 40
   const baseline = s.validation_baseline_trades ?? 0
-  const trades = Math.max(0, (s.real_trades ?? 0) - baseline)
-  const pf = s.real_profit_factor // NB: con baseline > 0 il PF resta misto vecchia+nuova finche la nuova non domina il campione
+  const signals = live?.signals ?? s.real_trades ?? 0
+  const trades = Math.max(0, signals - baseline)
+  const pf = live?.profit_factor ?? s.real_profit_factor // NB: con baseline > 0 il PF resta misto vecchia+nuova finche la nuova non domina il campione
   const pct = target > 0 ? Math.min(100, (trades / target) * 100) : 0
   const byData = trades >= target && pf != null && pf >= PF_FLOOR
-  return { target, trades, pf, pct, byData, proven: s.live_status === 'proven', baseline }
+  return { target, trades, pf, pct, byData, proven: s.live_status === 'proven', baseline, deduped: live != null }
 }
 
 function fmt(n: number | null | undefined, d = 2): string {
@@ -94,6 +106,7 @@ export default function SchedeContoPage() {
   const [strats, setStrats] = useState<PortStrat[]>([])
   const [variants, setVariants] = useState<Map<string, VariantInfo>>(new Map())
   const [liveLots, setLiveLots] = useState<Map<string, number>>(new Map())
+  const [liveStats, setLiveStats] = useState<Map<number, LiveStats>>(new Map())
   const [loading, setLoading] = useState(true)
   const reqIdRef = useRef(0)
 
@@ -105,12 +118,13 @@ export default function SchedeContoPage() {
     const my = ++reqIdRef.current
     const supabase = createClient()
     try {
-      const [accRes, pfRes, psRes, llRes, varRes] = await Promise.all([
+      const [accRes, pfRes, psRes, llRes, varRes, lsRes] = await Promise.all([
         supabase.from('qel_accounts').select('id,name,login,server,account_size,currency,status,challenge_phase,max_daily_loss_pct,max_total_loss_pct,vps_name').eq('market_type', marketType).neq('status', 'inactive').neq('status', 'breached').order('account_size', { ascending: false }),
         supabase.from('qel_portfolios').select('id,account_id,name,max_dd_target_pct,daily_dd_limit_pct,size_policy'),
         supabase.from('qel_portfolio_strategies').select('id,portfolio_id,is_active,active_level,lot_conservative,lot_neutral,lot_aggressive,final_lots,dd_budget_allocation_pct,sizing_notes,target_lots,lots_applied,variant_id,deploy_magic,qel_strategies(id,magic,name,asset_group,direction,strategy_style,parameters,test_mc95_dd,test_max_open_dd,live_status,real_trades,real_profit_factor,validation_target_trades,validation_baseline_trades)'),
         supabase.from('v_account_strategy_live_lot').select('account_id,base_magic,last_lot'),
         supabase.from('qel_strategy_variants').select('id,base_magic,variant_label'),
+        supabase.from('v_strategy_live').select('base_magic,signals,profit_factor'),
       ])
       // Risposta di una macro gia' abbandonata: scartare, o atterra dopo la piu' recente.
       if (my !== reqIdRef.current) return
@@ -123,6 +137,11 @@ export default function SchedeContoPage() {
       const ll = new Map<string, number>()
       for (const r of ((llRes.data as { account_id: string; base_magic: number; last_lot: number }[]) || [])) ll.set(`${r.account_id}:${r.base_magic}`, Number(r.last_lot))
       setLiveLots(ll)
+      const ls = new Map<number, LiveStats>()
+      for (const r of ((lsRes.data as { base_magic: number; signals: number; profit_factor: number | null }[]) || [])) {
+        ls.set(Number(r.base_magic), { signals: Number(r.signals), profit_factor: r.profit_factor == null ? null : Number(r.profit_factor) })
+      }
+      setLiveStats(ls)
     } finally {
       if (my === reqIdRef.current) setLoading(false)
     }
@@ -165,7 +184,7 @@ export default function SchedeContoPage() {
     <div className="space-y-6">
       <div>
         <h1 className="text-2xl font-bold text-slate-900">Schede Conto</h1>
-        <p className="text-sm text-slate-500">Composizione e sizing a 3 livelli per conto. La size <b>attiva</b> è evidenziata; le 3 colonne sono i lotti <b>attuali</b> in esecuzione. <b>Modalità</b> (badge in alto) = <span className="text-blue-700">Ridotta</span> (haircut 0,7 alle non validate) o <span className="text-amber-700">Piena</span>. Per ogni strategia una <b>barra di validazione</b> (trade live / obiettivo + PF): quando raggiunge l'obiettivo compare <b>Promuovi</b> (rimuove il haircut ovunque). Avvisi automatici: Piena con strategie non validate → valuta Ridotta; Ridotta con strategia ormai validata → puoi salire. <b>Target</b> = lotti da caricare (<span className="text-green-700">✓</span> applicati / <span className="text-amber-700">→</span> da aggiornare in MT5). Revisione mensile.</p>
+        <p className="text-sm text-slate-500">Composizione e sizing a 3 livelli per conto. La size <b>attiva</b> è evidenziata; le 3 colonne sono i lotti <b>attuali</b> in esecuzione. <b>Modalità</b> (badge in alto) = <span className="text-blue-700">Ridotta</span> (haircut 0,7 alle non validate) o <span className="text-amber-700">Piena</span>. Per ogni strategia una <b>barra di validazione</b> (<b>segnali</b> live / obiettivo + PF): quando raggiunge l'obiettivo compare <b>Promuovi</b> (rimuove il haircut ovunque). I segnali sono <b>deduplicati</b>: la stessa strategia su piu&#39; conti prende lo stesso segnale e conta <b>una volta</b>, come l&#39;obiettivo, che viene dal backtest a 1 lotto. Avvisi automatici: Piena con strategie non validate → valuta Ridotta; Ridotta con strategia ormai validata → puoi salire. <b>Target</b> = lotti da caricare (<span className="text-green-700">✓</span> applicati / <span className="text-amber-700">→</span> da aggiornare in MT5). Revisione mensile.</p>
       </div>
 
       {/* Aggregatore capitale per strategia — limite FTMO $400k */}
@@ -223,8 +242,8 @@ export default function SchedeContoPage() {
         }, 0)
         // Modalità salvata del conto + advisory di validazione
         const policy: 'full' | 'reduced' = pf?.size_policy === 'full' ? 'full' : 'reduced'
-        const trulyUnproven = rows.filter(r => { const v = validationOf(r.qel_strategies); return v && !v.proven && !v.byData })
-        const promotable = rows.filter(r => { const v = validationOf(r.qel_strategies); return v && !v.proven && v.byData })
+        const trulyUnproven = rows.filter(r => { const v = validationOf(r.qel_strategies, liveStats.get(Number(r.qel_strategies?.magic))); return v && !v.proven && !v.byData })
+        const promotable = rows.filter(r => { const v = validationOf(r.qel_strategies, liveStats.get(Number(r.qel_strategies?.magic))); return v && !v.proven && v.byData })
 
         return (
           <div key={acc.id} className="border border-slate-200 rounded-xl bg-white overflow-hidden">
@@ -250,7 +269,7 @@ export default function SchedeContoPage() {
             )}
             {policy === 'reduced' && promotable.length > 0 && (
               <div className="px-4 py-2 bg-green-50 border-b border-green-200 text-xs text-green-800">
-                ✓ {promotable.length} strateg{promotable.length > 1 ? 'ie' : 'ia'} ha raggiunto l'obiettivo di validazione dai dati live ({promotable.map(r => { const v = validationOf(r.qel_strategies); return `${r.qel_strategies?.name} ${v?.trades}/${v?.target}` }).join(', ')}): puoi <b>promuoverla a proven</b> (bottone in tabella) e salire a Piena. Verifica prima che i trade live siano della versione deployata.
+                ✓ {promotable.length} strateg{promotable.length > 1 ? 'ie' : 'ia'} ha raggiunto l'obiettivo di validazione dai dati live ({promotable.map(r => { const v = validationOf(r.qel_strategies, liveStats.get(Number(r.qel_strategies?.magic))); return `${r.qel_strategies?.name} ${v?.trades}/${v?.target}` }).join(', ')}): puoi <b>promuoverla a proven</b> (bottone in tabella) e salire a Piena. Verifica prima che i trade live siano della versione deployata.
               </div>
             )}
 
@@ -276,7 +295,7 @@ export default function SchedeContoPage() {
                     <tbody>
                       {rows.sort((a, b) => (a.qel_strategies?.magic || 0) - (b.qel_strategies?.magic || 0)).map(r => {
                         const s = r.qel_strategies
-                        const v = validationOf(s)
+                        const v = validationOf(s, liveStats.get(Number(s?.magic)))
                         const variantLabel = r.variant_id ? (variants.get(r.variant_id)?.variant_label || 'Variante') : null
                         return (
                           <tr key={r.id} className="border-b border-slate-50 hover:bg-slate-50/50">

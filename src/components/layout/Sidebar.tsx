@@ -30,8 +30,10 @@ export function Sidebar() {
   const pathname = usePathname()
   const { sidebarOpen, closeSidebar, marketType, setMarketType } = useUI()
 
+  // Il confine deve essere il separatore: con startsWith() nudo /schede-conto accendeva
+  // anche /schede (una e' prefisso dell'altra) e risultavano due voci attive insieme.
   const isActive = (href: string) =>
-    href === '/divisioni/quant' ? pathname === href : pathname.startsWith(href)
+    href === '/divisioni/quant' ? pathname === href : pathname === href || pathname.startsWith(href + '/')
 
   const navLink = (item: typeof NAV_ITEMS[number]) => (
     <li key={item.href}>
