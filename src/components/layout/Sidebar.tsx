@@ -23,6 +23,7 @@ const NAV_ITEMS = [
   { href: '/divisioni/quant/health', label: 'Salute', icon: '🩺', scope: 'macro' },
   { href: '/divisioni/quant/monthly', label: 'Mensile', icon: '📈', scope: 'macro' },
   { href: '/divisioni/quant/portfolio', label: 'Builder', icon: '🔧', scope: 'macro' },
+  { href: '/divisioni/quant/correlazione', label: 'Correlazione', icon: '🔗', scope: 'macro' },
   { href: '/divisioni/quant/research', label: 'Research', icon: '🔬', scope: 'global' },
 ] as const
 
