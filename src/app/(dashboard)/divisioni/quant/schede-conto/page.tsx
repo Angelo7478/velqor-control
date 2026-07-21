@@ -64,7 +64,9 @@ type Portfolio = {
   size_policy: string | null
 }
 
-// Campione live DEDUPLICATO per segnale (vista v_strategy_live), chiave = base_magic.
+// Campione live DEDUPLICATO per segnale (vista v_strategy_live_by_id), chiave = magic DELLA STRATEGIA.
+// Non base_magic: la magic 30 gira sul terminale col magic 3, e per base_magic risulterebbe a zero
+// pur avendo 20 trade correttamente attribuiti (sdoppiamento per broker).
 type LiveStats = { signals: number; profit_factor: number | null; avg_per_lot: number | null; first_signal: string | null; last_signal: string | null }
 
 // Profilo del backtest per-lotto (vista v_strategy_test_profile), chiave = magic.
@@ -176,7 +178,7 @@ export default function SchedeContoPage() {
         supabase.from('qel_portfolio_strategies').select('id,portfolio_id,is_active,active_level,lot_conservative,lot_neutral,lot_aggressive,final_lots,dd_budget_allocation_pct,sizing_notes,target_lots,lots_applied,variant_id,deploy_magic,qel_strategies(id,magic,name,asset_group,direction,strategy_style,parameters,test_mc95_dd,test_max_open_dd,live_status,real_trades,real_profit_factor,validation_target_trades,validation_baseline_trades)'),
         supabase.from('v_account_strategy_live_lot').select('account_id,base_magic,last_lot'),
         supabase.from('qel_strategy_variants').select('id,base_magic,variant_label'),
-        supabase.from('v_strategy_live').select('base_magic,signals,profit_factor,avg_per_lot,first_signal,last_signal'),
+        supabase.from('v_strategy_live_by_id').select('magic,signals,profit_factor,avg_per_lot,first_signal,last_signal'),
         supabase.from('v_strategy_test_profile').select('magic,test_avg_per_trade,test_trades_per_month,months_to_validate,target_signals'),
       ])
       // Risposta di una macro gia' abbandonata: scartare, o atterra dopo la piu' recente.
@@ -191,8 +193,8 @@ export default function SchedeContoPage() {
       for (const r of ((llRes.data as { account_id: string; base_magic: number; last_lot: number }[]) || [])) ll.set(`${r.account_id}:${r.base_magic}`, Number(r.last_lot))
       setLiveLots(ll)
       const ls = new Map<number, LiveStats>()
-      for (const r of ((lsRes.data as { base_magic: number; signals: number; profit_factor: number | null; avg_per_lot: number | null; first_signal: string | null; last_signal: string | null }[]) || [])) {
-        ls.set(Number(r.base_magic), {
+      for (const r of ((lsRes.data as { magic: number; signals: number; profit_factor: number | null; avg_per_lot: number | null; first_signal: string | null; last_signal: string | null }[]) || [])) {
+        ls.set(Number(r.magic), {
           signals: Number(r.signals),
           profit_factor: r.profit_factor == null ? null : Number(r.profit_factor),
           avg_per_lot: r.avg_per_lot == null ? null : Number(r.avg_per_lot),

@@ -9,7 +9,7 @@ type Strat = { magic: number; name: string; asset: string | null; direction: str
 type Profile = { magic: number; trades: number; dal: string; al: string; durata_media_h: number | null; durata_max_h: number | null; avg_per_lot: number | null; win_pct: number | null; profit_factor: number | null; worst_mae: number | null; ora_tipica: number | null; pct_long: number | null; trades_per_month: number | null }
 type Overlap = { magic_a: number; magic_b: number; overlap_pct: number; ore_insieme: number }
 type Correl = { magic_a: number; magic_b: number; corr_daily: number | null }
-type Live = { base_magic: number; signals: number; avg_per_lot: number | null; win_pct: number | null; profit_factor: number | null; first_signal: string | null; last_signal: string | null }
+type Live = { magic: number; signals: number; avg_per_lot: number | null; win_pct: number | null; profit_factor: number | null; first_signal: string | null; last_signal: string | null }
 type PortRow = { portfolio_id: string; strategy_id: string; qel_strategies: { magic: number | null } | null }
 type Port = { id: string; account_id: string }
 
@@ -65,7 +65,8 @@ export default function CorrelazionePage() {
         supabase.from('v_bt_profile').select('*'),
         supabase.from('v_bt_overlap').select('magic_a,magic_b,overlap_pct,ore_insieme'),
         supabase.from('v_bt_correlation').select('magic_a,magic_b,corr_daily'),
-        supabase.from('v_strategy_live').select('base_magic,signals,avg_per_lot,win_pct,profit_factor,first_signal,last_signal'),
+        // per STRATEGIA, non per base_magic: la 30 gira col magic 3 e con base_magic risulterebbe a zero
+        supabase.from('v_strategy_live_by_id').select('magic,signals,avg_per_lot,win_pct,profit_factor,first_signal,last_signal'),
         supabase.from('qel_portfolio_strategies').select('portfolio_id,strategy_id,qel_strategies(magic)'),
         supabase.from('qel_portfolios').select('id,account_id').eq('is_active', true),
       ])
@@ -80,7 +81,7 @@ export default function CorrelazionePage() {
       setOv((ovRes.data as Overlap[]) || [])
       setCr((crRes.data as Correl[]) || [])
       const lm = new Map<number, Live>()
-      for (const l of ((lvRes.data as Live[]) || [])) lm.set(Number(l.base_magic), l)
+      for (const l of ((lvRes.data as Live[]) || [])) lm.set(Number(l.magic), l)
       setLive(lm)
       setPorts((poRes.data as Port[]) || [])
       const map = new Map<string, number[]>()
@@ -257,7 +258,10 @@ export default function CorrelazionePage() {
                     const gg = (new Date(l.last_signal).getTime() - new Date(l.first_signal).getTime()) / 86400000
                     liveMese = l.signals / Math.max(gg / 30.44, 0.5)
                   }
-                  const rap = liveMese != null && p?.trades_per_month ? liveMese / Number(p.trades_per_month) : null
+                  // Sotto 4 segnali il rapporto non e' un giudizio ma rumore: un rosso su un trade
+                  // solo fa spegnere strategie sane. Stessa disciplina della colonna edge.
+                  const nFreq = (l?.signals ?? 0) >= 4
+                  const rap = nFreq && liveMese != null && p?.trades_per_month ? liveMese / Number(p.trades_per_month) : null
                   const edgePct = l?.avg_per_lot != null && p?.avg_per_lot ? (Number(l.avg_per_lot) / Number(p.avg_per_lot)) * 100 : null
                   const nSuff = (l?.signals ?? 0) >= 20
                   return (
@@ -267,8 +271,9 @@ export default function CorrelazionePage() {
                       <td className="px-2 py-2 text-right text-slate-600">{p?.trades ?? '—'}</td>
                       <td className="px-2 py-2 text-right text-slate-600">{fmt(p?.trades_per_month, 1)}</td>
                       <td className="px-2 py-2 text-right text-slate-600">{liveMese == null ? '—' : fmt(liveMese, 1)}</td>
-                      <td className={`px-2 py-2 text-right ${rap == null ? 'text-slate-300' : rap > 1.5 || rap < 0.5 ? 'text-red-700 font-semibold' : 'text-green-700'}`}>
-                        {rap == null ? '—' : `${fmt(rap, 2)}×`}
+                      <td className={`px-2 py-2 text-right ${rap == null ? 'text-slate-300' : rap > 1.5 || rap < 0.5 ? 'text-red-700 font-semibold' : 'text-green-700'}`}
+                          title={rap == null && (l?.signals ?? 0) > 0 ? `solo ${l?.signals} segnale/i: sotto 4 non si giudica` : undefined}>
+                        {rap == null ? (l?.signals ? 'poco campione' : '—') : `${fmt(rap, 2)}×`}
                       </td>
                       <td className="px-2 py-2 text-right text-slate-600">{fmt(p?.avg_per_lot, 1)}</td>
                       <td className="px-2 py-2 text-right text-slate-600">{l?.avg_per_lot == null ? '—' : fmt(l.avg_per_lot, 1)}</td>
