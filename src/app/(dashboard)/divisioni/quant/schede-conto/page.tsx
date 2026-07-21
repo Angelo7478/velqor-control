@@ -65,7 +65,58 @@ type Portfolio = {
 }
 
 // Campione live DEDUPLICATO per segnale (vista v_strategy_live), chiave = base_magic.
-type LiveStats = { signals: number; profit_factor: number | null }
+type LiveStats = { signals: number; profit_factor: number | null; avg_per_lot: number | null; first_signal: string | null; last_signal: string | null }
+
+// Profilo del backtest per-lotto (vista v_strategy_test_profile), chiave = magic.
+type TestProfile = { test_avg_per_trade: number | null; test_trades_per_month: number | null; months_to_validate: number | null; target_signals: number | null }
+
+// CONFORMITA' LIVE-vs-TEST. Due assi, perche' rispondono a domande diverse e maturano a velocita' diverse.
+//
+// (a) FREQUENZA — quante operazioni al mese contro quelle attese. Contare eventi e' un processo di
+//     Poisson: si giudica con POCHI dati. 15 segnali quando ne attendevi 3 e' gia' significativo.
+//     E' il rilevatore di EA fuori spec: filtro orario spento, EOD mancante, giorni non filtrati.
+//     E' il controllo che avrebbe beccato la magic 25 (lunedi 01:05) il primo giorno.
+//
+// (b) EDGE — P/L per lotto per operazione contro quello atteso. Matura LENTAMENTE: serve il target
+//     completo (~100 operazioni) prima di dire qualcosa. La banda +/-20% e' il criterio di Duff:
+//     dentro e' varianza normale, fuori — e sempre nello stesso verso — e' overfit o decadimento.
+//     Sotto soglia si tace: un rosso su cinque trade non e' un allarme, e' rumore, e spegnerebbe
+//     strategie sane.
+const EDGE_BAND = 0.20        // tolleranza sul percorso atteso
+const FREQ_BAND = 0.50        // la frequenza tollera piu' rumore (conteggi piccoli)
+const MIN_N_EDGE = 0.5        // frazione del target sotto la quale l'edge non si giudica
+
+type Conformity = {
+  freqRatio: number | null; freqState: 'ok' | 'alta' | 'bassa' | 'muto'
+  edgeRatio: number | null; edgeState: 'ok' | 'sotto' | 'sopra' | 'muto'
+  months: number | null
+}
+
+function conformityOf(live: LiveStats | undefined, prof: TestProfile | undefined, target: number): Conformity {
+  const out: Conformity = { freqRatio: null, freqState: 'muto', edgeRatio: null, edgeState: 'muto', months: prof?.months_to_validate ?? null }
+  if (!live || !prof || !live.signals) return out
+
+  // Frequenza: segnali al mese osservati vs attesi. Minimo mezzo mese di finestra per non
+  // dividere per un intervallo troppo corto (2 segnali in un giorno darebbero 60/mese).
+  if (live.first_signal && live.last_signal && prof.test_trades_per_month) {
+    const giorni = (new Date(live.last_signal).getTime() - new Date(live.first_signal).getTime()) / 86400000
+    const mesi = Math.max(giorni / 30.44, 0.5)
+    const osservati = live.signals / mesi
+    const attesi = Number(prof.test_trades_per_month)
+    if (attesi > 0 && live.signals >= 4) {
+      out.freqRatio = osservati / attesi
+      out.freqState = out.freqRatio > 1 + FREQ_BAND ? 'alta' : out.freqRatio < 1 - FREQ_BAND ? 'bassa' : 'ok'
+    }
+  }
+
+  // Edge: solo con meta' del campione bersaglio, altrimenti resta muto.
+  const atteso = Number(prof.test_avg_per_trade ?? 0)
+  if (live.avg_per_lot != null && atteso !== 0 && live.signals >= Math.max(20, target * MIN_N_EDGE)) {
+    out.edgeRatio = Number(live.avg_per_lot) / atteso
+    out.edgeState = out.edgeRatio < 1 - EDGE_BAND ? 'sotto' : out.edgeRatio > 1 + EDGE_BAND ? 'sopra' : 'ok'
+  }
+  return out
+}
 
 const LEVELS = ['conservative', 'neutral', 'aggressive'] as const
 const LEVEL_LABEL: Record<string, string> = { conservative: 'Conservativo', neutral: 'Neutro', aggressive: 'Aggressivo' }
@@ -107,6 +158,7 @@ export default function SchedeContoPage() {
   const [variants, setVariants] = useState<Map<string, VariantInfo>>(new Map())
   const [liveLots, setLiveLots] = useState<Map<string, number>>(new Map())
   const [liveStats, setLiveStats] = useState<Map<number, LiveStats>>(new Map())
+  const [testProf, setTestProf] = useState<Map<number, TestProfile>>(new Map())
   const [loading, setLoading] = useState(true)
   const reqIdRef = useRef(0)
 
@@ -118,13 +170,14 @@ export default function SchedeContoPage() {
     const my = ++reqIdRef.current
     const supabase = createClient()
     try {
-      const [accRes, pfRes, psRes, llRes, varRes, lsRes] = await Promise.all([
+      const [accRes, pfRes, psRes, llRes, varRes, lsRes, tpRes] = await Promise.all([
         supabase.from('qel_accounts').select('id,name,login,server,account_size,currency,status,challenge_phase,max_daily_loss_pct,max_total_loss_pct,vps_name').eq('market_type', marketType).neq('status', 'inactive').neq('status', 'breached').order('account_size', { ascending: false }),
         supabase.from('qel_portfolios').select('id,account_id,name,max_dd_target_pct,daily_dd_limit_pct,size_policy'),
         supabase.from('qel_portfolio_strategies').select('id,portfolio_id,is_active,active_level,lot_conservative,lot_neutral,lot_aggressive,final_lots,dd_budget_allocation_pct,sizing_notes,target_lots,lots_applied,variant_id,deploy_magic,qel_strategies(id,magic,name,asset_group,direction,strategy_style,parameters,test_mc95_dd,test_max_open_dd,live_status,real_trades,real_profit_factor,validation_target_trades,validation_baseline_trades)'),
         supabase.from('v_account_strategy_live_lot').select('account_id,base_magic,last_lot'),
         supabase.from('qel_strategy_variants').select('id,base_magic,variant_label'),
-        supabase.from('v_strategy_live').select('base_magic,signals,profit_factor'),
+        supabase.from('v_strategy_live').select('base_magic,signals,profit_factor,avg_per_lot,first_signal,last_signal'),
+        supabase.from('v_strategy_test_profile').select('magic,test_avg_per_trade,test_trades_per_month,months_to_validate,target_signals'),
       ])
       // Risposta di una macro gia' abbandonata: scartare, o atterra dopo la piu' recente.
       if (my !== reqIdRef.current) return
@@ -138,10 +191,18 @@ export default function SchedeContoPage() {
       for (const r of ((llRes.data as { account_id: string; base_magic: number; last_lot: number }[]) || [])) ll.set(`${r.account_id}:${r.base_magic}`, Number(r.last_lot))
       setLiveLots(ll)
       const ls = new Map<number, LiveStats>()
-      for (const r of ((lsRes.data as { base_magic: number; signals: number; profit_factor: number | null }[]) || [])) {
-        ls.set(Number(r.base_magic), { signals: Number(r.signals), profit_factor: r.profit_factor == null ? null : Number(r.profit_factor) })
+      for (const r of ((lsRes.data as { base_magic: number; signals: number; profit_factor: number | null; avg_per_lot: number | null; first_signal: string | null; last_signal: string | null }[]) || [])) {
+        ls.set(Number(r.base_magic), {
+          signals: Number(r.signals),
+          profit_factor: r.profit_factor == null ? null : Number(r.profit_factor),
+          avg_per_lot: r.avg_per_lot == null ? null : Number(r.avg_per_lot),
+          first_signal: r.first_signal, last_signal: r.last_signal,
+        })
       }
       setLiveStats(ls)
+      const tp = new Map<number, TestProfile>()
+      for (const r of ((tpRes.data as (TestProfile & { magic: number })[]) || [])) tp.set(Number(r.magic), r)
+      setTestProf(tp)
     } finally {
       if (my === reqIdRef.current) setLoading(false)
     }
@@ -184,7 +245,7 @@ export default function SchedeContoPage() {
     <div className="space-y-6">
       <div>
         <h1 className="text-2xl font-bold text-slate-900">Schede Conto</h1>
-        <p className="text-sm text-slate-500">Composizione e sizing a 3 livelli per conto. La size <b>attiva</b> è evidenziata; le 3 colonne sono i lotti <b>attuali</b> in esecuzione. <b>Modalità</b> (badge in alto) = <span className="text-blue-700">Ridotta</span> (haircut 0,7 alle non validate) o <span className="text-amber-700">Piena</span>. Per ogni strategia una <b>barra di validazione</b> (<b>segnali</b> live / obiettivo + PF): quando raggiunge l'obiettivo compare <b>Promuovi</b> (rimuove il haircut ovunque). I segnali sono <b>deduplicati</b>: la stessa strategia su piu&#39; conti prende lo stesso segnale e conta <b>una volta</b>, come l&#39;obiettivo, che viene dal backtest a 1 lotto. Avvisi automatici: Piena con strategie non validate → valuta Ridotta; Ridotta con strategia ormai validata → puoi salire. <b>Target</b> = lotti da caricare (<span className="text-green-700">✓</span> applicati / <span className="text-amber-700">→</span> da aggiornare in MT5). Revisione mensile.</p>
+        <p className="text-sm text-slate-500">Composizione e sizing a 3 livelli per conto. La size <b>attiva</b> è evidenziata; le 3 colonne sono i lotti <b>attuali</b> in esecuzione. <b>Modalità</b> (badge in alto) = <span className="text-blue-700">Ridotta</span> (haircut 0,7 alle non validate) o <span className="text-amber-700">Piena</span>. Per ogni strategia una <b>barra di validazione</b> (<b>segnali</b> live / obiettivo + PF): quando raggiunge l'obiettivo compare <b>Promuovi</b> (rimuove il haircut ovunque). I segnali sono <b>deduplicati</b>: la stessa strategia su piu&#39; conti prende lo stesso segnale e conta <b>una volta</b>, come l&#39;obiettivo, che viene dal backtest a 1 lotto. L&#39;obiettivo e i <b>mesi stimati</b> escono dalla stessa formula: quanto tempo serve per distinguere l&#39;edge dal rumore al 95% — un edge forte si dimostra in fretta, uno sottile ci mette anni. I badge di <b>conformita&#39;</b> confrontano il live col backtest: <span className="text-red-700">freq</span> (opera piu&#39;/meno del previsto — spia di EA fuori spec, affidabile subito) e <span className="text-red-700">edge</span> (rende meno/piu&#39; dell&#39;atteso, banda ±20%, mostrato solo a meta&#39; obiettivo raggiunto: sotto, sarebbe rumore). Avvisi automatici: Piena con strategie non validate → valuta Ridotta; Ridotta con strategia ormai validata → puoi salire. <b>Target</b> = lotti da caricare (<span className="text-green-700">✓</span> applicati / <span className="text-amber-700">→</span> da aggiornare in MT5). Revisione mensile.</p>
       </div>
 
       {/* Aggregatore capitale per strategia — limite FTMO $400k */}
@@ -311,11 +372,30 @@ export default function SchedeContoPage() {
                                 : v?.byData
                                   ? <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-100 text-amber-800 align-middle">validata dai dati</span>
                                   : <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 text-slate-500 align-middle">in maturazione · size ridotta</span>}
-                                {v && !v.proven && v.byData && s && <button onClick={() => promote(s.id, s.name)} className="ml-1 text-[10px] px-1.5 py-0.5 rounded bg-green-600 text-white hover:bg-green-700 align-middle">Promuovi</button>}</div>
+                                {v && !v.proven && v.byData && s && <button onClick={() => promote(s.id, s.name)} className="ml-1 text-[10px] px-1.5 py-0.5 rounded bg-green-600 text-white hover:bg-green-700 align-middle">Promuovi</button>}
+                                {(() => {
+                                  const c = conformityOf(liveStats.get(Number(s?.magic)), testProf.get(Number(s?.magic)), v?.target ?? 40)
+                                  const badge = (txt: string, cls: string, tip: string) =>
+                                    <span key={txt} className={`ml-1 text-[10px] px-1.5 py-0.5 rounded align-middle ${cls}`} title={tip}>{txt}</span>
+                                  const out = []
+                                  if (c.freqState === 'alta') out.push(badge(`freq ${fmt(c.freqRatio, 1)}×`, 'bg-red-100 text-red-700',
+                                    `Opera ${fmt(c.freqRatio, 1)} volte piu' del backtest. Prima causa: EA fuori spec (filtro orario/giorni spento, EOD mancante). Seconda: regime che genera piu' segnali. Da verificare sugli input .mq5.`))
+                                  if (c.freqState === 'bassa') out.push(badge(`freq ${fmt(c.freqRatio, 1)}×`, 'bg-amber-100 text-amber-800',
+                                    `Opera meno del backtest: filtro troppo stretto, oppure regime sfavorevole al suo stile.`))
+                                  if (c.edgeState === 'sotto') out.push(badge(`edge ${fmt(c.edgeRatio! * 100, 0)}%`, 'bg-red-100 text-red-700',
+                                    `Rende il ${fmt(c.edgeRatio! * 100, 0)}% di quanto atteso dal backtest, su campione sufficiente. Fuori dalla banda ±20%: overfit o edge in decadimento.`))
+                                  if (c.edgeState === 'sopra') out.push(badge(`edge ${fmt(c.edgeRatio! * 100, 0)}%`, 'bg-blue-100 text-blue-700',
+                                    `Rende piu' del backtest. Non e' una buona notizia di per se': spesso e' regime favorevole, e rientrera' verso la media.`))
+                                  if (c.edgeState === 'ok' && c.freqState === 'ok') out.push(badge('in linea', 'bg-green-100 text-green-700', 'Frequenza ed edge dentro la banda attesa dal backtest.'))
+                                  return out
+                                })()}</div>
                               {v && !v.proven && (
                                 <div className="mt-1 flex items-center gap-2">
                                   <div className="h-1.5 w-24 rounded bg-slate-100 overflow-hidden"><div className={`h-full ${v.byData ? 'bg-amber-500' : 'bg-slate-400'}`} style={{ width: `${v.pct}%` }} /></div>
-                                  <span className="text-[10px] text-slate-400">{v.trades}/{v.target} trade{v.baseline > 0 ? ` (da 0, ${v.baseline} della versione precedente esclusi)` : ''}{v.pf != null ? ` · PF ${fmt(v.pf, 2)}` : ' · no PF'}</span>
+                                  <span className="text-[10px] text-slate-400">{v.trades}/{v.target} segnali{v.baseline > 0 ? ` (da 0, ${v.baseline} della versione precedente esclusi)` : ''}{v.pf != null ? ` · PF ${fmt(v.pf, 2)}` : ' · no PF'}{(() => {
+                                    const c = conformityOf(liveStats.get(Number(s?.magic)), testProf.get(Number(s?.magic)), v.target)
+                                    return c.months ? ` · ~${fmt(c.months, 0)} mesi` : ''
+                                  })()}</span>
                                 </div>
                               )}
                               <div className="text-xs text-slate-400">{s?.parameters}</div>
